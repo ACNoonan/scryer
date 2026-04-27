@@ -410,6 +410,83 @@ retry/quota logic in the proxy and none in the fetcher. Unit + wiremock
 tests cover read-only-safety, retry-on-transient, quota quarantine,
 and health-probe quarantine.
 
+## Helius `parseTransactions` exception — 2026-04-27 (locked)
+
+**Locked: fetcher calls Helius `parseTransactions` directly, bypassing
+the proxy.** This is the only Solana-side request path in v0.1 that
+does not go through `scryer-proxy`.
+
+### Why the exception
+
+`parseTransactions` (POST `https://api.helius.xyz/v0/transactions/?api-key=...`)
+is **not JSON-RPC**: it's a flat HTTPS endpoint with the API key in the
+URL, accepting up to 50 signatures per call and returning an array of
+parsed transactions with pre-decoded `accountData[].tokenBalanceChanges`.
+The proxy crate is currently scoped to JSON-RPC POST forwarding (per
+"Proxy crate v0.1 scope") — extending it to proxy arbitrary Helius
+enhanced-API paths is itself non-trivial and gives no immediate win
+beyond what the fetcher does directly.
+
+The performance gap is the load-bearing reason. On Helius free tier:
+- `parseTransactions` (50 sigs/call): ~100 tx/s sustained; a 7-day
+  Raydium pool window (~10K swaps) backfills in ~2 min.
+- `getTransaction` (1 sig/call, no JSON-RPC array batching on free
+  tier): ~3.5 tx/s; same window takes ~50 min.
+
+Doing this through the proxy with `getTransaction` would multiply
+HTTP round-trips by ~50× and slow each backfill into the hour-plus
+range, which is operationally painful for the consumer projects.
+
+### Constraints on the exception
+
+1. The fetcher owns its own retry / rate-limit / quota logic for
+   `parseTransactions` calls. Same pattern as the CEX fetchers
+   (Kraken etc.) — direct upstream, per-fetcher retry.
+2. Standard JSON-RPC calls (`getSignaturesForAddress`, `getSlot`,
+   etc.) still go through the proxy. The exception is scoped to
+   exactly one HTTP path: `POST /v0/transactions`.
+3. The `_source` column on emitted swap rows must be
+   `"helius:parseTransactions"` so that downstream consumers can tell
+   whether a row went through the proxy or not.
+4. When the user moves to a paid Helius plan (which unlocks JSON-RPC
+   array-batching for `getTransaction`), the fetcher migrates back to
+   proxy-routed `getTransaction` batches and this section is replaced
+   with a methodology row recording the move. Until then, the
+   exception is open.
+
+### Forward path
+
+`scryer-proxy` could grow a generic "Helius enhanced API" forwarder
+(separate route, separate retry envelope) as a v0.2+ feature. The
+performance gap stays the same either way; the only thing that moves
+is *where* the retry / quota logic lives. Defer until there's a second
+enhanced-API call worth proxying (e.g., `/v0/addresses/{addr}/transactions`).
+
+---
+
+## Cargo.lock policy — 2026-04-27 (locked)
+
+**Locked: `Cargo.lock` is committed.** The workspace ships binaries
+(`bin/scryer-proxy/scryer-proxy`, future `bin/scry`) so reproducible
+builds matter. `cargo`'s standard guidance for mixed-workspace
+(library + binary) projects is to commit the lockfile.
+
+Initial `Cargo.lock` was gitignored from the v0.0 scoping commit
+because the repo at that point had no source code. Now that there are
+binaries with cross-network dependencies (axum, reqwest, parquet),
+pinning specific versions across machines is load-bearing for "same
+behavior across the user's laptop, the launchd cron job, and any
+future CI".
+
+### Constraints
+
+1. `cargo update` runs are intentional — bump in a dedicated commit
+   with the change visible in the diff.
+2. Library crate consumers still pin loosely (`{ path = ... }` /
+   semver), so the lockfile only constrains the workspace's own
+   binaries, not anyone consuming `scryer-schema` etc. as a path
+   dependency.
+
 ---
 
 ## Decision log
@@ -424,6 +501,7 @@ without losing the rationale.
 | v0.1-phase-1 | 2026-04-27 | Cargo workspace scaffolded; `scryer-schema` lands with `swap.v1::Swap` + `trade.v1::Trade`, hand-rolled `arrow-rs` conversion (`LargeUtf8` + `Int64`/`Float64` to match existing `quant-work` parquet dialect), `_schema_version` / `_fetched_at` / `_source` / `_dedup_key` columns on every row, `dedup_key()` method, unit tests (round-trip, dedup-key stability, version pinning). Stubs only for the other 7 crates. | Phase 1 of the v0.1 migration plan. Schema crate is the first dependency for the store, proxy, and fetcher crates, so it lands on its own to give those phases a stable contract. |
 | v0.1-phase-2 | 2026-04-27 | `scryer-store` real implementation: `Dataset::write_swaps(venue, pool, &[Swap])` and `Dataset::write_trades(venue, pair, &[Trade])`, parquet-rs writer (Snappy compression), read-modify-write dedup per partition (existing wins), atomic tempfile+rename, UTC-day partitioning. New "Storage layer operational policy" section above locks the operational rules. | Phase 2 of v0.1. Establishes the only crate that writes to `dataset/`, with idempotency and reproducibility as load-bearing properties — fetchers (Phase 4 / 5) depend on this contract. |
 | v0.1-phase-3 | 2026-04-27 | Re-scoped from "fork relay-sol" to "pattern-lift" (see "Proxy crate v0.1 scope" section above). `scryer-proxy` lib crate + `bin/scryer-proxy` daemon land with: `ChainConfig` trait, JSON provider registry, axum HTTP listener, reqwest forwarder, retry-on-transient, consecutive-failure quota quarantine with exponential backoff, chain-config-driven health probe, Prometheus `/metrics`. WS / dashboard / OTel / doctor / replay / cloud-secrets / SQLite-cache / hot-reload / anomaly-z-score / hedging / tier-weighting / commitment-routing all explicitly deferred. | relay-sol is ~8K lines including substantial features that are not v0.1-blocking; literal fork would drag them in untested and force an immediate refactor across all 18 modules for chain-agnostic config. Pattern-lift keeps the architectural intent while shipping only what Phase 4 (Solana fetcher) needs to call against. |
+| v0.1-phase-4 | 2026-04-27 | `scryer-fetch-solana` real implementation: two-stage Raydium-v4 swap fetcher — `getSignaturesForAddress` paginated via the proxy + `parseTransactions` batched (50 sigs/call) directly to Helius. Vault-delta parser (Δsol·Δusdc < 0 ⇒ swap, same sign ⇒ LP op skipped) emits `swap.v1::Swap` rows with `_source = "helius:parseTransactions"`. Two new methodology sections: "Helius parseTransactions exception" locks the one bypass-the-proxy call path; "Cargo.lock policy" flips the lockfile from gitignored to committed (binaries demand reproducibility). | Phase 4 unblocks the `quant-work` LVR backfill that scryer was originally pitched for. Mirrors the algorithm from `quant-work/lvr/fetch_solana_swaps.py` (verified against GeckoTerminal at 100% probe-sample agreement) so cross-validation in Phase 5 (`scry import`) can compare row-by-row. |
 
 ---
 

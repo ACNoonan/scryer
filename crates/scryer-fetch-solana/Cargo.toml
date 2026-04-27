@@ -3,7 +3,20 @@ name = "scryer-fetch-solana"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Solana RPC fetchers — swaps, accounts, signatures. All requests routed through scryer-proxy on localhost."
+description = "Solana RPC fetchers — Raydium swap vault-delta extraction. Standard JSON-RPC routed through scryer-proxy; Helius parseTransactions called directly per the methodology log exception."
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+scryer-schema = { path = "../scryer-schema" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }

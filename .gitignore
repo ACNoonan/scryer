@@ -2,7 +2,9 @@
 target/
 **/*.rs.bk
 *.pdb
-Cargo.lock
+# Cargo.lock is committed: the workspace ships binaries
+# (bin/scryer-proxy, future bin/scry). See "Cargo.lock policy" in
+# methodology_log.md.
 
 # Data — rebuildable from upstream sources, never tracked
 dataset/
