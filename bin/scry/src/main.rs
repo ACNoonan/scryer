@@ -55,6 +55,8 @@ enum ImportTarget {
     /// Import yahoo.v1 OHLCV parquet(s) (e.g. soothsayer/data/raw/yahoo_*.parquet).
     /// Accepts multiple --input paths; merges them with dedup by (symbol, ts).
     Yahoo(import_cmd::YahooArgs),
+    /// Import earnings.v1 calendar parquet(s) (e.g. soothsayer/data/raw/earnings_*.parquet).
+    Earnings(import_cmd::EarningsArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -88,6 +90,7 @@ async fn main() -> Result<()> {
             ImportTarget::V5Tape(a) => import_cmd::run_v5_tape(a).await,
             ImportTarget::Redstone(a) => import_cmd::run_redstone(a).await,
             ImportTarget::Yahoo(a) => import_cmd::run_yahoo(a).await,
+            ImportTarget::Earnings(a) => import_cmd::run_earnings(a).await,
         },
         Command::Solana(c) => match c.target {
             SolanaTarget::Swaps(a) => solana_cmd::run_swaps(a).await,

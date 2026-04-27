@@ -21,7 +21,9 @@
 
 use arrow_array::RecordBatch;
 use arrow_schema::ArrowError;
-use scryer_schema::{kamino_scope, pyth, redstone, swap, trade, v5_tape, yahoo, FromArrowError};
+use scryer_schema::{
+    earnings, kamino_scope, pyth, redstone, swap, trade, v5_tape, yahoo, FromArrowError,
+};
 
 /// Time granularity of a dataset's partitioning. Each schema picks
 /// the granularity that right-sizes its partition files: too-fine
@@ -173,6 +175,27 @@ impl DatasetSchema for redstone::v1::Reading {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         redstone::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for earnings::v1::Event {
+    const DATA_TYPE: &'static str = "earnings";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("symbol");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Yearly;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        // earnings_date is days since unix epoch; year is what we
+        // partition by, so seconds at UTC midnight is sufficient.
+        (self.earnings_date as i64) * 86_400
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        earnings::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        earnings::v1::from_record_batch(batch)
     }
 }
 

@@ -18,6 +18,7 @@ use arrow_array::{
     TimestampMicrosecondArray, TimestampMillisecondArray,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use scryer_schema::earnings::v1 as earnings_v1;
 use scryer_schema::kamino_scope::v1 as kamino_scope_v1;
 use scryer_schema::pyth::v1 as pyth_v1;
 use scryer_schema::redstone::v1 as redstone_v1;
@@ -119,6 +120,16 @@ pub fn read_legacy_pyth_parquet(
     opts: &ImportOptions,
 ) -> Result<Vec<pyth_v1::Reading>, StoreError> {
     read_legacy_parquet(path, opts, extract_pyth)
+}
+
+/// Read earnings-calendar entries from one of the existing soothsayer
+/// `data/raw/earnings_*.parquet` cache files. Required columns:
+/// `symbol`, `earnings_date` (Date32).
+pub fn read_legacy_earnings_parquet(
+    path: &Path,
+    opts: &ImportOptions,
+) -> Result<Vec<earnings_v1::Event>, StoreError> {
+    read_legacy_parquet(path, opts, extract_earnings)
 }
 
 /// Read Yahoo Finance OHLCV bars from one of the existing soothsayer
@@ -350,6 +361,27 @@ fn extract_pyth(
             pyth_err,
             meta: Meta::new(
                 pyth_v1::SCHEMA_VERSION,
+                opts.fetched_at,
+                opts.source_label.clone(),
+            ),
+        });
+    }
+    Ok(out)
+}
+
+fn extract_earnings(
+    batch: &RecordBatch,
+    opts: &ImportOptions,
+) -> Result<Vec<earnings_v1::Event>, StoreError> {
+    let symbol = string_column(batch, "symbol")?;
+    let earnings_date = downcast::<Date32Array>(batch, "earnings_date")?;
+    let mut out = Vec::with_capacity(batch.num_rows());
+    for i in 0..batch.num_rows() {
+        out.push(earnings_v1::Event {
+            symbol: symbol.value(i),
+            earnings_date: earnings_date.value(i),
+            meta: Meta::new(
+                earnings_v1::SCHEMA_VERSION,
                 opts.fetched_at,
                 opts.source_label.clone(),
             ),
