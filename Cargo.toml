@@ -10,6 +10,7 @@ members = [
     "crates/scryer-schema",
     "crates/scryer-store",
     "bin/scryer-proxy",
+    "bin/scry",
 ]
 
 [workspace.package]

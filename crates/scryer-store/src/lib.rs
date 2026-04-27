@@ -12,6 +12,7 @@
 //! `methodology_log.md`'s "Storage layer operational policy" section.
 
 pub mod error;
+pub mod import;
 mod partition;
 
 use std::collections::BTreeMap;
