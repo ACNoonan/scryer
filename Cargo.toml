@@ -9,6 +9,7 @@ members = [
     "crates/scryer-fetch-dexagg",
     "crates/scryer-schema",
     "crates/scryer-store",
+    "bin/scryer-proxy",
 ]
 
 [workspace.package]
@@ -22,6 +23,10 @@ repository = "https://github.com/adamnoonan/scryer"
 arrow-array = "55"
 arrow-schema = "55"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tracing = "0.1"
+thiserror = "1"
 
 [profile.release]
 lto = "thin"

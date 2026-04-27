@@ -345,6 +345,71 @@ versions are: a change to any of them requires a new dated row here.
    uses `pool={...}`; trade.v1 uses `pair={...}`. The store crate
    knows which prefix per schema; fetcher crates pass the bare value.
 
+## Proxy crate v0.1 scope — 2026-04-27 (locked)
+
+The pre-flight migration plan said "fork relay-sol's proxy code into
+`scryer-proxy`". On Phase 3 inspection relay-sol turned out to be ~8K
+lines of Rust across 18 modules (it's the upstream AurFlow codebase
+plus user-side patches). Most of it is not v0.1-blocking and a literal
+fork would drag those features into the workspace untested while
+forcing an immediate refactor across all 18 modules for chain-agnostic
+config.
+
+**Locked: pattern-lift, not literal fork.** `scryer-proxy` is written
+fresh. Architectural patterns from relay-sol carry over (multi-provider
+weighted scoring, retry semantics, quota-detection conventions, the
+`providers.json` registry shape) but only the v0.1-blocking subset is
+in this codebase. Deferred features are listed below; each gets its
+own decision-log row when it lands.
+
+### In v0.1
+
+- `ChainConfig` trait abstracts the chain-specific bits (health-probe
+  method name, slot/block-height field name, finality semantics).
+  Solana implementation ships now; EVM lands in v0.3.
+- Provider registry loaded from `providers.json` (shape compatible
+  with relay-sol's, so existing user configs transfer).
+- Single localhost HTTP listener accepting JSON-RPC POST.
+- Read-only safety: mutating methods (`sendTransaction`, etc.) are
+  rejected at the router boundary.
+- Forwarder over reqwest.
+- Retry once on transient errors (HTTP 429 / 5xx / connect timeout)
+  preferring a different healthy provider.
+- Per-provider quota detection via 429 + provider-specific JSON-RPC
+  error code conventions; consecutive-failure quarantine with
+  exponential backoff until a probe succeeds.
+- Background health-probe loop, chain-config-driven (Solana =
+  `getSlot`, EVM = `eth_blockNumber`).
+- Prometheus `/metrics` endpoint: request count, latency histogram,
+  per-provider error rate, quarantine state.
+
+### Deferred to v0.2+
+
+Each gets a decision-log row when it lands; ordering is not committed.
+
+- WebSocket fan-out (`/ws` endpoint).
+- HTML / Chart.js dashboard.
+- OpenTelemetry tracing exporter.
+- Doctor CLI subcommand (`scryer-proxy doctor`).
+- Replay harness (`scryer-proxy replay bundle.json`).
+- Cloud secret managers (Vault / GCP / AWS) for header injection.
+- Anomaly z-score quarantine (v0.1 uses simple consecutive-failure
+  quarantine; z-score is an enhancement on top).
+- SQLite finalized-historical cache.
+- Hot-reload `/admin/providers` endpoint.
+- Adaptive hedging (parallel requests racing a backup provider).
+- Tier-aware weighting multipliers.
+- Commitment-aware routing (`processed`/`confirmed`/`finalized`
+  preference per-call).
+
+### Done definition for proxy in v0.1
+
+`scryer-fetch-solana` can run a 7-day Raydium swap backfill end-to-end
+against `scryer-proxy` on localhost, with all upstream-provider
+retry/quota logic in the proxy and none in the fetcher. Unit + wiremock
+tests cover read-only-safety, retry-on-transient, quota quarantine,
+and health-probe quarantine.
+
 ---
 
 ## Decision log
@@ -358,6 +423,7 @@ without losing the rationale.
 | v0.0 | 2026-04-27 | Repo created, README + methodology_log written | pre-flight before code, per CLAUDE.md hard rule #1 in the consumer repos |
 | v0.1-phase-1 | 2026-04-27 | Cargo workspace scaffolded; `scryer-schema` lands with `swap.v1::Swap` + `trade.v1::Trade`, hand-rolled `arrow-rs` conversion (`LargeUtf8` + `Int64`/`Float64` to match existing `quant-work` parquet dialect), `_schema_version` / `_fetched_at` / `_source` / `_dedup_key` columns on every row, `dedup_key()` method, unit tests (round-trip, dedup-key stability, version pinning). Stubs only for the other 7 crates. | Phase 1 of the v0.1 migration plan. Schema crate is the first dependency for the store, proxy, and fetcher crates, so it lands on its own to give those phases a stable contract. |
 | v0.1-phase-2 | 2026-04-27 | `scryer-store` real implementation: `Dataset::write_swaps(venue, pool, &[Swap])` and `Dataset::write_trades(venue, pair, &[Trade])`, parquet-rs writer (Snappy compression), read-modify-write dedup per partition (existing wins), atomic tempfile+rename, UTC-day partitioning. New "Storage layer operational policy" section above locks the operational rules. | Phase 2 of v0.1. Establishes the only crate that writes to `dataset/`, with idempotency and reproducibility as load-bearing properties — fetchers (Phase 4 / 5) depend on this contract. |
+| v0.1-phase-3 | 2026-04-27 | Re-scoped from "fork relay-sol" to "pattern-lift" (see "Proxy crate v0.1 scope" section above). `scryer-proxy` lib crate + `bin/scryer-proxy` daemon land with: `ChainConfig` trait, JSON provider registry, axum HTTP listener, reqwest forwarder, retry-on-transient, consecutive-failure quota quarantine with exponential backoff, chain-config-driven health probe, Prometheus `/metrics`. WS / dashboard / OTel / doctor / replay / cloud-secrets / SQLite-cache / hot-reload / anomaly-z-score / hedging / tier-weighting / commitment-routing all explicitly deferred. | relay-sol is ~8K lines including substantial features that are not v0.1-blocking; literal fork would drag them in untested and force an immediate refactor across all 18 modules for chain-agnostic config. Pattern-lift keeps the architectural intent while shipping only what Phase 4 (Solana fetcher) needs to call against. |
 
 ---
 

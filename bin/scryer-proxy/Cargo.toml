@@ -1,0 +1,18 @@
+[package]
+name = "scryer-proxy-bin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "scryer-proxy daemon — bootstraps registry + chain config + axum server."
+
+[[bin]]
+name = "scryer-proxy"
+path = "src/main.rs"
+
+[dependencies]
+scryer-proxy = { path = "../../crates/scryer-proxy" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+anyhow = "1"
+axum = "0.7"
