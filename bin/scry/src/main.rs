@@ -50,6 +50,8 @@ enum ImportTarget {
     Pyth(import_cmd::PythArgs),
     /// Import a v5_tape.v1 parquet (e.g. soothsayer/data/raw/v5_tape_*.parquet).
     V5Tape(import_cmd::V5TapeArgs),
+    /// Import a redstone.v1 parquet (e.g. soothsayer/data/processed/redstone_live_tape.parquet).
+    Redstone(import_cmd::RedstoneArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -81,6 +83,7 @@ async fn main() -> Result<()> {
             ImportTarget::KaminoScope(a) => import_cmd::run_kamino_scope(a).await,
             ImportTarget::Pyth(a) => import_cmd::run_pyth(a).await,
             ImportTarget::V5Tape(a) => import_cmd::run_v5_tape(a).await,
+            ImportTarget::Redstone(a) => import_cmd::run_redstone(a).await,
         },
         Command::Solana(c) => match c.target {
             SolanaTarget::Swaps(a) => solana_cmd::run_swaps(a).await,

@@ -13,10 +13,14 @@ use std::fs::File;
 use std::path::Path;
 use std::time::SystemTime;
 
-use arrow_array::{Array, Float64Array, Int64Array, LargeStringArray, RecordBatch, StringArray};
+use arrow_array::{
+    Array, Float64Array, Int64Array, LargeStringArray, RecordBatch, StringArray,
+    TimestampMicrosecondArray,
+};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use scryer_schema::kamino_scope::v1 as kamino_scope_v1;
 use scryer_schema::pyth::v1 as pyth_v1;
+use scryer_schema::redstone::v1 as redstone_v1;
 use scryer_schema::swap::v1 as swap_v1;
 use scryer_schema::trade::v1 as trade_v1;
 use scryer_schema::v5_tape::v1 as v5_tape_v1;
@@ -114,6 +118,20 @@ pub fn read_legacy_pyth_parquet(
     opts: &ImportOptions,
 ) -> Result<Vec<pyth_v1::Reading>, StoreError> {
     read_legacy_parquet(path, opts, extract_pyth)
+}
+
+/// Read RedStone Live tape rows from the existing soothsayer
+/// `redstone_live_tape.parquet` (single rolling file). Required
+/// columns: `poll_ts`, `poll_label`, `symbol`, `redstone_ts`,
+/// `minutes_age`, `value`, `provider_pubkey`, `signature`,
+/// `source_json`, `permaweb_tx`, `raw_json`. The two timestamp
+/// columns are arrow `Timestamp(Microsecond, UTC)` in the source
+/// and stay that way in the scryer output.
+pub fn read_legacy_redstone_parquet(
+    path: &Path,
+    opts: &ImportOptions,
+) -> Result<Vec<redstone_v1::Reading>, StoreError> {
+    read_legacy_parquet(path, opts, extract_redstone)
 }
 
 /// Read V5 tape rows from an existing soothsayer
@@ -320,6 +338,46 @@ fn extract_pyth(
             pyth_err,
             meta: Meta::new(
                 pyth_v1::SCHEMA_VERSION,
+                opts.fetched_at,
+                opts.source_label.clone(),
+            ),
+        });
+    }
+    Ok(out)
+}
+
+fn extract_redstone(
+    batch: &RecordBatch,
+    opts: &ImportOptions,
+) -> Result<Vec<redstone_v1::Reading>, StoreError> {
+    let poll_ts = downcast::<TimestampMicrosecondArray>(batch, "poll_ts")?;
+    let poll_label = string_column(batch, "poll_label")?;
+    let symbol = string_column(batch, "symbol")?;
+    let redstone_ts = downcast::<TimestampMicrosecondArray>(batch, "redstone_ts")?;
+    let minutes_age = downcast::<Int64Array>(batch, "minutes_age")?;
+    let value = downcast::<Float64Array>(batch, "value")?;
+    let provider_pubkey = string_column(batch, "provider_pubkey")?;
+    let signature = string_column(batch, "signature")?;
+    let source_json = string_column(batch, "source_json")?;
+    let permaweb_tx = string_column(batch, "permaweb_tx")?;
+    let raw_json = string_column(batch, "raw_json")?;
+
+    let mut out = Vec::with_capacity(batch.num_rows());
+    for i in 0..batch.num_rows() {
+        out.push(redstone_v1::Reading {
+            poll_ts: poll_ts.value(i),
+            poll_label: poll_label.value(i),
+            symbol: symbol.value(i),
+            redstone_ts: redstone_ts.value(i),
+            minutes_age: minutes_age.value(i),
+            value: value.value(i),
+            provider_pubkey: provider_pubkey.value(i),
+            signature: signature.value(i),
+            source_json: source_json.value(i),
+            permaweb_tx: permaweb_tx.value(i),
+            raw_json: raw_json.value(i),
+            meta: Meta::new(
+                redstone_v1::SCHEMA_VERSION,
                 opts.fetched_at,
                 opts.source_label.clone(),
             ),

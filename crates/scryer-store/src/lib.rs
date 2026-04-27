@@ -57,6 +57,7 @@ pub mod venue {
     pub const KRAKEN: &str = "kraken";
     pub const KAMINO_SCOPE: &str = "kamino_scope";
     pub const PYTH: &str = "pyth";
+    pub const REDSTONE: &str = "redstone";
     /// Soothsayer experiment v5 (Chainlink + Jupiter joined tape).
     /// Per the methodology log "Soothsayer venue versioning" section,
     /// each soothsayer experiment iteration gets its own venue

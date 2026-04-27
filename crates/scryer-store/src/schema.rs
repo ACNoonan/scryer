@@ -21,7 +21,7 @@
 
 use arrow_array::RecordBatch;
 use arrow_schema::ArrowError;
-use scryer_schema::{kamino_scope, pyth, swap, trade, v5_tape, FromArrowError};
+use scryer_schema::{kamino_scope, pyth, redstone, swap, trade, v5_tape, FromArrowError};
 
 pub trait DatasetSchema: Sized + Clone {
     /// Path segment between `{venue}/` and `v{N}/`.
@@ -111,6 +111,25 @@ impl DatasetSchema for pyth::v1::Reading {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         pyth::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for redstone::v1::Reading {
+    const DATA_TYPE: &'static str = "oracle_tape";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        // redstone_ts is microseconds since unix epoch.
+        self.redstone_ts / 1_000_000
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        redstone::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        redstone::v1::from_record_batch(batch)
     }
 }
 

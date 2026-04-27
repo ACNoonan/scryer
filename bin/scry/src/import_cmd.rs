@@ -2,10 +2,11 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use scryer_schema::{kamino_scope, pyth, swap, trade, v5_tape};
+use scryer_schema::{kamino_scope, pyth, redstone, swap, trade, v5_tape};
 use scryer_store::import::{
-    read_legacy_kamino_scope_parquet, read_legacy_pyth_parquet, read_legacy_swap_parquet,
-    read_legacy_trade_parquet, read_legacy_v5_tape_parquet, ImportOptions,
+    read_legacy_kamino_scope_parquet, read_legacy_pyth_parquet, read_legacy_redstone_parquet,
+    read_legacy_swap_parquet, read_legacy_trade_parquet, read_legacy_v5_tape_parquet,
+    ImportOptions,
 };
 use scryer_store::Dataset;
 
@@ -189,6 +190,43 @@ pub async fn run_v5_tape(args: V5TapeArgs) -> Result<()> {
         .with_context(|| format!("writing to {}", args.dataset.display()))?;
     println!(
         "v5_tape imported: rows_added={} rows_deduped={} partitions_written={}",
+        stats.rows_added, stats.rows_deduped, stats.partitions_written
+    );
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+pub struct RedstoneArgs {
+    #[arg(long)]
+    input: PathBuf,
+    #[arg(long, default_value = scryer_store::venue::REDSTONE)]
+    venue: String,
+    #[arg(long)]
+    source: Option<String>,
+    #[arg(long, default_value = "./dataset")]
+    dataset: PathBuf,
+}
+
+pub async fn run_redstone(args: RedstoneArgs) -> Result<()> {
+    let label = args.source.clone().unwrap_or_else(|| default_source(&args.input));
+    let opts = ImportOptions::from_file_mtime(&args.input, &label)
+        .with_context(|| format!("reading mtime of {}", args.input.display()))?;
+    tracing::info!(
+        path = %args.input.display(),
+        source = %opts.source_label,
+        fetched_at = opts.fetched_at,
+        "loading legacy redstone parquet"
+    );
+    let rows = read_legacy_redstone_parquet(&args.input, &opts)
+        .with_context(|| format!("reading {}", args.input.display()))?;
+    tracing::info!(rows = rows.len(), "loaded; writing to dataset");
+
+    let ds = Dataset::new(&args.dataset);
+    let stats = ds
+        .write::<redstone::v1::Reading>(&args.venue, None, &rows)
+        .with_context(|| format!("writing to {}", args.dataset.display()))?;
+    println!(
+        "redstone imported: rows_added={} rows_deduped={} partitions_written={}",
         stats.rows_added, stats.rows_deduped, stats.partitions_written
     );
     Ok(())

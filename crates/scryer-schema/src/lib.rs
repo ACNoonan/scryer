@@ -23,6 +23,7 @@ pub mod error;
 pub mod kamino_scope;
 pub mod meta;
 pub mod pyth;
+pub mod redstone;
 pub mod swap;
 pub mod trade;
 pub mod v5_tape;
