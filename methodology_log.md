@@ -290,6 +290,61 @@ consumer once scryer v0.1 ships:
 These rules will be added to consumer-repo CLAUDE.md files at v0.1
 ship time.
 
+## Storage layer operational policy — 2026-04-27 (locked)
+
+The pre-flight locks the *layout* (`dataset/{venue}/{data_type}/v{N}/...`,
+`_dedup_key` semantics, reproducibility-modulo-`_fetched_at`); this
+section locks the *operational* choices the `scryer-store` crate makes
+within that layout. These decisions are append-only the same way schema
+versions are: a change to any of them requires a new dated row here.
+
+1. **Dedup is read-modify-write per partition.** When writing rows to a
+   partition file, the store loads the existing file (if any), merges
+   incoming rows by `_dedup_key`, and writes back atomically. Existing
+   rows win on collision: a re-fetch never overwrites a previously-
+   written row's `_fetched_at` or `_source`. Reason: this keeps the
+   on-disk file content-deterministic across re-fetches and makes
+   "modulo `_fetched_at`" reproducibility *literally true* (existing
+   rows preserve their original `_fetched_at`, only genuinely new rows
+   get the current run's timestamp). Day-sized partitions are small
+   enough that the rewrite cost is acceptable for v0.1 — Kraken at ~50K
+   trades/day, Raydium at ~10K swaps/day per pool.
+
+2. **Sort order on disk: `_dedup_key` ascending.** Schema-agnostic and
+   trivially deterministic. Consumers that need a different sort order
+   sort at read time. Falls out for free from a `BTreeMap` keyed by
+   `_dedup_key` in the merge step.
+
+3. **Atomic writes via tempfile + rename.** Each partition file is
+   written to `{path}.tmp` (in the same directory as the destination,
+   so `rename` is a same-filesystem atomic op on POSIX), `fsync`'d, and
+   `std::fs::rename`'d into place. A `scry` process killed mid-write
+   leaves the previous version intact; partial `.tmp` files are
+   cleaned up on the next write to the same partition.
+
+4. **Partitioning is by UTC calendar day, derived from `ts`.** swap.v1
+   `ts` is i64 unix seconds; trade.v1 `ts` is f64 unix seconds (cast to
+   i64 for date computation — sub-second precision doesn't change the
+   calendar day). No "block time vs slot" distinction for swaps/trades —
+   they're event-stream data, partitioned by event time only. Pool
+   snapshots (v0.2+) follow the pre-flight's "bucket by block time" rule.
+
+5. **`_dedup_key` is a stored column, not just an in-memory field.**
+   Despite being recomputable from `dedup_key()`, the column lives on
+   disk so DuckDB / pandas / Python consumers can dedup without a
+   dependency on the Rust schema crate.
+
+6. **Partition path values are written literally — no URL encoding.**
+   Hive-style `pool={base58}` and `pair={alphanumeric}` only. v0.1
+   identifiers (Solana base58 pool addresses, Kraken pair codes like
+   `XSOLZUSD`) contain no path-unsafe characters. If a future schema
+   needs values with `/` or `=` in them, that's a new methodology row,
+   not silent escaping.
+
+7. **Per-schema venue prefix is the caller's responsibility.** swap.v1
+   uses `pool={...}`; trade.v1 uses `pair={...}`. The store crate
+   knows which prefix per schema; fetcher crates pass the bare value.
+
 ---
 
 ## Decision log
@@ -302,6 +357,7 @@ without losing the rationale.
 |---------|------|--------|--------|
 | v0.0 | 2026-04-27 | Repo created, README + methodology_log written | pre-flight before code, per CLAUDE.md hard rule #1 in the consumer repos |
 | v0.1-phase-1 | 2026-04-27 | Cargo workspace scaffolded; `scryer-schema` lands with `swap.v1::Swap` + `trade.v1::Trade`, hand-rolled `arrow-rs` conversion (`LargeUtf8` + `Int64`/`Float64` to match existing `quant-work` parquet dialect), `_schema_version` / `_fetched_at` / `_source` / `_dedup_key` columns on every row, `dedup_key()` method, unit tests (round-trip, dedup-key stability, version pinning). Stubs only for the other 7 crates. | Phase 1 of the v0.1 migration plan. Schema crate is the first dependency for the store, proxy, and fetcher crates, so it lands on its own to give those phases a stable contract. |
+| v0.1-phase-2 | 2026-04-27 | `scryer-store` real implementation: `Dataset::write_swaps(venue, pool, &[Swap])` and `Dataset::write_trades(venue, pair, &[Trade])`, parquet-rs writer (Snappy compression), read-modify-write dedup per partition (existing wins), atomic tempfile+rename, UTC-day partitioning. New "Storage layer operational policy" section above locks the operational rules. | Phase 2 of v0.1. Establishes the only crate that writes to `dataset/`, with idempotency and reproducibility as load-bearing properties — fetchers (Phase 4 / 5) depend on this contract. |
 
 ---
 
