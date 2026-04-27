@@ -19,6 +19,7 @@ use scryer_schema::kamino_scope::v1 as kamino_scope_v1;
 use scryer_schema::pyth::v1 as pyth_v1;
 use scryer_schema::swap::v1 as swap_v1;
 use scryer_schema::trade::v1 as trade_v1;
+use scryer_schema::v5_tape::v1 as v5_tape_v1;
 use scryer_schema::{FromArrowError, Meta};
 
 use crate::error::StoreError;
@@ -127,6 +128,31 @@ pub fn read_legacy_pyth_parquet(
     for batch in reader {
         let batch = batch?;
         out.extend(extract_pyth(&batch, opts)?);
+    }
+    Ok(out)
+}
+
+/// Read V5 tape rows from an existing soothsayer
+/// `v5_tape_YYYYMMDD.parquet`. The Chainlink half (`cl_*` columns)
+/// and `basis_bp` are nullable in the schema and tolerated as
+/// pyarrow's `null` dtype in legacy files (which is what pandas
+/// emits when the column is fully null — typical off-hours when
+/// US markets are closed).
+pub fn read_legacy_v5_tape_parquet(
+    path: &Path,
+    opts: &ImportOptions,
+) -> Result<Vec<v5_tape_v1::Reading>, StoreError> {
+    let file = File::open(path).map_err(|e| StoreError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let reader = builder.build()?;
+
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch?;
+        out.extend(extract_v5_tape(&batch, opts)?);
     }
     Ok(out)
 }
@@ -342,6 +368,165 @@ fn extract_pyth(
         });
     }
     Ok(out)
+}
+
+fn extract_v5_tape(
+    batch: &RecordBatch,
+    opts: &ImportOptions,
+) -> Result<Vec<v5_tape_v1::Reading>, StoreError> {
+    let poll_ts = downcast::<Int64Array>(batch, "poll_ts")?;
+    let symbol = string_column(batch, "symbol")?;
+    let cl_obs_ts = optional_int64_column(batch, "cl_obs_ts")?;
+    let cl_age_s = optional_int64_column(batch, "cl_age_s")?;
+    let cl_tokenized_px = optional_float64_column(batch, "cl_tokenized_px")?;
+    let cl_venue_px = optional_float64_column(batch, "cl_venue_px")?;
+    let cl_market_status = optional_string_column(batch, "cl_market_status")?;
+    let cl_err = string_column(batch, "cl_err")?;
+    let jup_bid = downcast::<Float64Array>(batch, "jup_bid")?;
+    let jup_ask = downcast::<Float64Array>(batch, "jup_ask")?;
+    let jup_mid = downcast::<Float64Array>(batch, "jup_mid")?;
+    let spread_bp = downcast::<Float64Array>(batch, "spread_bp")?;
+    let jup_err = string_column(batch, "jup_err")?;
+    let basis_bp = optional_float64_column(batch, "basis_bp")?;
+
+    let mut out = Vec::with_capacity(batch.num_rows());
+    for i in 0..batch.num_rows() {
+        out.push(v5_tape_v1::Reading {
+            poll_ts: poll_ts.value(i),
+            symbol: symbol.value(i),
+            cl_obs_ts: cl_obs_ts.value(i),
+            cl_age_s: cl_age_s.value(i),
+            cl_tokenized_px: cl_tokenized_px.value(i),
+            cl_venue_px: cl_venue_px.value(i),
+            cl_market_status: cl_market_status.value(i),
+            cl_err: cl_err.value(i),
+            jup_bid: jup_bid.value(i),
+            jup_ask: jup_ask.value(i),
+            jup_mid: jup_mid.value(i),
+            spread_bp: spread_bp.value(i),
+            jup_err: jup_err.value(i),
+            basis_bp: basis_bp.value(i),
+            meta: Meta::new(
+                v5_tape_v1::SCHEMA_VERSION,
+                opts.fetched_at,
+                opts.source_label.clone(),
+            ),
+        });
+    }
+    Ok(out)
+}
+
+/// Optional-column accessors that tolerate pyarrow's `null` dtype.
+/// Pandas writes a column with `null` dtype when every value in it
+/// is null (e.g. v5_tape's `cl_*` columns when the US market was
+/// closed for the entire file's window). The expected typed array
+/// is also accepted, with per-row nullability handled by `is_null`.
+
+enum OptionalInt64<'a> {
+    Typed(&'a Int64Array),
+    AllNull,
+}
+impl<'a> OptionalInt64<'a> {
+    fn value(&self, i: usize) -> Option<i64> {
+        match self {
+            Self::Typed(a) if !a.is_null(i) => Some(a.value(i)),
+            _ => None,
+        }
+    }
+}
+
+enum OptionalFloat64<'a> {
+    Typed(&'a Float64Array),
+    AllNull,
+}
+impl<'a> OptionalFloat64<'a> {
+    fn value(&self, i: usize) -> Option<f64> {
+        match self {
+            Self::Typed(a) if !a.is_null(i) => Some(a.value(i)),
+            _ => None,
+        }
+    }
+}
+
+enum OptionalStr<'a> {
+    Large(&'a LargeStringArray),
+    Std(&'a StringArray),
+    AllNull,
+}
+impl<'a> OptionalStr<'a> {
+    fn value(&self, i: usize) -> Option<String> {
+        match self {
+            Self::Large(a) if !a.is_null(i) => Some(a.value(i).to_string()),
+            Self::Std(a) if !a.is_null(i) => Some(a.value(i).to_string()),
+            _ => None,
+        }
+    }
+}
+
+fn optional_int64_column<'a>(
+    batch: &'a RecordBatch,
+    name: &'static str,
+) -> Result<OptionalInt64<'a>, StoreError> {
+    let idx = batch
+        .schema()
+        .index_of(name)
+        .map_err(|_| StoreError::Schema(FromArrowError::MissingColumn(name)))?;
+    let col = batch.column(idx);
+    if col.data_type() == &arrow_schema::DataType::Null {
+        return Ok(OptionalInt64::AllNull);
+    }
+    if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
+        return Ok(OptionalInt64::Typed(a));
+    }
+    Err(StoreError::Schema(FromArrowError::WrongType {
+        column: name,
+        expected: "Int64 or Null",
+    }))
+}
+
+fn optional_float64_column<'a>(
+    batch: &'a RecordBatch,
+    name: &'static str,
+) -> Result<OptionalFloat64<'a>, StoreError> {
+    let idx = batch
+        .schema()
+        .index_of(name)
+        .map_err(|_| StoreError::Schema(FromArrowError::MissingColumn(name)))?;
+    let col = batch.column(idx);
+    if col.data_type() == &arrow_schema::DataType::Null {
+        return Ok(OptionalFloat64::AllNull);
+    }
+    if let Some(a) = col.as_any().downcast_ref::<Float64Array>() {
+        return Ok(OptionalFloat64::Typed(a));
+    }
+    Err(StoreError::Schema(FromArrowError::WrongType {
+        column: name,
+        expected: "Float64 or Null",
+    }))
+}
+
+fn optional_string_column<'a>(
+    batch: &'a RecordBatch,
+    name: &'static str,
+) -> Result<OptionalStr<'a>, StoreError> {
+    let idx = batch
+        .schema()
+        .index_of(name)
+        .map_err(|_| StoreError::Schema(FromArrowError::MissingColumn(name)))?;
+    let col = batch.column(idx);
+    if col.data_type() == &arrow_schema::DataType::Null {
+        return Ok(OptionalStr::AllNull);
+    }
+    if let Some(a) = col.as_any().downcast_ref::<LargeStringArray>() {
+        return Ok(OptionalStr::Large(a));
+    }
+    if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
+        return Ok(OptionalStr::Std(a));
+    }
+    Err(StoreError::Schema(FromArrowError::WrongType {
+        column: name,
+        expected: "LargeUtf8 or Utf8 or Null",
+    }))
 }
 
 fn downcast<'a, A: arrow_array::Array + 'static>(

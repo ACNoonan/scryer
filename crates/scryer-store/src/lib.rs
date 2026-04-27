@@ -24,7 +24,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
-use scryer_schema::{kamino_scope, pyth, swap, trade};
+use scryer_schema::{kamino_scope, pyth, swap, trade, v5_tape};
 
 pub use error::StoreError;
 pub use partition::UtcDay;
@@ -37,6 +37,12 @@ pub mod venue {
     pub const KRAKEN: &str = "kraken";
     pub const KAMINO_SCOPE: &str = "kamino_scope";
     pub const PYTH: &str = "pyth";
+    /// Soothsayer-internal V5-experiment tape (Chainlink + Jupiter
+    /// joined). The data isn't a "real" upstream venue but a
+    /// soothsayer-side construction; using `soothsayer` as the venue
+    /// makes that explicit and leaves room for `chainlink` /
+    /// `jupiter` / `chainlink_jupiter` venues if we later split.
+    pub const SOOTHSAYER: &str = "soothsayer";
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -229,6 +235,48 @@ impl Dataset {
         );
         read_pyth_partition(&path)
     }
+
+    /// Write V5 tape readings to per-day partitions under
+    /// `{root}/{venue}/v5_tape/v1/year=Y/month=M/day=D.parquet`.
+    /// Note: data_type is `v5_tape` (not `oracle_tape`) because this
+    /// is a soothsayer-experiment artifact, not an upstream oracle
+    /// tape — see venue::SOOTHSAYER comment for the naming choice.
+    pub fn write_v5_tape(
+        &self,
+        venue: &str,
+        rows: &[v5_tape::v1::Reading],
+    ) -> Result<WriteStats, StoreError> {
+        if rows.is_empty() {
+            return Ok(WriteStats::default());
+        }
+        let by_day = group_by_day(rows, |r| r.poll_ts)?;
+        let mut stats = WriteStats::default();
+        for (day, day_rows) in by_day {
+            let path = partition::partition_path_no_key(
+                &self.root, venue, "v5_tape", 1, day,
+            );
+            let existing = read_v5_tape_partition(&path)?;
+            let new_count = day_rows.len();
+            let (merged, deduped) = merge_dedup(existing, day_rows, |r| r.dedup_key());
+            let batch = v5_tape::v1::to_record_batch(&merged)?;
+            write_batch_atomic(&path, &batch)?;
+            stats.partitions_written += 1;
+            stats.rows_added += new_count - deduped;
+            stats.rows_deduped += deduped;
+        }
+        Ok(stats)
+    }
+
+    pub fn read_v5_tape(
+        &self,
+        venue: &str,
+        day: UtcDay,
+    ) -> Result<Vec<v5_tape::v1::Reading>, StoreError> {
+        let path = partition::partition_path_no_key(
+            &self.root, venue, "v5_tape", 1, day,
+        );
+        read_v5_tape_partition(&path)
+    }
 }
 
 fn group_by_day<T, F>(rows: &[T], get_ts: F) -> Result<BTreeMap<UtcDay, Vec<T>>, StoreError>
@@ -321,6 +369,18 @@ fn read_pyth_partition(path: &Path) -> Result<Vec<pyth::v1::Reading>, StoreError
     for batch in reader {
         let batch = batch.map_err(parquet::errors::ParquetError::from)?;
         out.extend(pyth::v1::from_record_batch(&batch)?);
+    }
+    Ok(out)
+}
+
+fn read_v5_tape_partition(path: &Path) -> Result<Vec<v5_tape::v1::Reading>, StoreError> {
+    let Some(reader) = open_parquet_reader(path)? else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch.map_err(parquet::errors::ParquetError::from)?;
+        out.extend(v5_tape::v1::from_record_batch(&batch)?);
     }
     Ok(out)
 }

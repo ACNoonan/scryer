@@ -25,6 +25,7 @@ pub mod meta;
 pub mod pyth;
 pub mod swap;
 pub mod trade;
+pub mod v5_tape;
 
 pub use error::FromArrowError;
 pub use meta::Meta;

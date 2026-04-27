@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use scryer_store::import::{
     read_legacy_kamino_scope_parquet, read_legacy_pyth_parquet, read_legacy_swap_parquet,
-    read_legacy_trade_parquet, ImportOptions,
+    read_legacy_trade_parquet, read_legacy_v5_tape_parquet, ImportOptions,
 };
 use scryer_store::Dataset;
 
@@ -149,6 +149,46 @@ pub async fn run_pyth(args: PythArgs) -> Result<()> {
         .with_context(|| format!("writing to {}", args.dataset.display()))?;
     println!(
         "pyth imported: rows_added={} rows_deduped={} partitions_written={}",
+        stats.rows_added, stats.rows_deduped, stats.partitions_written
+    );
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+pub struct V5TapeArgs {
+    #[arg(long)]
+    input: PathBuf,
+    /// Venue string under `dataset/`. Defaults to `soothsayer`
+    /// since V5 tape is a soothsayer-experiment artifact, not an
+    /// upstream oracle (see venue::SOOTHSAYER comment in scryer-store).
+    #[arg(long, default_value = scryer_store::venue::SOOTHSAYER)]
+    venue: String,
+    #[arg(long)]
+    source: Option<String>,
+    #[arg(long, default_value = "./dataset")]
+    dataset: PathBuf,
+}
+
+pub async fn run_v5_tape(args: V5TapeArgs) -> Result<()> {
+    let label = args.source.clone().unwrap_or_else(|| default_source(&args.input));
+    let opts = ImportOptions::from_file_mtime(&args.input, &label)
+        .with_context(|| format!("reading mtime of {}", args.input.display()))?;
+    tracing::info!(
+        path = %args.input.display(),
+        source = %opts.source_label,
+        fetched_at = opts.fetched_at,
+        "loading legacy v5_tape parquet"
+    );
+    let rows = read_legacy_v5_tape_parquet(&args.input, &opts)
+        .with_context(|| format!("reading {}", args.input.display()))?;
+    tracing::info!(rows = rows.len(), "loaded; writing to dataset");
+
+    let ds = Dataset::new(&args.dataset);
+    let stats = ds
+        .write_v5_tape(&args.venue, &rows)
+        .with_context(|| format!("writing to {}", args.dataset.display()))?;
+    println!(
+        "v5_tape imported: rows_added={} rows_deduped={} partitions_written={}",
         stats.rows_added, stats.rows_deduped, stats.partitions_written
     );
     Ok(())
