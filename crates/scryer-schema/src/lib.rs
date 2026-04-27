@@ -19,6 +19,7 @@
 //! load-bearing — `LargeUtf8` matches the existing `quant-work` parquet
 //! dialect, and the choice is easier to keep stable when it's explicit.
 
+pub mod backed;
 pub mod earnings;
 pub mod error;
 pub mod kamino_scope;

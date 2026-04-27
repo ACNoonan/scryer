@@ -18,6 +18,7 @@ use arrow_array::{
     TimestampMicrosecondArray, TimestampMillisecondArray,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use scryer_schema::backed::v1 as backed_v1;
 use scryer_schema::earnings::v1 as earnings_v1;
 use scryer_schema::kamino_scope::v1 as kamino_scope_v1;
 use scryer_schema::pyth::v1 as pyth_v1;
@@ -120,6 +121,21 @@ pub fn read_legacy_pyth_parquet(
     opts: &ImportOptions,
 ) -> Result<Vec<pyth_v1::Reading>, StoreError> {
     read_legacy_parquet(path, opts, extract_pyth)
+}
+
+/// Read Backed Finance corp-action commits from the existing
+/// soothsayer `data/processed/backed_corp_actions.parquet`. The
+/// `_enriched` derivative parquet is intentionally NOT supported
+/// here — it's a soothsayer-side computed dataset, not raw upstream
+/// data. Required columns: `detected_at`, `repo`, `commit_sha`,
+/// `commit_date` (string `YYYY-MM-DD`, parsed to Date32 here),
+/// `commit_url`, `title`, `underlying` (nullable),
+/// `all_tickers_json`, `action_type`, `snippet`.
+pub fn read_legacy_backed_parquet(
+    path: &Path,
+    opts: &ImportOptions,
+) -> Result<Vec<backed_v1::Action>, StoreError> {
+    read_legacy_parquet(path, opts, extract_backed)
 }
 
 /// Read earnings-calendar entries from one of the existing soothsayer
@@ -361,6 +377,54 @@ fn extract_pyth(
             pyth_err,
             meta: Meta::new(
                 pyth_v1::SCHEMA_VERSION,
+                opts.fetched_at,
+                opts.source_label.clone(),
+            ),
+        });
+    }
+    Ok(out)
+}
+
+fn extract_backed(
+    batch: &RecordBatch,
+    opts: &ImportOptions,
+) -> Result<Vec<backed_v1::Action>, StoreError> {
+    let detected_at = downcast::<TimestampMicrosecondArray>(batch, "detected_at")?;
+    let repo = string_column(batch, "repo")?;
+    let commit_sha = string_column(batch, "commit_sha")?;
+    let commit_date_str = string_column(batch, "commit_date")?;
+    let commit_url = string_column(batch, "commit_url")?;
+    let title = string_column(batch, "title")?;
+    let all_tickers_json = string_column(batch, "all_tickers_json")?;
+    let action_type = string_column(batch, "action_type")?;
+    let snippet = string_column(batch, "snippet")?;
+    let underlying = optional_string_column(batch, "underlying")?;
+
+    // Date32 epoch = 1970-01-01.
+    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("static date");
+
+    let mut out = Vec::with_capacity(batch.num_rows());
+    for i in 0..batch.num_rows() {
+        let date_s = commit_date_str.value(i);
+        let parsed = chrono::NaiveDate::parse_from_str(&date_s, "%Y-%m-%d").map_err(|_| {
+            StoreError::Arrow(arrow_schema::ArrowError::ComputeError(format!(
+                "could not parse commit_date `{date_s}` as YYYY-MM-DD"
+            )))
+        })?;
+        let commit_date = parsed.signed_duration_since(epoch).num_days() as i32;
+        out.push(backed_v1::Action {
+            detected_at: detected_at.value(i),
+            repo: repo.value(i),
+            commit_sha: commit_sha.value(i),
+            commit_date,
+            commit_url: commit_url.value(i),
+            title: title.value(i),
+            underlying: underlying.value(i),
+            all_tickers_json: all_tickers_json.value(i),
+            action_type: action_type.value(i),
+            snippet: snippet.value(i),
+            meta: Meta::new(
+                backed_v1::SCHEMA_VERSION,
                 opts.fetched_at,
                 opts.source_label.clone(),
             ),

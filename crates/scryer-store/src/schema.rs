@@ -22,7 +22,7 @@
 use arrow_array::RecordBatch;
 use arrow_schema::ArrowError;
 use scryer_schema::{
-    earnings, kamino_scope, pyth, redstone, swap, trade, v5_tape, yahoo, FromArrowError,
+    backed, earnings, kamino_scope, pyth, redstone, swap, trade, v5_tape, yahoo, FromArrowError,
 };
 
 /// Time granularity of a dataset's partitioning. Each schema picks
@@ -175,6 +175,32 @@ impl DatasetSchema for redstone::v1::Reading {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         redstone::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for backed::v1::Action {
+    const DATA_TYPE: &'static str = "corp_actions";
+    /// No partition key — `repo` strings contain `/` and the data
+    /// volume is small (~13 commits to date). Yearly partitioning by
+    /// `commit_date` year keeps the on-disk layout simple.
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Yearly;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        // Partition by commit_date (the day the corp action commit
+        // landed in the GitHub repo), not detected_at (the day we
+        // happened to scrape it). Consumer queries are
+        // commit-timeline-shaped, not scrape-timeline-shaped.
+        (self.commit_date as i64) * 86_400
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        backed::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        backed::v1::from_record_batch(batch)
     }
 }
 
