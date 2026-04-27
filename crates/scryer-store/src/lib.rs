@@ -1,7 +1,9 @@
 //! `scryer-store` — partition layout, parquet writer, dedup enforcement.
 //!
-//! The only crate that writes to `dataset/`. Owns the canonical layout
-//! `dataset/{venue}/{data_type}/v{N}/{key_prefix}={key}/year=Y/month=M/day=D.parquet`
+//! The only crate that writes to `dataset/`. Owns the canonical layouts
+//! - keyed: `dataset/{venue}/{data_type}/v{N}/{prefix}={key}/year=Y/month=M/day=D.parquet`
+//! - event-stream: `dataset/{venue}/{data_type}/v{N}/year=Y/month=M/day=D.parquet`
+//!
 //! and enforces per-schema `_dedup_key` semantics at write time:
 //! re-fetching an already-pulled window produces identical parquet
 //! content modulo `_fetched_at` (which is preserved per-row from the
@@ -10,10 +12,28 @@
 //! Operational decisions — read-modify-write dedup, sort-by-`_dedup_key`,
 //! atomic tempfile + rename, UTC-day partitioning — are locked in
 //! `methodology_log.md`'s "Storage layer operational policy" section.
+//!
+//! # Generic API
+//!
+//! ```no_run
+//! use scryer_store::{venue, Dataset};
+//! use scryer_schema::swap::v1::Swap;
+//!
+//! let ds = Dataset::new("./dataset");
+//! let rows: Vec<Swap> = vec![/* ... */];
+//! // Keyed schema (swap.v1 expects pool=...):
+//! let _ = ds.write::<Swap>(venue::SOLANA_RAYDIUM_V4, Some("POOL_ADDR"), &rows);
+//!
+//! use scryer_schema::pyth::v1::Reading as PythReading;
+//! let pyth_rows: Vec<PythReading> = vec![/* ... */];
+//! // Event-stream schema (pyth.v1 is no-key):
+//! let _ = ds.write::<PythReading>(venue::PYTH, None, &pyth_rows);
+//! ```
 
 pub mod error;
 pub mod import;
 mod partition;
+pub mod schema;
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -24,25 +44,25 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
-use scryer_schema::{kamino_scope, pyth, swap, trade, v5_tape};
 
 pub use error::StoreError;
 pub use partition::UtcDay;
+pub use schema::DatasetSchema;
 
 /// Venue-string conventions for v0.1. Fetcher crates pass these to
-/// `Dataset::write_*`; future venues add new constants here rather than
+/// `Dataset::write`; future venues add new constants here rather than
 /// inventing their own at the call site.
 pub mod venue {
     pub const SOLANA_RAYDIUM_V4: &str = "solana_raydium_v4";
     pub const KRAKEN: &str = "kraken";
     pub const KAMINO_SCOPE: &str = "kamino_scope";
     pub const PYTH: &str = "pyth";
-    /// Soothsayer-internal V5-experiment tape (Chainlink + Jupiter
-    /// joined). The data isn't a "real" upstream venue but a
-    /// soothsayer-side construction; using `soothsayer` as the venue
-    /// makes that explicit and leaves room for `chainlink` /
-    /// `jupiter` / `chainlink_jupiter` venues if we later split.
-    pub const SOOTHSAYER: &str = "soothsayer";
+    /// Soothsayer experiment v5 (Chainlink + Jupiter joined tape).
+    /// Per the methodology log "Soothsayer venue versioning" section,
+    /// each soothsayer experiment iteration gets its own venue
+    /// (`soothsayer_v5`, `soothsayer_v6`, ...) so iterations can run
+    /// in parallel without colliding.
+    pub const SOOTHSAYER_V5: &str = "soothsayer_v5";
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -65,118 +85,30 @@ impl Dataset {
         &self.root
     }
 
-    /// Write swaps to per-day partitions under
-    /// `{root}/{venue}/swaps/v1/pool={pool}/year=Y/month=M/day=D.parquet`.
-    /// Read-modify-write semantics: existing rows with the same
-    /// `_dedup_key` win on collision.
-    pub fn write_swaps(
+    /// Write rows of any [`DatasetSchema`] to per-day partitions under
+    /// `{root}/{venue}/{S::DATA_TYPE}/v{S::SCHEMA_MAJOR}/...`. The
+    /// `partition_key` argument is required if `S::PARTITION_KEY_PREFIX`
+    /// is `Some(_)`, must be `None` otherwise; mismatches return
+    /// [`StoreError::PartitionKeyMismatch`]. Same read-modify-write
+    /// dedup semantics regardless of partition shape.
+    pub fn write<S: DatasetSchema>(
         &self,
         venue: &str,
-        pool: &str,
-        rows: &[swap::v1::Swap],
+        partition_key: Option<&str>,
+        rows: &[S],
     ) -> Result<WriteStats, StoreError> {
+        validate_partition_key::<S>(partition_key)?;
         if rows.is_empty() {
             return Ok(WriteStats::default());
         }
-        let by_day = group_by_day(rows, |r| r.ts)?;
+        let by_day = group_by_day(rows, |r| r.ts_unix_seconds())?;
         let mut stats = WriteStats::default();
         for (day, day_rows) in by_day {
-            let path = partition::partition_path(
-                &self.root, venue, "swaps", 1, "pool", pool, day,
-            );
-            let existing = read_swap_partition(&path)?;
-            let new_count = day_rows.len();
-            let (merged, deduped) = merge_dedup(existing, day_rows, |s| s.dedup_key());
-            let batch = swap::v1::to_record_batch(&merged)?;
-            write_batch_atomic(&path, &batch)?;
-            stats.partitions_written += 1;
-            stats.rows_added += new_count - deduped;
-            stats.rows_deduped += deduped;
-        }
-        Ok(stats)
-    }
-
-    /// Write trades to per-day partitions under
-    /// `{root}/{venue}/trades/v1/pair={pair}/year=Y/month=M/day=D.parquet`.
-    /// Same read-modify-write semantics as `write_swaps`.
-    pub fn write_trades(
-        &self,
-        venue: &str,
-        pair: &str,
-        rows: &[trade::v1::Trade],
-    ) -> Result<WriteStats, StoreError> {
-        if rows.is_empty() {
-            return Ok(WriteStats::default());
-        }
-        let by_day = group_by_day(rows, |r| r.ts as i64)?;
-        let mut stats = WriteStats::default();
-        for (day, day_rows) in by_day {
-            let path = partition::partition_path(
-                &self.root, venue, "trades", 1, "pair", pair, day,
-            );
-            let existing = read_trade_partition(&path)?;
-            let new_count = day_rows.len();
-            let (merged, deduped) = merge_dedup(existing, day_rows, |t| t.dedup_key());
-            let batch = trade::v1::to_record_batch(&merged)?;
-            write_batch_atomic(&path, &batch)?;
-            stats.partitions_written += 1;
-            stats.rows_added += new_count - deduped;
-            stats.rows_deduped += deduped;
-        }
-        Ok(stats)
-    }
-
-    /// Read all swap rows from a single partition file. Returns an empty
-    /// vec if the file does not exist. Useful for consumers that want to
-    /// load a specific day in Rust (Python consumers should use pyarrow
-    /// directly).
-    pub fn read_swaps(
-        &self,
-        venue: &str,
-        pool: &str,
-        day: UtcDay,
-    ) -> Result<Vec<swap::v1::Swap>, StoreError> {
-        let path = partition::partition_path(
-            &self.root, venue, "swaps", 1, "pool", pool, day,
-        );
-        read_swap_partition(&path)
-    }
-
-    pub fn read_trades(
-        &self,
-        venue: &str,
-        pair: &str,
-        day: UtcDay,
-    ) -> Result<Vec<trade::v1::Trade>, StoreError> {
-        let path = partition::partition_path(
-            &self.root, venue, "trades", 1, "pair", pair, day,
-        );
-        read_trade_partition(&path)
-    }
-
-    /// Write Kamino Scope tape readings to per-day partitions under
-    /// `{root}/{venue}/oracle_tape/v1/year=Y/month=M/day=D.parquet`.
-    /// No key prefix in the partition path — all symbols share one
-    /// daily file, matching the existing soothsayer tape layout.
-    /// Same read-modify-write dedup semantics as `write_swaps`.
-    pub fn write_kamino_scope(
-        &self,
-        venue: &str,
-        rows: &[kamino_scope::v1::Reading],
-    ) -> Result<WriteStats, StoreError> {
-        if rows.is_empty() {
-            return Ok(WriteStats::default());
-        }
-        let by_day = group_by_day(rows, |r| r.scope_unix_ts)?;
-        let mut stats = WriteStats::default();
-        for (day, day_rows) in by_day {
-            let path = partition::partition_path_no_key(
-                &self.root, venue, "oracle_tape", 1, day,
-            );
-            let existing = read_kamino_scope_partition(&path)?;
+            let path = partition_path_for::<S>(&self.root, venue, partition_key, day);
+            let existing = read_partition::<S>(&path)?;
             let new_count = day_rows.len();
             let (merged, deduped) = merge_dedup(existing, day_rows, |r| r.dedup_key());
-            let batch = kamino_scope::v1::to_record_batch(&merged)?;
+            let batch = S::to_record_batch(&merged)?;
             write_batch_atomic(&path, &batch)?;
             stats.partitions_written += 1;
             stats.rows_added += new_count - deduped;
@@ -185,98 +117,63 @@ impl Dataset {
         Ok(stats)
     }
 
-    pub fn read_kamino_scope(
+    /// Read all rows from a single partition file. Returns an empty
+    /// vec if the file does not exist. Useful for consumers that want
+    /// to load a specific day in Rust (Python consumers should use
+    /// pyarrow directly).
+    pub fn read<S: DatasetSchema>(
         &self,
         venue: &str,
+        partition_key: Option<&str>,
         day: UtcDay,
-    ) -> Result<Vec<kamino_scope::v1::Reading>, StoreError> {
-        let path = partition::partition_path_no_key(
-            &self.root, venue, "oracle_tape", 1, day,
-        );
-        read_kamino_scope_partition(&path)
+    ) -> Result<Vec<S>, StoreError> {
+        validate_partition_key::<S>(partition_key)?;
+        let path = partition_path_for::<S>(&self.root, venue, partition_key, day);
+        read_partition::<S>(&path)
     }
+}
 
-    /// Write Pyth Hermes tape readings to per-day partitions under
-    /// `{root}/{venue}/oracle_tape/v1/year=Y/month=M/day=D.parquet`.
-    /// All 32 streams (8 symbols × 4 sessions) share one daily file.
-    pub fn write_pyth(
-        &self,
-        venue: &str,
-        rows: &[pyth::v1::Reading],
-    ) -> Result<WriteStats, StoreError> {
-        if rows.is_empty() {
-            return Ok(WriteStats::default());
-        }
-        let by_day = group_by_day(rows, |r| r.poll_unix)?;
-        let mut stats = WriteStats::default();
-        for (day, day_rows) in by_day {
-            let path = partition::partition_path_no_key(
-                &self.root, venue, "oracle_tape", 1, day,
-            );
-            let existing = read_pyth_partition(&path)?;
-            let new_count = day_rows.len();
-            let (merged, deduped) = merge_dedup(existing, day_rows, |r| r.dedup_key());
-            let batch = pyth::v1::to_record_batch(&merged)?;
-            write_batch_atomic(&path, &batch)?;
-            stats.partitions_written += 1;
-            stats.rows_added += new_count - deduped;
-            stats.rows_deduped += deduped;
-        }
-        Ok(stats)
+fn validate_partition_key<S: DatasetSchema>(provided: Option<&str>) -> Result<(), StoreError> {
+    match (S::PARTITION_KEY_PREFIX, provided) {
+        (Some(_), Some(_)) | (None, None) => Ok(()),
+        _ => Err(StoreError::PartitionKeyMismatch {
+            schema: std::any::type_name::<S>(),
+            expected_prefix: S::PARTITION_KEY_PREFIX,
+            provided_key: provided.is_some(),
+        }),
     }
+}
 
-    pub fn read_pyth(
-        &self,
-        venue: &str,
-        day: UtcDay,
-    ) -> Result<Vec<pyth::v1::Reading>, StoreError> {
-        let path = partition::partition_path_no_key(
-            &self.root, venue, "oracle_tape", 1, day,
-        );
-        read_pyth_partition(&path)
+fn partition_path_for<S: DatasetSchema>(
+    root: &Path,
+    venue: &str,
+    partition_key: Option<&str>,
+    day: UtcDay,
+) -> PathBuf {
+    match (S::PARTITION_KEY_PREFIX, partition_key) {
+        (Some(prefix), Some(key)) => partition::partition_path(
+            root,
+            venue,
+            S::DATA_TYPE,
+            S::SCHEMA_MAJOR,
+            prefix,
+            key,
+            day,
+        ),
+        _ => partition::partition_path_no_key(root, venue, S::DATA_TYPE, S::SCHEMA_MAJOR, day),
     }
+}
 
-    /// Write V5 tape readings to per-day partitions under
-    /// `{root}/{venue}/v5_tape/v1/year=Y/month=M/day=D.parquet`.
-    /// Note: data_type is `v5_tape` (not `oracle_tape`) because this
-    /// is a soothsayer-experiment artifact, not an upstream oracle
-    /// tape — see venue::SOOTHSAYER comment for the naming choice.
-    pub fn write_v5_tape(
-        &self,
-        venue: &str,
-        rows: &[v5_tape::v1::Reading],
-    ) -> Result<WriteStats, StoreError> {
-        if rows.is_empty() {
-            return Ok(WriteStats::default());
-        }
-        let by_day = group_by_day(rows, |r| r.poll_ts)?;
-        let mut stats = WriteStats::default();
-        for (day, day_rows) in by_day {
-            let path = partition::partition_path_no_key(
-                &self.root, venue, "v5_tape", 1, day,
-            );
-            let existing = read_v5_tape_partition(&path)?;
-            let new_count = day_rows.len();
-            let (merged, deduped) = merge_dedup(existing, day_rows, |r| r.dedup_key());
-            let batch = v5_tape::v1::to_record_batch(&merged)?;
-            write_batch_atomic(&path, &batch)?;
-            stats.partitions_written += 1;
-            stats.rows_added += new_count - deduped;
-            stats.rows_deduped += deduped;
-        }
-        Ok(stats)
+fn read_partition<S: DatasetSchema>(path: &Path) -> Result<Vec<S>, StoreError> {
+    let Some(reader) = open_parquet_reader(path)? else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch.map_err(parquet::errors::ParquetError::from)?;
+        out.extend(S::from_record_batch(&batch)?);
     }
-
-    pub fn read_v5_tape(
-        &self,
-        venue: &str,
-        day: UtcDay,
-    ) -> Result<Vec<v5_tape::v1::Reading>, StoreError> {
-        let path = partition::partition_path_no_key(
-            &self.root, venue, "v5_tape", 1, day,
-        );
-        read_v5_tape_partition(&path)
-    }
+    Ok(out)
 }
 
 fn group_by_day<T, F>(rows: &[T], get_ts: F) -> Result<BTreeMap<UtcDay, Vec<T>>, StoreError>
@@ -321,68 +218,6 @@ where
         }
     }
     (by_key.into_values().collect(), deduped)
-}
-
-fn read_swap_partition(path: &Path) -> Result<Vec<swap::v1::Swap>, StoreError> {
-    let Some(reader) = open_parquet_reader(path)? else {
-        return Ok(Vec::new());
-    };
-    let mut out = Vec::new();
-    for batch in reader {
-        let batch = batch.map_err(parquet::errors::ParquetError::from)?;
-        out.extend(swap::v1::from_record_batch(&batch)?);
-    }
-    Ok(out)
-}
-
-fn read_trade_partition(path: &Path) -> Result<Vec<trade::v1::Trade>, StoreError> {
-    let Some(reader) = open_parquet_reader(path)? else {
-        return Ok(Vec::new());
-    };
-    let mut out = Vec::new();
-    for batch in reader {
-        let batch = batch.map_err(parquet::errors::ParquetError::from)?;
-        out.extend(trade::v1::from_record_batch(&batch)?);
-    }
-    Ok(out)
-}
-
-fn read_kamino_scope_partition(
-    path: &Path,
-) -> Result<Vec<kamino_scope::v1::Reading>, StoreError> {
-    let Some(reader) = open_parquet_reader(path)? else {
-        return Ok(Vec::new());
-    };
-    let mut out = Vec::new();
-    for batch in reader {
-        let batch = batch.map_err(parquet::errors::ParquetError::from)?;
-        out.extend(kamino_scope::v1::from_record_batch(&batch)?);
-    }
-    Ok(out)
-}
-
-fn read_pyth_partition(path: &Path) -> Result<Vec<pyth::v1::Reading>, StoreError> {
-    let Some(reader) = open_parquet_reader(path)? else {
-        return Ok(Vec::new());
-    };
-    let mut out = Vec::new();
-    for batch in reader {
-        let batch = batch.map_err(parquet::errors::ParquetError::from)?;
-        out.extend(pyth::v1::from_record_batch(&batch)?);
-    }
-    Ok(out)
-}
-
-fn read_v5_tape_partition(path: &Path) -> Result<Vec<v5_tape::v1::Reading>, StoreError> {
-    let Some(reader) = open_parquet_reader(path)? else {
-        return Ok(Vec::new());
-    };
-    let mut out = Vec::new();
-    for batch in reader {
-        let batch = batch.map_err(parquet::errors::ParquetError::from)?;
-        out.extend(v5_tape::v1::from_record_batch(&batch)?);
-    }
-    Ok(out)
 }
 
 fn open_parquet_reader(

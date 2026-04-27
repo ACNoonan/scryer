@@ -54,6 +54,33 @@ impl ImportOptions {
     }
 }
 
+/// Generic legacy-parquet reader. Each per-schema public reader is a
+/// thin wrapper that supplies the schema-specific `extract` closure
+/// (which knows the column names and types). The shared body owns
+/// the file open / `ParquetRecordBatchReaderBuilder` boilerplate.
+pub fn read_legacy_parquet<T, F>(
+    path: &Path,
+    opts: &ImportOptions,
+    extract: F,
+) -> Result<Vec<T>, StoreError>
+where
+    F: Fn(&RecordBatch, &ImportOptions) -> Result<Vec<T>, StoreError>,
+{
+    let file = File::open(path).map_err(|e| StoreError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let reader = builder.build()?;
+
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch?;
+        out.extend(extract(&batch, opts)?);
+    }
+    Ok(out)
+}
+
 /// Read swap rows from an existing parquet file with the legacy
 /// quant-work shape. Required columns: `signature`, `slot`, `ts`,
 /// `side`, `sol_amount`, `usdc_amount`, `price`. Extra columns
@@ -63,19 +90,7 @@ pub fn read_legacy_swap_parquet(
     path: &Path,
     opts: &ImportOptions,
 ) -> Result<Vec<swap_v1::Swap>, StoreError> {
-    let file = File::open(path).map_err(|e| StoreError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let reader = builder.build()?;
-
-    let mut out = Vec::new();
-    for batch in reader {
-        let batch = batch?;
-        out.extend(extract_swaps(&batch, opts)?);
-    }
-    Ok(out)
+    read_legacy_parquet(path, opts, extract_swaps)
 }
 
 /// Read Kamino Scope tape rows from an existing soothsayer
@@ -83,78 +98,33 @@ pub fn read_legacy_swap_parquet(
 /// `symbol`, `feed_pda`, `chain_id`, `scope_value_raw`, `scope_exp`,
 /// `scope_price`, `scope_slot`, `scope_unix_ts`, `scope_age_s`. The
 /// `scope_err` column is read if present (nullable) and tolerated as
-/// either `LargeUtf8` (typical) or pyarrow's `null` dtype (when the
-/// column is fully null in the source — in which case all rows get
-/// `scope_err = None`).
+/// either `LargeUtf8` (typical) or pyarrow's `null` dtype.
 pub fn read_legacy_kamino_scope_parquet(
     path: &Path,
     opts: &ImportOptions,
 ) -> Result<Vec<kamino_scope_v1::Reading>, StoreError> {
-    let file = File::open(path).map_err(|e| StoreError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let reader = builder.build()?;
-
-    let mut out = Vec::new();
-    for batch in reader {
-        let batch = batch?;
-        out.extend(extract_kamino_scope(&batch, opts)?);
-    }
-    Ok(out)
+    read_legacy_parquet(path, opts, extract_kamino_scope)
 }
 
 /// Read Pyth Hermes tape rows from an existing soothsayer
-/// `pyth_xstock_tape_YYYYMMDD.parquet`. Required columns: `poll_ts`,
-/// `poll_unix`, `symbol`, `session`, `pyth_feed_id`, `pyth_price`,
-/// `pyth_conf`, `pyth_expo`, `pyth_publish_time`, `pyth_age_s`,
-/// `pyth_half_width_bps`, `pyth_ema_price`, `pyth_ema_conf`,
-/// `pyth_ema_publish_time`, `pyth_ema_half_width_bps`, `slot`. The
-/// `pyth_err` column is read if present (nullable) and tolerates
-/// pyarrow's `null` dtype.
+/// `pyth_xstock_tape_YYYYMMDD.parquet`. Same null-dtype tolerance
+/// for `pyth_err` as kamino_scope's `scope_err`.
 pub fn read_legacy_pyth_parquet(
     path: &Path,
     opts: &ImportOptions,
 ) -> Result<Vec<pyth_v1::Reading>, StoreError> {
-    let file = File::open(path).map_err(|e| StoreError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let reader = builder.build()?;
-
-    let mut out = Vec::new();
-    for batch in reader {
-        let batch = batch?;
-        out.extend(extract_pyth(&batch, opts)?);
-    }
-    Ok(out)
+    read_legacy_parquet(path, opts, extract_pyth)
 }
 
 /// Read V5 tape rows from an existing soothsayer
 /// `v5_tape_YYYYMMDD.parquet`. The Chainlink half (`cl_*` columns)
 /// and `basis_bp` are nullable in the schema and tolerated as
-/// pyarrow's `null` dtype in legacy files (which is what pandas
-/// emits when the column is fully null — typical off-hours when
-/// US markets are closed).
+/// pyarrow's `null` dtype in legacy files.
 pub fn read_legacy_v5_tape_parquet(
     path: &Path,
     opts: &ImportOptions,
 ) -> Result<Vec<v5_tape_v1::Reading>, StoreError> {
-    let file = File::open(path).map_err(|e| StoreError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let reader = builder.build()?;
-
-    let mut out = Vec::new();
-    for batch in reader {
-        let batch = batch?;
-        out.extend(extract_v5_tape(&batch, opts)?);
-    }
-    Ok(out)
+    read_legacy_parquet(path, opts, extract_v5_tape)
 }
 
 /// Same as `read_legacy_swap_parquet` but for `trade.v1`. Required
@@ -164,19 +134,7 @@ pub fn read_legacy_trade_parquet(
     path: &Path,
     opts: &ImportOptions,
 ) -> Result<Vec<trade_v1::Trade>, StoreError> {
-    let file = File::open(path).map_err(|e| StoreError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let reader = builder.build()?;
-
-    let mut out = Vec::new();
-    for batch in reader {
-        let batch = batch?;
-        out.extend(extract_trades(&batch, opts)?);
-    }
-    Ok(out)
+    read_legacy_parquet(path, opts, extract_trades)
 }
 
 fn extract_swaps(

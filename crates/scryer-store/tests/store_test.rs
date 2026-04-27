@@ -47,14 +47,14 @@ fn write_swaps_round_trip() {
         swap_row("sigB", TS_DAY_A, 1_777_200_000),
     ];
     let stats = ds
-        .write_swaps(venue::SOLANA_RAYDIUM_V4, POOL, &rows)
+        .write::<swap::Swap>(venue::SOLANA_RAYDIUM_V4, Some(POOL), &rows)
         .unwrap();
     assert_eq!(stats.partitions_written, 1);
     assert_eq!(stats.rows_added, 2);
     assert_eq!(stats.rows_deduped, 0);
 
     let day = UtcDay::from_unix_seconds(TS_DAY_A).unwrap();
-    let mut read = ds.read_swaps(venue::SOLANA_RAYDIUM_V4, POOL, day).unwrap();
+    let mut read = ds.read::<swap::Swap>(venue::SOLANA_RAYDIUM_V4, Some(POOL), day).unwrap();
     read.sort_by(|a, b| a.signature.cmp(&b.signature));
     let mut expected = rows;
     expected.sort_by(|a, b| a.signature.cmp(&b.signature));
@@ -71,7 +71,7 @@ fn write_swaps_is_idempotent_and_byte_stable() {
         swap_row("sigB", TS_DAY_A, 1_777_200_000),
     ];
 
-    let s1 = ds.write_swaps(venue::SOLANA_RAYDIUM_V4, POOL, &rows).unwrap();
+    let s1 = ds.write::<swap::Swap>(venue::SOLANA_RAYDIUM_V4, Some(POOL), &rows).unwrap();
     let day = UtcDay::from_unix_seconds(TS_DAY_A).unwrap();
     let path = tmp
         .path()
@@ -82,7 +82,7 @@ fn write_swaps_is_idempotent_and_byte_stable() {
         .join(day.relative_parquet_path());
     let bytes_after_first = std::fs::read(&path).unwrap();
 
-    let s2 = ds.write_swaps(venue::SOLANA_RAYDIUM_V4, POOL, &rows).unwrap();
+    let s2 = ds.write::<swap::Swap>(venue::SOLANA_RAYDIUM_V4, Some(POOL), &rows).unwrap();
     let bytes_after_second = std::fs::read(&path).unwrap();
 
     assert_eq!(s1.rows_added, 2);
@@ -102,17 +102,17 @@ fn write_swaps_dedup_preserves_existing_fetched_at() {
 
     // First write: fetched_at = 1000.
     let first = vec![swap_row("sigA", TS_DAY_A, 1_000)];
-    ds.write_swaps(venue::SOLANA_RAYDIUM_V4, POOL, &first).unwrap();
+    ds.write::<swap::Swap>(venue::SOLANA_RAYDIUM_V4, Some(POOL), &first).unwrap();
 
     // Re-fetch with the *same* signature but a later fetched_at and a
     // different source string. The store must keep the original.
     let mut conflict = swap_row("sigA", TS_DAY_A, 9_999);
     conflict.meta.source = "different-source".to_string();
-    ds.write_swaps(venue::SOLANA_RAYDIUM_V4, POOL, &[conflict])
+    ds.write::<swap::Swap>(venue::SOLANA_RAYDIUM_V4, Some(POOL), &[conflict])
         .unwrap();
 
     let day = UtcDay::from_unix_seconds(TS_DAY_A).unwrap();
-    let read = ds.read_swaps(venue::SOLANA_RAYDIUM_V4, POOL, day).unwrap();
+    let read = ds.read::<swap::Swap>(venue::SOLANA_RAYDIUM_V4, Some(POOL), day).unwrap();
     assert_eq!(read.len(), 1);
     assert_eq!(read[0].meta.fetched_at, 1_000);
     assert_eq!(read[0].meta.source, "helius:parseTransactions");
@@ -128,7 +128,7 @@ fn write_swaps_splits_across_utc_days() {
         swap_row("sigB", TS_DAY_B, 1_777_200_000),
     ];
     let stats = ds
-        .write_swaps(venue::SOLANA_RAYDIUM_V4, POOL, &rows)
+        .write::<swap::Swap>(venue::SOLANA_RAYDIUM_V4, Some(POOL), &rows)
         .unwrap();
     assert_eq!(stats.partitions_written, 2);
     assert_eq!(stats.rows_added, 2);
@@ -136,8 +136,8 @@ fn write_swaps_splits_across_utc_days() {
     let day_a = UtcDay::from_unix_seconds(TS_DAY_A).unwrap();
     let day_b = UtcDay::from_unix_seconds(TS_DAY_B).unwrap();
     assert_ne!(day_a, day_b);
-    let read_a = ds.read_swaps(venue::SOLANA_RAYDIUM_V4, POOL, day_a).unwrap();
-    let read_b = ds.read_swaps(venue::SOLANA_RAYDIUM_V4, POOL, day_b).unwrap();
+    let read_a = ds.read::<swap::Swap>(venue::SOLANA_RAYDIUM_V4, Some(POOL), day_a).unwrap();
+    let read_b = ds.read::<swap::Swap>(venue::SOLANA_RAYDIUM_V4, Some(POOL), day_b).unwrap();
     assert_eq!(read_a.len(), 1);
     assert_eq!(read_b.len(), 1);
     assert_eq!(read_a[0].signature, "sigA");
@@ -148,7 +148,7 @@ fn write_swaps_splits_across_utc_days() {
 fn write_swaps_empty_is_noop() {
     let tmp = tempfile::tempdir().unwrap();
     let ds = Dataset::new(tmp.path());
-    let stats = ds.write_swaps(venue::SOLANA_RAYDIUM_V4, POOL, &[]).unwrap();
+    let stats = ds.write::<swap::Swap>(venue::SOLANA_RAYDIUM_V4, Some(POOL), &[]).unwrap();
     assert_eq!(stats, scryer_store::WriteStats::default());
     // No venue directory created.
     assert!(!tmp.path().join(venue::SOLANA_RAYDIUM_V4).exists());
@@ -159,17 +159,17 @@ fn write_swaps_partial_overlap_adds_only_new_rows() {
     let tmp = tempfile::tempdir().unwrap();
     let ds = Dataset::new(tmp.path());
 
-    ds.write_swaps(
+    ds.write::<swap::Swap>(
         venue::SOLANA_RAYDIUM_V4,
-        POOL,
+        Some(POOL),
         &[swap_row("sigA", TS_DAY_A, 1_000), swap_row("sigB", TS_DAY_A, 1_000)],
     )
     .unwrap();
 
     let s = ds
-        .write_swaps(
+        .write::<swap::Swap>(
             venue::SOLANA_RAYDIUM_V4,
-            POOL,
+            Some(POOL),
             &[
                 swap_row("sigB", TS_DAY_A, 2_000), // duplicate
                 swap_row("sigC", TS_DAY_A, 2_000), // new
@@ -180,7 +180,7 @@ fn write_swaps_partial_overlap_adds_only_new_rows() {
     assert_eq!(s.rows_deduped, 1);
 
     let day = UtcDay::from_unix_seconds(TS_DAY_A).unwrap();
-    let read = ds.read_swaps(venue::SOLANA_RAYDIUM_V4, POOL, day).unwrap();
+    let read = ds.read::<swap::Swap>(venue::SOLANA_RAYDIUM_V4, Some(POOL), day).unwrap();
     assert_eq!(read.len(), 3);
     let sigs: Vec<_> = read.iter().map(|s| s.signature.as_str()).collect();
     assert_eq!(sigs, vec!["sigA", "sigB", "sigC"]); // sorted by dedup_key (= signature)
@@ -190,9 +190,9 @@ fn write_swaps_partial_overlap_adds_only_new_rows() {
 fn no_orphan_tmp_files_remain_after_successful_write() {
     let tmp = tempfile::tempdir().unwrap();
     let ds = Dataset::new(tmp.path());
-    ds.write_swaps(
+    ds.write::<swap::Swap>(
         venue::SOLANA_RAYDIUM_V4,
-        POOL,
+        Some(POOL),
         &[swap_row("sigA", TS_DAY_A, 1_000)],
     )
     .unwrap();
@@ -235,15 +235,15 @@ fn write_trades_round_trip_and_idempotent() {
         trade_row(26_108_086, 1_761_523_200.611_046_5, 1_761_600_000),
         trade_row(26_108_087, 1_761_523_202.342_817_8, 1_761_600_000),
     ];
-    let s1 = ds.write_trades(venue::KRAKEN, PAIR, &rows).unwrap();
-    let s2 = ds.write_trades(venue::KRAKEN, PAIR, &rows).unwrap();
+    let s1 = ds.write::<trade::Trade>(venue::KRAKEN, Some(PAIR), &rows).unwrap();
+    let s2 = ds.write::<trade::Trade>(venue::KRAKEN, Some(PAIR), &rows).unwrap();
     assert_eq!(s1.rows_added, 2);
     assert_eq!(s1.rows_deduped, 0);
     assert_eq!(s2.rows_added, 0);
     assert_eq!(s2.rows_deduped, 2);
 
     let day = UtcDay::from_unix_seconds(1_761_523_200).unwrap();
-    let mut read = ds.read_trades(venue::KRAKEN, PAIR, day).unwrap();
+    let mut read = ds.read::<trade::Trade>(venue::KRAKEN, Some(PAIR), day).unwrap();
     read.sort_by_key(|t| t.trade_id);
     let mut expected = rows;
     expected.sort_by_key(|t| t.trade_id);
@@ -255,19 +255,19 @@ fn write_trades_dedup_preserves_existing_meta() {
     let tmp = tempfile::tempdir().unwrap();
     let ds = Dataset::new(tmp.path());
 
-    ds.write_trades(
+    ds.write::<trade::Trade>(
         venue::KRAKEN,
-        PAIR,
+        Some(PAIR),
         &[trade_row(42, 1_761_523_200.5, 1_000)],
     )
     .unwrap();
 
     let mut conflict = trade_row(42, 1_761_523_200.5, 9_999);
     conflict.price = 999.99; // would-be overwrite
-    ds.write_trades(venue::KRAKEN, PAIR, &[conflict]).unwrap();
+    ds.write::<trade::Trade>(venue::KRAKEN, Some(PAIR), &[conflict]).unwrap();
 
     let day = UtcDay::from_unix_seconds(1_761_523_200).unwrap();
-    let read = ds.read_trades(venue::KRAKEN, PAIR, day).unwrap();
+    let read = ds.read::<trade::Trade>(venue::KRAKEN, Some(PAIR), day).unwrap();
     assert_eq!(read.len(), 1);
     assert_eq!(read[0].meta.fetched_at, 1_000);
     assert_eq!(read[0].price, 200.06);
@@ -277,9 +277,9 @@ fn write_trades_dedup_preserves_existing_meta() {
 fn partition_path_format_matches_methodology() {
     let tmp = tempfile::tempdir().unwrap();
     let ds = Dataset::new(tmp.path());
-    ds.write_swaps(
+    ds.write::<swap::Swap>(
         venue::SOLANA_RAYDIUM_V4,
-        POOL,
+        Some(POOL),
         &[swap_row("sigA", TS_DAY_A, 1_000)],
     )
     .unwrap();

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use scryer_fetch_solana::{mints, PoolMetadata, SwapsFetcher, SwapsFetcherConfig};
+use scryer_schema::swap;
 use scryer_store::Dataset;
 use serde::Deserialize;
 
@@ -88,8 +89,8 @@ pub async fn run_swaps(args: SwapsArgs) -> Result<()> {
 
     let ds = Dataset::new(&args.dataset);
     let stats = ds
-        .write_swaps(&args.venue, &pool.pool_address, &swaps)
-        .context("Dataset::write_swaps")?;
+        .write::<swap::v1::Swap>(&args.venue, Some(&pool.pool_address), &swaps)
+        .context("Dataset::write")?;
     println!(
         "swaps fetched: rows_added={} rows_deduped={} partitions_written={}",
         stats.rows_added, stats.rows_deduped, stats.partitions_written

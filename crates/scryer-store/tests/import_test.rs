@@ -134,14 +134,14 @@ fn legacy_swap_parquet_round_trips_through_import_and_dataset() {
 
     let dataset_root = tmp.path().join("dataset");
     let ds = Dataset::new(&dataset_root);
-    let stats = ds.write_swaps(venue::SOLANA_RAYDIUM_V4, "POOL", &rows).unwrap();
+    let stats = ds.write::<scryer_schema::swap::v1::Swap>(venue::SOLANA_RAYDIUM_V4, Some("POOL"), &rows).unwrap();
     assert_eq!(stats.rows_added, 3);
     assert_eq!(stats.rows_deduped, 0);
 
     // Read back via the canonical-path API and verify content.
     let day = UtcDay::from_unix_seconds(1_777_126_459).unwrap();
     let read_back = ds
-        .read_swaps(venue::SOLANA_RAYDIUM_V4, "POOL", day)
+        .read::<scryer_schema::swap::v1::Swap>(venue::SOLANA_RAYDIUM_V4, Some("POOL"), day)
         .unwrap();
     assert_eq!(read_back.len(), 3);
     assert!(read_back
@@ -169,12 +169,12 @@ fn legacy_trade_parquet_round_trips_through_import_and_dataset() {
     let dataset_root = tmp.path().join("dataset");
     let ds = Dataset::new(&dataset_root);
     let stats = ds
-        .write_trades(venue::KRAKEN, "XSOLZUSD", &rows)
+        .write::<scryer_schema::trade::v1::Trade>(venue::KRAKEN, Some("XSOLZUSD"), &rows)
         .unwrap();
     assert_eq!(stats.rows_added, 2);
 
     let day = UtcDay::from_unix_seconds(1_761_523_200).unwrap();
-    let read_back = ds.read_trades(venue::KRAKEN, "XSOLZUSD", day).unwrap();
+    let read_back = ds.read::<scryer_schema::trade::v1::Trade>(venue::KRAKEN, Some("XSOLZUSD"), day).unwrap();
     assert_eq!(read_back.len(), 2);
     assert_eq!(read_back[0].trade_id, 26_108_086);
 }
@@ -193,8 +193,8 @@ fn legacy_swap_parquet_re_import_is_idempotent() {
 
     let dataset_root = tmp.path().join("dataset");
     let ds = Dataset::new(&dataset_root);
-    let s1 = ds.write_swaps(venue::SOLANA_RAYDIUM_V4, "POOL", &rows).unwrap();
-    let s2 = ds.write_swaps(venue::SOLANA_RAYDIUM_V4, "POOL", &rows).unwrap();
+    let s1 = ds.write::<scryer_schema::swap::v1::Swap>(venue::SOLANA_RAYDIUM_V4, Some("POOL"), &rows).unwrap();
+    let s2 = ds.write::<scryer_schema::swap::v1::Swap>(venue::SOLANA_RAYDIUM_V4, Some("POOL"), &rows).unwrap();
     assert_eq!(s1.rows_added, 3);
     assert_eq!(s1.rows_deduped, 0);
     assert_eq!(s2.rows_added, 0);
@@ -308,18 +308,18 @@ fn legacy_kamino_scope_synthetic_round_trip() {
     // Round-trip through Dataset.
     let dataset_root = tmp.path().join("dataset");
     let ds = Dataset::new(&dataset_root);
-    let stats = ds.write_kamino_scope(venue::KAMINO_SCOPE, &rows).unwrap();
+    let stats = ds.write::<scryer_schema::kamino_scope::v1::Reading>(venue::KAMINO_SCOPE, None, &rows).unwrap();
     assert_eq!(stats.rows_added, 2);
 
     let day = UtcDay::from_unix_seconds(1_777_219_471).unwrap();
-    let read_back = ds.read_kamino_scope(venue::KAMINO_SCOPE, day).unwrap();
+    let read_back = ds.read::<scryer_schema::kamino_scope::v1::Reading>(venue::KAMINO_SCOPE, None, day).unwrap();
     assert_eq!(read_back.len(), 2);
     let symbols: Vec<&str> = read_back.iter().map(|r| r.symbol.as_str()).collect();
     assert!(symbols.contains(&"SPYx"));
     assert!(symbols.contains(&"QQQx"));
 
     // Re-import is idempotent.
-    let s2 = ds.write_kamino_scope(venue::KAMINO_SCOPE, &rows).unwrap();
+    let s2 = ds.write::<scryer_schema::kamino_scope::v1::Reading>(venue::KAMINO_SCOPE, None, &rows).unwrap();
     assert_eq!(s2.rows_added, 0);
     assert_eq!(s2.rows_deduped, 2);
 }

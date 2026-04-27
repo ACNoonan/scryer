@@ -10,6 +10,16 @@ pub enum StoreError {
     Parquet(parquet::errors::ParquetError),
     Arrow(arrow_schema::ArrowError),
     Schema(scryer_schema::FromArrowError),
+    /// Caller passed a `partition_key` that doesn't match the
+    /// schema's `PARTITION_KEY_PREFIX`. E.g., calling
+    /// `Dataset::write::<Swap>(venue, None, ...)` when swap.v1 is
+    /// keyed by `pool=`, or `Dataset::write::<Pyth>(venue, Some(_), ...)`
+    /// when pyth.v1 is no-key.
+    PartitionKeyMismatch {
+        schema: &'static str,
+        expected_prefix: Option<&'static str>,
+        provided_key: bool,
+    },
 }
 
 impl fmt::Display for StoreError {
@@ -19,6 +29,19 @@ impl fmt::Display for StoreError {
             Self::Parquet(e) => write!(f, "parquet error: {e}"),
             Self::Arrow(e) => write!(f, "arrow error: {e}"),
             Self::Schema(e) => write!(f, "schema error: {e}"),
+            Self::PartitionKeyMismatch { schema, expected_prefix, provided_key } => {
+                match (expected_prefix, provided_key) {
+                    (Some(p), false) => write!(
+                        f,
+                        "schema `{schema}` is keyed by `{p}=` but no partition_key was provided"
+                    ),
+                    (None, true) => write!(
+                        f,
+                        "schema `{schema}` is event-stream (no key) but a partition_key was provided"
+                    ),
+                    _ => write!(f, "internal partition-key state error"),
+                }
+            }
         }
     }
 }
@@ -30,6 +53,7 @@ impl std::error::Error for StoreError {
             Self::Parquet(e) => Some(e),
             Self::Arrow(e) => Some(e),
             Self::Schema(e) => Some(e),
+            Self::PartitionKeyMismatch { .. } => None,
         }
     }
 }

@@ -487,6 +487,51 @@ future CI".
    binaries, not anyone consuming `scryer-schema` etc. as a path
    dependency.
 
+## Soothsayer venue versioning — 2026-04-27 (locked)
+
+**Locked: soothsayer-side derived datasets use experiment-versioned
+venues.** The venue string carries the experiment iteration
+(`soothsayer_v5`, `soothsayer_v6`, ...) and the `data_type` carries
+the artifact name (`tape`, `calibration`, etc.).
+
+### Why
+
+Soothsayer iterates experiment versions over time — v5 today, v6
+when the methodology evolves, etc. Each experiment may produce
+different data shapes for the same conceptual artifact (tape, panel,
+bounds). Three options for handling iteration:
+
+1. **Embed the version in `data_type`** (e.g., `data_type=v5_tape`,
+   `data_type=v6_tape`). What Phase 8 originally shipped. Works,
+   but `data_type` ends up version-mixed and the methodology log's
+   "data_type: swaps, trades, pool_snapshots, ..." pattern breaks.
+2. **Embed in `venue`** (e.g., `venue=soothsayer_v5`,
+   `data_type=tape`). Mirrors how `solana_raydium_v4` and
+   `solana_raydium_clmm` already encode protocol-version into venue.
+3. **Add a new path segment for experiment version.** Methodology-
+   layout change; not justified for one consumer's use case.
+
+**Locked: option 2.** Aligns with the existing "granular venue
+disambiguation" rule, keeps `data_type` clean (`tape` works whether
+the experiment is v5 or v6), and lets soothsayer iterate without
+breaking schemas: `dataset/soothsayer_v6/tape/v1/...` lives in
+parallel to `dataset/soothsayer_v5/tape/v1/...` and old data stays
+at the old venue forever.
+
+### Constraints
+
+1. The `_schema_version` on each row continues to identify the
+   *row schema* (e.g., `"v5_tape.v1"`). It's not the same as the
+   venue version. A future experiment could in principle reuse the
+   same row schema (`"v5_tape.v1"`) under a new venue
+   (`soothsayer_v6`) — though in practice each experiment iteration
+   tends to evolve the row shape.
+2. Phase 9 backports this to v5_tape: venue rename
+   `soothsayer` → `soothsayer_v5`, data_type `v5_tape` → `tape`.
+   The Phase 8 layout (`dataset/soothsayer/v5_tape/v1/...`) was
+   shipped one day; no production consumers have read it; one-shot
+   rename in the same Phase 9 commit is safe.
+
 ---
 
 ## Decision log
@@ -506,6 +551,7 @@ without losing the rationale.
 | v0.1-phase-6 | 2026-04-27 | First soothsayer-side schema. `scryer-schema::kamino_scope::v1::Reading` (11 fields, including nullable `scope_err`) + `scryer-store::Dataset::write_kamino_scope` / `read_kamino_scope` + `scry import kamino-scope`. New `partition::partition_path_no_key` helper supports the methodology's "no-key event-stream" partition shape: `dataset/kamino_scope/oracle_tape/v1/year=Y/month=M/day=D.parquet` (all 8 xStock symbols share one daily file, matching soothsayer's existing layout). Cross-validated against `soothsayer/data/raw/kamino_scope_tape_20260426.parquet`: 2,328 rows imported into 1 daily partition, all 10 logical columns match the original. `_dedup_key = "kamino_scope:{symbol}:{poll_ts}"` since `(symbol, poll_ts)` is unique per poll iteration. | First step of the "soothsayer migration" half of the user's three goals. Picked Kamino Scope as the entry point because its schema is the smallest of the soothsayer raw sources, it polls Solana RPC (so it'll exercise the proxy when the live fetcher lands), and its existing daily-file layout maps cleanly to scryer's date-partitioned shape. Sets the template for Phase 7+ schemas (Pyth, RedStone, Chainlink-via-Helius, Jupiter quotes). |
 | v0.1-phase-7 | 2026-04-27 | Second soothsayer-side schema. `scryer-schema::pyth::v1::Reading` (16 fields including both live-price and EMA-price columns; nullable `pyth_err`) + `Dataset::write_pyth` / `read_pyth` + `scry import pyth`. Same no-key partition shape as kamino_scope: `dataset/pyth/oracle_tape/v1/year=Y/month=M/day=D.parquet`. `_dedup_key = "pyth:{symbol}:{session}:{poll_ts}"` — the session field (4 values: regular/pre/post/on) is part of the key because the daemon polls 32 streams (8 symbols × 4 sessions) at the same `poll_ts`. Cross-validated against `soothsayer/data/raw/pyth_xstock_tape_20260427.parquet`: 19,712 rows split correctly across 2 daily partitions (the file straddles the 04-26→04-27 UTC boundary), all 16 logical columns match. | Pyth Hermes is the highest-volume soothsayer source (~19K rows/day vs Kamino's ~2.3K). Same recipe as Phase 6 — the boilerplate is now visibly repetitive across schemas. Will refactor into a `DatasetSchema` trait once two more schemas land (Phase 9 or Phase 10), per CLAUDE.md hard-rules guidance to avoid premature abstraction. |
 | v0.1-phase-8 | 2026-04-27 | Third soothsayer-side schema, first with mid-row nullable columns. `scryer-schema::v5_tape::v1::Reading` (14 fields: 8 required + 6 nullable for the Chainlink half + `basis_bp`) + `Dataset::write_v5_tape` / `read_v5_tape` + `scry import v5-tape`. Partition path: `dataset/soothsayer/v5_tape/v1/year=Y/month=M/day=D.parquet` — note the venue is `soothsayer` (not an upstream provider) because V5 tape is a soothsayer-experiment artifact pairing Chainlink + Jupiter, not a single-provider tape. `_dedup_key = "v5_tape:{symbol}:{poll_ts}"`. New `optional_int64_column` / `optional_float64_column` / `optional_string_column` helpers in `scryer-store::import` tolerate pyarrow's `null` dtype (which is what pandas emits when an entire column is null — typical for v5_tape's `cl_*` columns during US market off-hours) alongside the typed-with-nulls form. Cross-validated against `soothsayer/data/raw/v5_tape_20260427.parquet`: 4,296 rows imported, all 14 logical columns match (the 6 fully-null columns correctly preserved with proper typed-but-null arrow types in the scryer output). | First scryer schema with non-meta nullable columns — needed because Chainlink only emits prices when the underlying market is open, so any single day's file may have all-null `cl_*` columns and basis_bp. The `optional_*` import helpers generalize the existing nullable-error-string pattern (`scope_err`, `pyth_err`) and will become the standard way schemas with optionality are imported going forward. The four-pass duplication pattern across schemas (swap, trade, kamino_scope, pyth, v5_tape) is the trigger for the Phase 9 `DatasetSchema` trait refactor flagged in the previous row. |
+| v0.1-phase-9 | 2026-04-27 | (a) New methodology section "Soothsayer venue versioning" locks experiment-iteration in the venue (`soothsayer_v5`, not `soothsayer`); v5_tape's partition path moves from `dataset/soothsayer/v5_tape/v1/...` to `dataset/soothsayer_v5/tape/v1/...`. (b) `DatasetSchema` trait in `scryer-store` with `DATA_TYPE` / `SCHEMA_MAJOR` / `PARTITION_KEY_PREFIX` consts and `ts_unix_seconds` / `dedup_key` / `to_record_batch` / `from_record_batch` methods, implemented for all 5 row types. (c) Generic `Dataset::write<S>(venue, partition_key: Option<&str>, rows)` and `Dataset::read<S>(venue, partition_key, day)` replace the per-schema `write_swaps` / `write_trades` / etc. methods. (d) `import::read_legacy_parquet<T, F>(path, opts, extract)` collapses the per-schema read functions into thin wrappers. CLI updated; cross-validated against all 5 real fixtures. | Refactor flagged in Phase 7 / 8. With 5 schemas at the old pattern, the trait's variation axes are clear (keyed-vs-no-key partitioning, `i64`/`f64`/`string` `ts` formats, with/without nullable non-meta columns). New schemas now cost ~80-120 LOC instead of ~250-400. The soothsayer-venue-versioning rule was bundled because the rename is mechanically intertwined with the trait impl (both touch `Dataset::write_v5_tape`'s signature). |
 
 ---
 

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use scryer_schema::{kamino_scope, pyth, swap, trade, v5_tape};
 use scryer_store::import::{
     read_legacy_kamino_scope_parquet, read_legacy_pyth_parquet, read_legacy_swap_parquet,
     read_legacy_trade_parquet, read_legacy_v5_tape_parquet, ImportOptions,
@@ -68,7 +69,7 @@ pub async fn run_swaps(args: SwapsArgs) -> Result<()> {
 
     let ds = Dataset::new(&args.dataset);
     let stats = ds
-        .write_swaps(&args.venue, &args.pool, &rows)
+        .write::<swap::v1::Swap>(&args.venue, Some(&args.pool), &rows)
         .with_context(|| format!("writing to {}", args.dataset.display()))?;
     println!(
         "swaps imported: rows_added={} rows_deduped={} partitions_written={}",
@@ -107,7 +108,7 @@ pub async fn run_kamino_scope(args: KaminoScopeArgs) -> Result<()> {
 
     let ds = Dataset::new(&args.dataset);
     let stats = ds
-        .write_kamino_scope(&args.venue, &rows)
+        .write::<kamino_scope::v1::Reading>(&args.venue, None, &rows)
         .with_context(|| format!("writing to {}", args.dataset.display()))?;
     println!(
         "kamino_scope imported: rows_added={} rows_deduped={} partitions_written={}",
@@ -145,7 +146,7 @@ pub async fn run_pyth(args: PythArgs) -> Result<()> {
 
     let ds = Dataset::new(&args.dataset);
     let stats = ds
-        .write_pyth(&args.venue, &rows)
+        .write::<pyth::v1::Reading>(&args.venue, None, &rows)
         .with_context(|| format!("writing to {}", args.dataset.display()))?;
     println!(
         "pyth imported: rows_added={} rows_deduped={} partitions_written={}",
@@ -158,10 +159,9 @@ pub async fn run_pyth(args: PythArgs) -> Result<()> {
 pub struct V5TapeArgs {
     #[arg(long)]
     input: PathBuf,
-    /// Venue string under `dataset/`. Defaults to `soothsayer`
-    /// since V5 tape is a soothsayer-experiment artifact, not an
-    /// upstream oracle (see venue::SOOTHSAYER comment in scryer-store).
-    #[arg(long, default_value = scryer_store::venue::SOOTHSAYER)]
+    /// Venue string under `dataset/`. Defaults to `soothsayer_v5`
+    /// per the methodology log "Soothsayer venue versioning" rule.
+    #[arg(long, default_value = scryer_store::venue::SOOTHSAYER_V5)]
     venue: String,
     #[arg(long)]
     source: Option<String>,
@@ -185,7 +185,7 @@ pub async fn run_v5_tape(args: V5TapeArgs) -> Result<()> {
 
     let ds = Dataset::new(&args.dataset);
     let stats = ds
-        .write_v5_tape(&args.venue, &rows)
+        .write::<v5_tape::v1::Reading>(&args.venue, None, &rows)
         .with_context(|| format!("writing to {}", args.dataset.display()))?;
     println!(
         "v5_tape imported: rows_added={} rows_deduped={} partitions_written={}",
@@ -210,7 +210,7 @@ pub async fn run_trades(args: TradesArgs) -> Result<()> {
 
     let ds = Dataset::new(&args.dataset);
     let stats = ds
-        .write_trades(&args.venue, &args.pair, &rows)
+        .write::<trade::v1::Trade>(&args.venue, Some(&args.pair), &rows)
         .with_context(|| format!("writing to {}", args.dataset.display()))?;
     println!(
         "trades imported: rows_added={} rows_deduped={} partitions_written={}",
