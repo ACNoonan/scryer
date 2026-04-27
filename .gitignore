@@ -1,0 +1,26 @@
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# Data — rebuildable from upstream sources, never tracked
+dataset/
+data/
+*.parquet
+*.parquet.tmp
+
+# Secrets
+.env
+.env.local
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.claude/
+
+# Logs
+*.log
+logs/
