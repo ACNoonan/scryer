@@ -54,3 +54,20 @@ pub fn partition_path(
         .join(format!("{}={}", key_prefix, key_value))
         .join(day.relative_parquet_path())
 }
+
+/// Resolve the absolute partition file path for a no-key (event-stream)
+/// dataset like `kamino_scope::oracle_tape`. Layout matches the
+/// methodology log's "For event-stream data" form:
+/// `{venue}/{data_type}/v{N}/year=Y/month=M/day=D.parquet`.
+pub fn partition_path_no_key(
+    root: &Path,
+    venue: &str,
+    data_type: &str,
+    schema_major: u32,
+    day: UtcDay,
+) -> PathBuf {
+    root.join(venue)
+        .join(data_type)
+        .join(format!("v{}", schema_major))
+        .join(day.relative_parquet_path())
+}

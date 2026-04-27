@@ -20,6 +20,7 @@
 //! dialect, and the choice is easier to keep stable when it's explicit.
 
 pub mod error;
+pub mod kamino_scope;
 pub mod meta;
 pub mod swap;
 pub mod trade;

@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use scryer_store::import::{read_legacy_swap_parquet, read_legacy_trade_parquet, ImportOptions};
+use scryer_store::import::{
+    read_legacy_kamino_scope_parquet, read_legacy_swap_parquet, read_legacy_trade_parquet,
+    ImportOptions,
+};
 use scryer_store::Dataset;
 
 #[derive(Parser, Debug)]
@@ -69,6 +72,45 @@ pub async fn run_swaps(args: SwapsArgs) -> Result<()> {
         .with_context(|| format!("writing to {}", args.dataset.display()))?;
     println!(
         "swaps imported: rows_added={} rows_deduped={} partitions_written={}",
+        stats.rows_added, stats.rows_deduped, stats.partitions_written
+    );
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+pub struct KaminoScopeArgs {
+    #[arg(long)]
+    input: PathBuf,
+    /// Venue string under `dataset/`. Defaults to `kamino_scope`
+    /// (the methodology-locked convention).
+    #[arg(long, default_value = scryer_store::venue::KAMINO_SCOPE)]
+    venue: String,
+    #[arg(long)]
+    source: Option<String>,
+    #[arg(long, default_value = "./dataset")]
+    dataset: PathBuf,
+}
+
+pub async fn run_kamino_scope(args: KaminoScopeArgs) -> Result<()> {
+    let label = args.source.clone().unwrap_or_else(|| default_source(&args.input));
+    let opts = ImportOptions::from_file_mtime(&args.input, &label)
+        .with_context(|| format!("reading mtime of {}", args.input.display()))?;
+    tracing::info!(
+        path = %args.input.display(),
+        source = %opts.source_label,
+        fetched_at = opts.fetched_at,
+        "loading legacy kamino_scope parquet"
+    );
+    let rows = read_legacy_kamino_scope_parquet(&args.input, &opts)
+        .with_context(|| format!("reading {}", args.input.display()))?;
+    tracing::info!(rows = rows.len(), "loaded; writing to dataset");
+
+    let ds = Dataset::new(&args.dataset);
+    let stats = ds
+        .write_kamino_scope(&args.venue, &rows)
+        .with_context(|| format!("writing to {}", args.dataset.display()))?;
+    println!(
+        "kamino_scope imported: rows_added={} rows_deduped={} partitions_written={}",
         stats.rows_added, stats.rows_deduped, stats.partitions_written
     );
     Ok(())

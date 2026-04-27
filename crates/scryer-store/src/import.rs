@@ -13,8 +13,9 @@ use std::fs::File;
 use std::path::Path;
 use std::time::SystemTime;
 
-use arrow_array::{Float64Array, Int64Array, LargeStringArray, RecordBatch, StringArray};
+use arrow_array::{Array, Float64Array, Int64Array, LargeStringArray, RecordBatch, StringArray};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use scryer_schema::kamino_scope::v1 as kamino_scope_v1;
 use scryer_schema::swap::v1 as swap_v1;
 use scryer_schema::trade::v1 as trade_v1;
 use scryer_schema::{FromArrowError, Meta};
@@ -71,6 +72,33 @@ pub fn read_legacy_swap_parquet(
     for batch in reader {
         let batch = batch?;
         out.extend(extract_swaps(&batch, opts)?);
+    }
+    Ok(out)
+}
+
+/// Read Kamino Scope tape rows from an existing soothsayer
+/// `kamino_scope_tape_YYYYMMDD.parquet`. Required columns: `poll_ts`,
+/// `symbol`, `feed_pda`, `chain_id`, `scope_value_raw`, `scope_exp`,
+/// `scope_price`, `scope_slot`, `scope_unix_ts`, `scope_age_s`. The
+/// `scope_err` column is read if present (nullable) and tolerated as
+/// either `LargeUtf8` (typical) or pyarrow's `null` dtype (when the
+/// column is fully null in the source — in which case all rows get
+/// `scope_err = None`).
+pub fn read_legacy_kamino_scope_parquet(
+    path: &Path,
+    opts: &ImportOptions,
+) -> Result<Vec<kamino_scope_v1::Reading>, StoreError> {
+    let file = File::open(path).map_err(|e| StoreError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let reader = builder.build()?;
+
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch?;
+        out.extend(extract_kamino_scope(&batch, opts)?);
     }
     Ok(out)
 }
@@ -156,6 +184,63 @@ fn extract_trades(
             trade_id: trade_id.value(i),
             meta: Meta::new(
                 trade_v1::SCHEMA_VERSION,
+                opts.fetched_at,
+                opts.source_label.clone(),
+            ),
+        });
+    }
+    Ok(out)
+}
+
+fn extract_kamino_scope(
+    batch: &RecordBatch,
+    opts: &ImportOptions,
+) -> Result<Vec<kamino_scope_v1::Reading>, StoreError> {
+    let poll_ts = string_column(batch, "poll_ts")?;
+    let symbol = string_column(batch, "symbol")?;
+    let feed_pda = string_column(batch, "feed_pda")?;
+    let chain_id = downcast::<Int64Array>(batch, "chain_id")?;
+    let scope_value_raw = downcast::<Int64Array>(batch, "scope_value_raw")?;
+    let scope_exp = downcast::<Int64Array>(batch, "scope_exp")?;
+    let scope_price = downcast::<Float64Array>(batch, "scope_price")?;
+    let scope_slot = downcast::<Int64Array>(batch, "scope_slot")?;
+    let scope_unix_ts = downcast::<Int64Array>(batch, "scope_unix_ts")?;
+    let scope_age_s = downcast::<Int64Array>(batch, "scope_age_s")?;
+    // scope_err: present + nullable in scryer-format files, but the
+    // legacy soothsayer files emit pyarrow `null` dtype when every row
+    // is null (no string ever observed). Treat both cases as "all None".
+    let err_col = batch
+        .schema()
+        .index_of("scope_err")
+        .ok()
+        .map(|idx| batch.column(idx).clone());
+    let err_typed: Option<&LargeStringArray> = err_col
+        .as_ref()
+        .and_then(|c| c.as_any().downcast_ref::<LargeStringArray>());
+
+    let mut out = Vec::with_capacity(batch.num_rows());
+    for i in 0..batch.num_rows() {
+        let scope_err = err_typed.and_then(|a| {
+            if a.is_null(i) {
+                None
+            } else {
+                Some(a.value(i).to_string())
+            }
+        });
+        out.push(kamino_scope_v1::Reading {
+            poll_ts: poll_ts.value(i),
+            symbol: symbol.value(i),
+            feed_pda: feed_pda.value(i),
+            chain_id: chain_id.value(i),
+            scope_value_raw: scope_value_raw.value(i),
+            scope_exp: scope_exp.value(i),
+            scope_price: scope_price.value(i),
+            scope_slot: scope_slot.value(i),
+            scope_unix_ts: scope_unix_ts.value(i),
+            scope_age_s: scope_age_s.value(i),
+            scope_err,
+            meta: Meta::new(
+                kamino_scope_v1::SCHEMA_VERSION,
                 opts.fetched_at,
                 opts.source_label.clone(),
             ),

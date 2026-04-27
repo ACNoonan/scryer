@@ -24,7 +24,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
-use scryer_schema::{swap, trade};
+use scryer_schema::{kamino_scope, swap, trade};
 
 pub use error::StoreError;
 pub use partition::UtcDay;
@@ -35,6 +35,7 @@ pub use partition::UtcDay;
 pub mod venue {
     pub const SOLANA_RAYDIUM_V4: &str = "solana_raydium_v4";
     pub const KRAKEN: &str = "kraken";
+    pub const KAMINO_SCOPE: &str = "kamino_scope";
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -145,6 +146,48 @@ impl Dataset {
         );
         read_trade_partition(&path)
     }
+
+    /// Write Kamino Scope tape readings to per-day partitions under
+    /// `{root}/{venue}/oracle_tape/v1/year=Y/month=M/day=D.parquet`.
+    /// No key prefix in the partition path — all symbols share one
+    /// daily file, matching the existing soothsayer tape layout.
+    /// Same read-modify-write dedup semantics as `write_swaps`.
+    pub fn write_kamino_scope(
+        &self,
+        venue: &str,
+        rows: &[kamino_scope::v1::Reading],
+    ) -> Result<WriteStats, StoreError> {
+        if rows.is_empty() {
+            return Ok(WriteStats::default());
+        }
+        let by_day = group_by_day(rows, |r| r.scope_unix_ts)?;
+        let mut stats = WriteStats::default();
+        for (day, day_rows) in by_day {
+            let path = partition::partition_path_no_key(
+                &self.root, venue, "oracle_tape", 1, day,
+            );
+            let existing = read_kamino_scope_partition(&path)?;
+            let new_count = day_rows.len();
+            let (merged, deduped) = merge_dedup(existing, day_rows, |r| r.dedup_key());
+            let batch = kamino_scope::v1::to_record_batch(&merged)?;
+            write_batch_atomic(&path, &batch)?;
+            stats.partitions_written += 1;
+            stats.rows_added += new_count - deduped;
+            stats.rows_deduped += deduped;
+        }
+        Ok(stats)
+    }
+
+    pub fn read_kamino_scope(
+        &self,
+        venue: &str,
+        day: UtcDay,
+    ) -> Result<Vec<kamino_scope::v1::Reading>, StoreError> {
+        let path = partition::partition_path_no_key(
+            &self.root, venue, "oracle_tape", 1, day,
+        );
+        read_kamino_scope_partition(&path)
+    }
 }
 
 fn group_by_day<T, F>(rows: &[T], get_ts: F) -> Result<BTreeMap<UtcDay, Vec<T>>, StoreError>
@@ -211,6 +254,20 @@ fn read_trade_partition(path: &Path) -> Result<Vec<trade::v1::Trade>, StoreError
     for batch in reader {
         let batch = batch.map_err(parquet::errors::ParquetError::from)?;
         out.extend(trade::v1::from_record_batch(&batch)?);
+    }
+    Ok(out)
+}
+
+fn read_kamino_scope_partition(
+    path: &Path,
+) -> Result<Vec<kamino_scope::v1::Reading>, StoreError> {
+    let Some(reader) = open_parquet_reader(path)? else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch.map_err(parquet::errors::ParquetError::from)?;
+        out.extend(kamino_scope::v1::from_record_batch(&batch)?);
     }
     Ok(out)
 }
