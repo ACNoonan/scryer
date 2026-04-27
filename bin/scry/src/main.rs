@@ -46,6 +46,8 @@ enum ImportTarget {
     Trades(import_cmd::TradesArgs),
     /// Import a kamino_scope.v1 parquet (e.g. soothsayer/data/raw/kamino_scope_tape_*.parquet).
     KaminoScope(import_cmd::KaminoScopeArgs),
+    /// Import a pyth.v1 parquet (e.g. soothsayer/data/raw/pyth_xstock_tape_*.parquet).
+    Pyth(import_cmd::PythArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -75,6 +77,7 @@ async fn main() -> Result<()> {
             ImportTarget::Swaps(a) => import_cmd::run_swaps(a).await,
             ImportTarget::Trades(a) => import_cmd::run_trades(a).await,
             ImportTarget::KaminoScope(a) => import_cmd::run_kamino_scope(a).await,
+            ImportTarget::Pyth(a) => import_cmd::run_pyth(a).await,
         },
         Command::Solana(c) => match c.target {
             SolanaTarget::Swaps(a) => solana_cmd::run_swaps(a).await,

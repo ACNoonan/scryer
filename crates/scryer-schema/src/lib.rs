@@ -22,6 +22,7 @@
 pub mod error;
 pub mod kamino_scope;
 pub mod meta;
+pub mod pyth;
 pub mod swap;
 pub mod trade;
 

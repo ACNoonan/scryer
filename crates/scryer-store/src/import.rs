@@ -16,6 +16,7 @@ use std::time::SystemTime;
 use arrow_array::{Array, Float64Array, Int64Array, LargeStringArray, RecordBatch, StringArray};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use scryer_schema::kamino_scope::v1 as kamino_scope_v1;
+use scryer_schema::pyth::v1 as pyth_v1;
 use scryer_schema::swap::v1 as swap_v1;
 use scryer_schema::trade::v1 as trade_v1;
 use scryer_schema::{FromArrowError, Meta};
@@ -99,6 +100,33 @@ pub fn read_legacy_kamino_scope_parquet(
     for batch in reader {
         let batch = batch?;
         out.extend(extract_kamino_scope(&batch, opts)?);
+    }
+    Ok(out)
+}
+
+/// Read Pyth Hermes tape rows from an existing soothsayer
+/// `pyth_xstock_tape_YYYYMMDD.parquet`. Required columns: `poll_ts`,
+/// `poll_unix`, `symbol`, `session`, `pyth_feed_id`, `pyth_price`,
+/// `pyth_conf`, `pyth_expo`, `pyth_publish_time`, `pyth_age_s`,
+/// `pyth_half_width_bps`, `pyth_ema_price`, `pyth_ema_conf`,
+/// `pyth_ema_publish_time`, `pyth_ema_half_width_bps`, `slot`. The
+/// `pyth_err` column is read if present (nullable) and tolerates
+/// pyarrow's `null` dtype.
+pub fn read_legacy_pyth_parquet(
+    path: &Path,
+    opts: &ImportOptions,
+) -> Result<Vec<pyth_v1::Reading>, StoreError> {
+    let file = File::open(path).map_err(|e| StoreError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let reader = builder.build()?;
+
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch?;
+        out.extend(extract_pyth(&batch, opts)?);
     }
     Ok(out)
 }
@@ -241,6 +269,73 @@ fn extract_kamino_scope(
             scope_err,
             meta: Meta::new(
                 kamino_scope_v1::SCHEMA_VERSION,
+                opts.fetched_at,
+                opts.source_label.clone(),
+            ),
+        });
+    }
+    Ok(out)
+}
+
+fn extract_pyth(
+    batch: &RecordBatch,
+    opts: &ImportOptions,
+) -> Result<Vec<pyth_v1::Reading>, StoreError> {
+    let poll_ts = string_column(batch, "poll_ts")?;
+    let poll_unix = downcast::<Int64Array>(batch, "poll_unix")?;
+    let symbol = string_column(batch, "symbol")?;
+    let session = string_column(batch, "session")?;
+    let pyth_feed_id = string_column(batch, "pyth_feed_id")?;
+    let pyth_price = downcast::<Float64Array>(batch, "pyth_price")?;
+    let pyth_conf = downcast::<Float64Array>(batch, "pyth_conf")?;
+    let pyth_expo = downcast::<Int64Array>(batch, "pyth_expo")?;
+    let pyth_publish_time = downcast::<Int64Array>(batch, "pyth_publish_time")?;
+    let pyth_age_s = downcast::<Int64Array>(batch, "pyth_age_s")?;
+    let pyth_half_width_bps = downcast::<Float64Array>(batch, "pyth_half_width_bps")?;
+    let pyth_ema_price = downcast::<Float64Array>(batch, "pyth_ema_price")?;
+    let pyth_ema_conf = downcast::<Float64Array>(batch, "pyth_ema_conf")?;
+    let pyth_ema_publish_time = downcast::<Int64Array>(batch, "pyth_ema_publish_time")?;
+    let pyth_ema_half_width_bps = downcast::<Float64Array>(batch, "pyth_ema_half_width_bps")?;
+    let slot = downcast::<Int64Array>(batch, "slot")?;
+    // pyth_err: same null-dtype tolerance as kamino_scope's scope_err.
+    let err_col = batch
+        .schema()
+        .index_of("pyth_err")
+        .ok()
+        .map(|idx| batch.column(idx).clone());
+    let err_typed: Option<&LargeStringArray> = err_col
+        .as_ref()
+        .and_then(|c| c.as_any().downcast_ref::<LargeStringArray>());
+
+    let mut out = Vec::with_capacity(batch.num_rows());
+    for i in 0..batch.num_rows() {
+        let pyth_err = err_typed.and_then(|a| {
+            if a.is_null(i) {
+                None
+            } else {
+                Some(a.value(i).to_string())
+            }
+        });
+        out.push(pyth_v1::Reading {
+            poll_ts: poll_ts.value(i),
+            poll_unix: poll_unix.value(i),
+            symbol: symbol.value(i),
+            session: session.value(i),
+            pyth_feed_id: pyth_feed_id.value(i),
+            pyth_price: pyth_price.value(i),
+            pyth_conf: pyth_conf.value(i),
+            pyth_expo: pyth_expo.value(i),
+            pyth_publish_time: pyth_publish_time.value(i),
+            pyth_age_s: pyth_age_s.value(i),
+            pyth_half_width_bps: pyth_half_width_bps.value(i),
+            pyth_ema_price: pyth_ema_price.value(i),
+            pyth_ema_conf: pyth_ema_conf.value(i),
+            pyth_ema_publish_time: pyth_ema_publish_time.value(i),
+            pyth_ema_half_width_bps: pyth_ema_half_width_bps.value(i),
+            slot: slot.value(i),
+            pyth_err,
+            meta: Meta::new(
+                pyth_v1::SCHEMA_VERSION,
                 opts.fetched_at,
                 opts.source_label.clone(),
             ),
