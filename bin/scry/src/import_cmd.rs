@@ -2,11 +2,11 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use scryer_schema::{kamino_scope, pyth, redstone, swap, trade, v5_tape};
+use scryer_schema::{kamino_scope, pyth, redstone, swap, trade, v5_tape, yahoo};
 use scryer_store::import::{
     read_legacy_kamino_scope_parquet, read_legacy_pyth_parquet, read_legacy_redstone_parquet,
     read_legacy_swap_parquet, read_legacy_trade_parquet, read_legacy_v5_tape_parquet,
-    ImportOptions,
+    read_legacy_yahoo_parquet, ImportOptions,
 };
 use scryer_store::Dataset;
 
@@ -228,6 +228,82 @@ pub async fn run_redstone(args: RedstoneArgs) -> Result<()> {
     println!(
         "redstone imported: rows_added={} rows_deduped={} partitions_written={}",
         stats.rows_added, stats.rows_deduped, stats.partitions_written
+    );
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+pub struct YahooArgs {
+    /// One or more parquet paths. Shell glob expansion works:
+    /// `--input data/raw/yahoo_*.parquet`. All input files merge
+    /// into the same `dataset/yahoo/equities_daily/v1/...` tree
+    /// with dedup by `(symbol, ts)`.
+    #[arg(long, num_args = 1.., required = true)]
+    input: Vec<PathBuf>,
+    #[arg(long, default_value = scryer_store::venue::YAHOO)]
+    venue: String,
+    /// `_source` label stamped on imported rows. Defaults to
+    /// `import:legacy:yahoo` (uniform across all merged files).
+    #[arg(long, default_value = "import:legacy:yahoo")]
+    source: String,
+    #[arg(long, default_value = "./dataset")]
+    dataset: PathBuf,
+}
+
+pub async fn run_yahoo(args: YahooArgs) -> Result<()> {
+    use std::collections::BTreeMap;
+
+    let ds = Dataset::new(&args.dataset);
+    let mut total_rows_loaded = 0usize;
+    // Concatenate all rows across input files first; the per-file
+    // mtime that ImportOptions::from_file_mtime would emit doesn't
+    // matter here because all rows get the same `_source` label and
+    // dedup-on-(symbol, ts) collapses the heavy overlap between
+    // overlapping cache files. _fetched_at = first-input mtime.
+    let first_path = args.input.first().expect("clap requires at least one --input");
+    let opts = ImportOptions::from_file_mtime(first_path, &args.source)
+        .with_context(|| format!("reading mtime of {}", first_path.display()))?;
+    tracing::info!(
+        files = args.input.len(),
+        source = %opts.source_label,
+        fetched_at = opts.fetched_at,
+        "loading yahoo parquet files"
+    );
+    let mut all_rows: Vec<yahoo::v1::Bar> = Vec::new();
+    for input in &args.input {
+        let rows = read_legacy_yahoo_parquet(input, &opts)
+            .with_context(|| format!("reading {}", input.display()))?;
+        total_rows_loaded += rows.len();
+        all_rows.extend(rows);
+    }
+    tracing::info!(rows = all_rows.len(), "loaded; bucketing by symbol");
+
+    // Yahoo's partition key (`symbol`) is intrinsic to each row, not
+    // constant per write call. Bucket by symbol first; one Dataset::write
+    // call per symbol.
+    let mut by_symbol: BTreeMap<String, Vec<yahoo::v1::Bar>> = BTreeMap::new();
+    for r in all_rows {
+        by_symbol.entry(r.symbol.clone()).or_default().push(r);
+    }
+    let mut total_added = 0usize;
+    let mut total_deduped = 0usize;
+    let mut total_partitions = 0usize;
+    for (symbol, rows) in &by_symbol {
+        let stats = ds
+            .write::<yahoo::v1::Bar>(&args.venue, Some(symbol), rows)
+            .with_context(|| format!("writing {} rows for symbol={}", rows.len(), symbol))?;
+        total_added += stats.rows_added;
+        total_deduped += stats.rows_deduped;
+        total_partitions += stats.partitions_written;
+    }
+    println!(
+        "yahoo imported: files={} rows_loaded={} symbols={} rows_added={} rows_deduped={} partitions_written={}",
+        args.input.len(),
+        total_rows_loaded,
+        by_symbol.len(),
+        total_added,
+        total_deduped,
+        total_partitions
     );
     Ok(())
 }

@@ -47,7 +47,7 @@ use parquet::file::properties::WriterProperties;
 
 pub use error::StoreError;
 pub use partition::UtcDay;
-pub use schema::DatasetSchema;
+pub use schema::{DatasetSchema, PartitionGranularity, PartitionTime};
 
 /// Venue-string conventions for v0.1. Fetcher crates pass these to
 /// `Dataset::write`; future venues add new constants here rather than
@@ -58,6 +58,7 @@ pub mod venue {
     pub const KAMINO_SCOPE: &str = "kamino_scope";
     pub const PYTH: &str = "pyth";
     pub const REDSTONE: &str = "redstone";
+    pub const YAHOO: &str = "yahoo";
     /// Soothsayer experiment v5 (Chainlink + Jupiter joined tape).
     /// Per the methodology log "Soothsayer venue versioning" section,
     /// each soothsayer experiment iteration gets its own venue
@@ -102,13 +103,13 @@ impl Dataset {
         if rows.is_empty() {
             return Ok(WriteStats::default());
         }
-        let by_day = group_by_day(rows, |r| r.ts_unix_seconds())?;
+        let by_partition = group_by_partition::<S, _>(rows, |r| r.ts_unix_seconds())?;
         let mut stats = WriteStats::default();
-        for (day, day_rows) in by_day {
-            let path = partition_path_for::<S>(&self.root, venue, partition_key, day);
+        for (pt, part_rows) in by_partition {
+            let path = partition_path_for::<S>(&self.root, venue, partition_key, pt);
             let existing = read_partition::<S>(&path)?;
-            let new_count = day_rows.len();
-            let (merged, deduped) = merge_dedup(existing, day_rows, |r| r.dedup_key());
+            let new_count = part_rows.len();
+            let (merged, deduped) = merge_dedup(existing, part_rows, |r| r.dedup_key());
             let batch = S::to_record_batch(&merged)?;
             write_batch_atomic(&path, &batch)?;
             stats.partitions_written += 1;
@@ -120,16 +121,29 @@ impl Dataset {
 
     /// Read all rows from a single partition file. Returns an empty
     /// vec if the file does not exist. Useful for consumers that want
-    /// to load a specific day in Rust (Python consumers should use
-    /// pyarrow directly).
+    /// to load a specific partition in Rust (Python consumers should
+    /// use pyarrow directly).
+    ///
+    /// `time`'s variant must match `S::PARTITION_GRANULARITY`. A
+    /// `UtcDay` auto-converts via `From` for `Daily` schemas:
+    /// `ds.read::<Swap>(venue, key, day.into())`.
     pub fn read<S: DatasetSchema>(
         &self,
         venue: &str,
         partition_key: Option<&str>,
-        day: UtcDay,
+        time: impl Into<PartitionTime>,
     ) -> Result<Vec<S>, StoreError> {
         validate_partition_key::<S>(partition_key)?;
-        let path = partition_path_for::<S>(&self.root, venue, partition_key, day);
+        let pt = time.into();
+        if pt.granularity() != S::PARTITION_GRANULARITY {
+            return Err(StoreError::Arrow(arrow_schema::ArrowError::ComputeError(format!(
+                "schema `{}` is {:?}-granular but read was passed {:?} time",
+                std::any::type_name::<S>(),
+                S::PARTITION_GRANULARITY,
+                pt.granularity(),
+            ))));
+        }
+        let path = partition_path_for::<S>(&self.root, venue, partition_key, pt);
         read_partition::<S>(&path)
     }
 }
@@ -149,10 +163,10 @@ fn partition_path_for<S: DatasetSchema>(
     root: &Path,
     venue: &str,
     partition_key: Option<&str>,
-    day: UtcDay,
+    time: PartitionTime,
 ) -> PathBuf {
-    match (S::PARTITION_KEY_PREFIX, partition_key) {
-        (Some(prefix), Some(key)) => partition::partition_path(
+    match (S::PARTITION_KEY_PREFIX, partition_key, time) {
+        (Some(prefix), Some(key), PartitionTime::Daily(day)) => partition::partition_path(
             root,
             venue,
             S::DATA_TYPE,
@@ -161,7 +175,30 @@ fn partition_path_for<S: DatasetSchema>(
             key,
             day,
         ),
-        _ => partition::partition_path_no_key(root, venue, S::DATA_TYPE, S::SCHEMA_MAJOR, day),
+        (Some(prefix), Some(key), PartitionTime::Yearly(year)) => {
+            partition::partition_path_keyed_yearly(
+                root,
+                venue,
+                S::DATA_TYPE,
+                S::SCHEMA_MAJOR,
+                prefix,
+                key,
+                year,
+            )
+        }
+        (None, _, PartitionTime::Daily(day)) => {
+            partition::partition_path_no_key(root, venue, S::DATA_TYPE, S::SCHEMA_MAJOR, day)
+        }
+        (None, _, PartitionTime::Yearly(year)) => {
+            // No-key + Yearly: dataset/{venue}/{data_type}/v{N}/year=YYYY.parquet.
+            // Not yet used but keeping the dispatch complete.
+            root.join(venue)
+                .join(S::DATA_TYPE)
+                .join(format!("v{}", S::SCHEMA_MAJOR))
+                .join(format!("year={:04}.parquet", year))
+        }
+        // Keyed schema called without a key — caught by validate_partition_key.
+        (Some(_), None, _) => unreachable!("validate_partition_key ensures keyed schema has key"),
     }
 }
 
@@ -177,22 +214,43 @@ fn read_partition<S: DatasetSchema>(path: &Path) -> Result<Vec<S>, StoreError> {
     Ok(out)
 }
 
-fn group_by_day<T, F>(rows: &[T], get_ts: F) -> Result<BTreeMap<UtcDay, Vec<T>>, StoreError>
+/// Bucket rows by their partition time according to the schema's
+/// `PARTITION_GRANULARITY`. Dispatches at compile time via the trait
+/// const; per-row cost is one `chrono::DateTime` parse plus a
+/// `BTreeMap` insert.
+fn group_by_partition<S, F>(
+    rows: &[S],
+    get_ts: F,
+) -> Result<BTreeMap<PartitionTime, Vec<S>>, StoreError>
 where
-    T: Clone,
-    F: Fn(&T) -> i64,
+    S: DatasetSchema,
+    F: Fn(&S) -> i64,
 {
-    let mut by_day: BTreeMap<UtcDay, Vec<T>> = BTreeMap::new();
+    let mut by: BTreeMap<PartitionTime, Vec<S>> = BTreeMap::new();
     for r in rows {
         let ts = get_ts(r);
-        let day = UtcDay::from_unix_seconds(ts).ok_or_else(|| {
-            StoreError::Arrow(arrow_schema::ArrowError::ComputeError(format!(
-                "timestamp {ts} (unix seconds) out of representable range for UTC date"
-            )))
-        })?;
-        by_day.entry(day).or_default().push(r.clone());
+        let pt = match S::PARTITION_GRANULARITY {
+            PartitionGranularity::Daily => {
+                let day = UtcDay::from_unix_seconds(ts).ok_or_else(|| {
+                    StoreError::Arrow(arrow_schema::ArrowError::ComputeError(format!(
+                        "timestamp {ts} (unix seconds) out of representable range for UTC date"
+                    )))
+                })?;
+                PartitionTime::Daily(day)
+            }
+            PartitionGranularity::Yearly => {
+                let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0).ok_or_else(|| {
+                    StoreError::Arrow(arrow_schema::ArrowError::ComputeError(format!(
+                        "timestamp {ts} (unix seconds) out of representable range for year"
+                    )))
+                })?;
+                use chrono::Datelike;
+                PartitionTime::Yearly(dt.year())
+            }
+        };
+        by.entry(pt).or_default().push(r.clone());
     }
-    Ok(by_day)
+    Ok(by)
 }
 
 /// Merge `new` rows into `existing` keyed by `_dedup_key`. Existing rows

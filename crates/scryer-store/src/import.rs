@@ -14,8 +14,8 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use arrow_array::{
-    Array, Float64Array, Int64Array, LargeStringArray, RecordBatch, StringArray,
-    TimestampMicrosecondArray,
+    Array, Date32Array, Float64Array, Int64Array, LargeStringArray, RecordBatch, StringArray,
+    TimestampMicrosecondArray, TimestampMillisecondArray,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use scryer_schema::kamino_scope::v1 as kamino_scope_v1;
@@ -24,6 +24,7 @@ use scryer_schema::redstone::v1 as redstone_v1;
 use scryer_schema::swap::v1 as swap_v1;
 use scryer_schema::trade::v1 as trade_v1;
 use scryer_schema::v5_tape::v1 as v5_tape_v1;
+use scryer_schema::yahoo::v1 as yahoo_v1;
 use scryer_schema::{FromArrowError, Meta};
 
 use crate::error::StoreError;
@@ -118,6 +119,17 @@ pub fn read_legacy_pyth_parquet(
     opts: &ImportOptions,
 ) -> Result<Vec<pyth_v1::Reading>, StoreError> {
     read_legacy_parquet(path, opts, extract_pyth)
+}
+
+/// Read Yahoo Finance OHLCV bars from one of the existing soothsayer
+/// `data/raw/yahoo_*.parquet` cache files. Required columns:
+/// `symbol`, `ts` (Date32), `open`, `high`, `low`, `close`,
+/// `adj_close`, `volume`.
+pub fn read_legacy_yahoo_parquet(
+    path: &Path,
+    opts: &ImportOptions,
+) -> Result<Vec<yahoo_v1::Bar>, StoreError> {
+    read_legacy_parquet(path, opts, extract_yahoo)
 }
 
 /// Read RedStone Live tape rows from the existing soothsayer
@@ -338,6 +350,107 @@ fn extract_pyth(
             pyth_err,
             meta: Meta::new(
                 pyth_v1::SCHEMA_VERSION,
+                opts.fetched_at,
+                opts.source_label.clone(),
+            ),
+        });
+    }
+    Ok(out)
+}
+
+/// `volume` in yfinance parquet is usually Int64 but occasionally
+/// Float64 (e.g. futures contracts with fractional reporting).
+/// Accept both; fractional values truncate to i64.
+enum VolumeCol<'a> {
+    Int(&'a Int64Array),
+    Float(&'a Float64Array),
+}
+impl VolumeCol<'_> {
+    fn value(&self, i: usize) -> i64 {
+        match self {
+            Self::Int(a) => a.value(i),
+            Self::Float(a) => a.value(i) as i64,
+        }
+    }
+}
+
+/// `ts` in yfinance parquet is usually Date32 (days since epoch)
+/// but occasionally TimestampMillisecond (when the call returned
+/// intraday-precision data that pandas later coerced to a UTC
+/// timestamp). Accept both; timestamps truncate to UTC calendar
+/// day at the day-since-epoch level.
+enum TsCol<'a> {
+    Date(&'a Date32Array),
+    TsMs(&'a TimestampMillisecondArray),
+    TsUs(&'a TimestampMicrosecondArray),
+}
+impl TsCol<'_> {
+    fn days_since_epoch(&self, i: usize) -> i32 {
+        match self {
+            Self::Date(a) => a.value(i),
+            Self::TsMs(a) => (a.value(i) / 86_400_000) as i32,
+            Self::TsUs(a) => (a.value(i) / 86_400_000_000) as i32,
+        }
+    }
+}
+
+fn extract_yahoo(
+    batch: &RecordBatch,
+    opts: &ImportOptions,
+) -> Result<Vec<yahoo_v1::Bar>, StoreError> {
+    let symbol = string_column(batch, "symbol")?;
+    let ts_idx = batch
+        .schema()
+        .index_of("ts")
+        .map_err(|_| StoreError::Schema(FromArrowError::MissingColumn("ts")))?;
+    let ts_col = batch.column(ts_idx);
+    let ts = if let Some(a) = ts_col.as_any().downcast_ref::<Date32Array>() {
+        TsCol::Date(a)
+    } else if let Some(a) = ts_col.as_any().downcast_ref::<TimestampMillisecondArray>() {
+        TsCol::TsMs(a)
+    } else if let Some(a) = ts_col.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+        TsCol::TsUs(a)
+    } else {
+        return Err(StoreError::Schema(FromArrowError::WrongType {
+            column: "ts",
+            expected: "Date32 or Timestamp(Millisecond|Microsecond)",
+        }));
+    };
+    let open = downcast::<Float64Array>(batch, "open")?;
+    let high = downcast::<Float64Array>(batch, "high")?;
+    let low = downcast::<Float64Array>(batch, "low")?;
+    let close = downcast::<Float64Array>(batch, "close")?;
+    let adj_close = downcast::<Float64Array>(batch, "adj_close")?;
+
+    let volume_idx = batch
+        .schema()
+        .index_of("volume")
+        .map_err(|_| StoreError::Schema(FromArrowError::MissingColumn("volume")))?;
+    let volume_col = batch.column(volume_idx);
+    let volume = if let Some(a) = volume_col.as_any().downcast_ref::<Int64Array>() {
+        VolumeCol::Int(a)
+    } else if let Some(a) = volume_col.as_any().downcast_ref::<Float64Array>() {
+        VolumeCol::Float(a)
+    } else {
+        return Err(StoreError::Schema(FromArrowError::WrongType {
+            column: "volume",
+            expected: "Int64 or Float64",
+        }));
+    };
+
+    let mut out = Vec::with_capacity(batch.num_rows());
+    for i in 0..batch.num_rows() {
+        out.push(yahoo_v1::Bar {
+            symbol: symbol.value(i),
+            ts: ts.days_since_epoch(i),
+            open: open.value(i),
+            high: high.value(i),
+            low: low.value(i),
+            close: close.value(i),
+            adj_close: adj_close.value(i),
+            volume: volume.value(i),
+            meta: Meta::new(
+                yahoo_v1::SCHEMA_VERSION,
                 opts.fetched_at,
                 opts.source_label.clone(),
             ),

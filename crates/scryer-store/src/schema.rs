@@ -21,7 +21,46 @@
 
 use arrow_array::RecordBatch;
 use arrow_schema::ArrowError;
-use scryer_schema::{kamino_scope, pyth, redstone, swap, trade, v5_tape, FromArrowError};
+use scryer_schema::{kamino_scope, pyth, redstone, swap, trade, v5_tape, yahoo, FromArrowError};
+
+/// Time granularity of a dataset's partitioning. Each schema picks
+/// the granularity that right-sizes its partition files: too-fine
+/// produces tiny per-row files (wasted inodes, slow scans), too-coarse
+/// produces multi-GB files that strain memory at write/merge time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartitionGranularity {
+    /// `year=YYYY/month=MM/day=DD.parquet`. Used by event-stream data
+    /// (swaps, trades, oracle tapes) where each day has 1k+ rows.
+    Daily,
+    /// `year=YYYY.parquet`. Used by daily-bar data (Yahoo OHLCV) and
+    /// other low-frequency keyed datasets where ~250 rows/year would
+    /// produce single-row files at daily granularity.
+    Yearly,
+}
+
+/// Concrete time partition that maps directly to a partition path
+/// segment. Daily for `year=Y/month=M/day=D.parquet` schemas; Yearly
+/// for `year=Y.parquet` schemas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PartitionTime {
+    Daily(crate::partition::UtcDay),
+    Yearly(i32),
+}
+
+impl PartitionTime {
+    pub fn granularity(&self) -> PartitionGranularity {
+        match self {
+            Self::Daily(_) => PartitionGranularity::Daily,
+            Self::Yearly(_) => PartitionGranularity::Yearly,
+        }
+    }
+}
+
+impl From<crate::partition::UtcDay> for PartitionTime {
+    fn from(d: crate::partition::UtcDay) -> Self {
+        Self::Daily(d)
+    }
+}
 
 pub trait DatasetSchema: Sized + Clone {
     /// Path segment between `{venue}/` and `v{N}/`.
@@ -30,6 +69,10 @@ pub trait DatasetSchema: Sized + Clone {
     const SCHEMA_MAJOR: u32 = 1;
     /// `Some("pool")` for keyed schemas, `None` for event-stream.
     const PARTITION_KEY_PREFIX: Option<&'static str>;
+    /// Time granularity of the partition path. `Daily` is the default
+    /// (used by all v0.1 schemas through Phase 10); `Yearly` lands in
+    /// Phase 11 for daily-bar / low-frequency data.
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
 
     /// Used by the store to bucket each row into a UTC-day partition.
     fn ts_unix_seconds(&self) -> i64;
@@ -130,6 +173,27 @@ impl DatasetSchema for redstone::v1::Reading {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         redstone::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for yahoo::v1::Bar {
+    const DATA_TYPE: &'static str = "equities_daily";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("symbol");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Yearly;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        // ts is days since unix epoch (Date32). Convert to unix seconds
+        // at UTC midnight of that day.
+        (self.ts as i64) * 86_400
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        yahoo::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        yahoo::v1::from_record_batch(batch)
     }
 }
 

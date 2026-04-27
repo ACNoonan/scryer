@@ -71,3 +71,23 @@ pub fn partition_path_no_key(
         .join(format!("v{}", schema_major))
         .join(day.relative_parquet_path())
 }
+
+/// Resolve the absolute partition file path for a yearly-keyed
+/// dataset (Phase 11+, e.g. Yahoo OHLCV bars). Layout matches the
+/// methodology log's "For low-frequency keyed data" form:
+/// `{venue}/{data_type}/v{N}/{prefix}={value}/year=YYYY.parquet`.
+pub fn partition_path_keyed_yearly(
+    root: &Path,
+    venue: &str,
+    data_type: &str,
+    schema_major: u32,
+    key_prefix: &str,
+    key_value: &str,
+    year: i32,
+) -> PathBuf {
+    root.join(venue)
+        .join(data_type)
+        .join(format!("v{}", schema_major))
+        .join(format!("{}={}", key_prefix, key_value))
+        .join(format!("year={:04}.parquet", year))
+}

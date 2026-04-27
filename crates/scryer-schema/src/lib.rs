@@ -27,6 +27,7 @@ pub mod redstone;
 pub mod swap;
 pub mod trade;
 pub mod v5_tape;
+pub mod yahoo;
 
 pub use error::FromArrowError;
 pub use meta::Meta;
