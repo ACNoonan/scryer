@@ -1,0 +1,9 @@
+[package]
+name = "scryer-fetch-evm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "EVM RPC fetchers — Ethereum, Arbitrum, Base. Routed through scryer-proxy. v0.3+ scope."
+
+[lib]
+path = "src/lib.rs"

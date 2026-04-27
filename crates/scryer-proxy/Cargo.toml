@@ -1,0 +1,9 @@
+[package]
+name = "scryer-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JSON-RPC proxy (Solana, EVM): quota detection, hedging, retry, finalized-historical cache. Forked from relay-sol."
+
+[lib]
+path = "src/lib.rs"

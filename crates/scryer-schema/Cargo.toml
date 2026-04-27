@@ -1,0 +1,14 @@
+[package]
+name = "scryer-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Versioned, typed parquet row schemas. Append-only within a major version; breaking changes get a new namespace (v1 -> v2)."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+serde = { workspace = true }

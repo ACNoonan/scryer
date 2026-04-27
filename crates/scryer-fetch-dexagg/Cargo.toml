@@ -1,0 +1,9 @@
+[package]
+name = "scryer-fetch-dexagg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DEX aggregator clients — GeckoTerminal, Birdeye. v0.2+ scope. Per-venue retry; no proxy."
+
+[lib]
+path = "src/lib.rs"

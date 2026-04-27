@@ -1,0 +1,9 @@
+[package]
+name = "scryer-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Partition layout, parquet writer, dedup enforcement. The only crate that writes to dataset/."
+
+[lib]
+path = "src/lib.rs"

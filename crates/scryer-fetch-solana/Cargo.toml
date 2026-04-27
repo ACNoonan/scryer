@@ -1,0 +1,9 @@
+[package]
+name = "scryer-fetch-solana"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Solana RPC fetchers — swaps, accounts, signatures. All requests routed through scryer-proxy on localhost."
+
+[lib]
+path = "src/lib.rs"

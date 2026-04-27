@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/scryer-proxy",
+    "crates/scryer-fetch-solana",
+    "crates/scryer-fetch-evm",
+    "crates/scryer-fetch-cex-kraken",
+    "crates/scryer-fetch-cex-hyperliquid",
+    "crates/scryer-fetch-dexagg",
+    "crates/scryer-schema",
+    "crates/scryer-store",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/adamnoonan/scryer"
+
+[workspace.dependencies]
+arrow-array = "55"
+arrow-schema = "55"
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
