@@ -81,6 +81,10 @@ enum SolanaTarget {
     JupiterLendLiquidations(solana_cmd::JupiterLendLiquidationsArgs),
     /// Snapshot Fluid Vaults VaultConfig accounts (one-shot, getProgramAccounts).
     FluidVaultConfigs(solana_cmd::FluidVaultConfigsArgs),
+    /// One-tick Kamino-Scope tape collector (single getAccountInfo,
+    /// 8 xStock symbols sliced locally). Schedule via launchd / cron
+    /// at 60s cadence.
+    KaminoScopeTape(solana_cmd::KaminoScopeTapeArgs),
 }
 
 #[tokio::main]
@@ -116,6 +120,7 @@ async fn main() -> Result<()> {
             SolanaTarget::KaminoLiquidations(a) => solana_cmd::run_kamino_liquidations(a).await,
             SolanaTarget::JupiterLendLiquidations(a) => solana_cmd::run_jupiter_lend_liquidations(a).await,
             SolanaTarget::FluidVaultConfigs(a) => solana_cmd::run_fluid_vault_configs(a).await,
+            SolanaTarget::KaminoScopeTape(a) => solana_cmd::run_kamino_scope_tape(a).await,
         },
     }
 }

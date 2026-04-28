@@ -21,6 +21,7 @@ pub mod fluid_vault_configs;
 pub mod get_transactions;
 pub mod jupiter_lend_liquidations;
 pub mod kamino_liquidations;
+pub mod kamino_scope_tape;
 pub mod parse;
 pub mod parse_transactions;
 pub mod sig_paginate;
@@ -39,6 +40,10 @@ pub use jupiter_lend_liquidations::{
 pub use kamino_liquidations::{
     extract_liquidations, MarketFilter, ReserveSymbolMap, KLEND_PROGRAM, LIQUIDATE_V1_DISC,
     LIQUIDATE_V2_DISC,
+};
+pub use kamino_scope_tape::{
+    canonical_xstock_chain_map, decode_scope_readings, poll_once_via_proxy as poll_kamino_scope_once,
+    SCOPE_PDA,
 };
 pub use parse::parse_swap;
 pub use parse_transactions::{parse_all, parse_transactions_with_retry, ParseTxsConfig, BATCH_SIZE};

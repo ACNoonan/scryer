@@ -3,12 +3,15 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use scryer_fetch_solana::{
-    mints, CollateralFilter, FluidVaultConfigsFetcher, FluidVaultConfigsFetcherConfig,
-    JupiterLendLiquidationsFetcher, JupiterLendLiquidationsFetcherConfig,
-    KaminoLiquidationsFetcher, KaminoLiquidationsFetcherConfig, PoolMetadata, ReserveSymbolMap,
-    SupplyMintFilter, SwapsFetcher, SwapsFetcherConfig,
+    canonical_xstock_chain_map, mints, poll_kamino_scope_once, CollateralFilter,
+    FluidVaultConfigsFetcher, FluidVaultConfigsFetcherConfig, JupiterLendLiquidationsFetcher,
+    JupiterLendLiquidationsFetcherConfig, KaminoLiquidationsFetcher,
+    KaminoLiquidationsFetcherConfig, PoolMetadata, ReserveSymbolMap, SupplyMintFilter,
+    SwapsFetcher, SwapsFetcherConfig, SCOPE_PDA,
 };
-use scryer_schema::{fluid_vault_config, jupiter_lend_liquidation, kamino_liquidation, swap};
+use scryer_schema::{
+    fluid_vault_config, jupiter_lend_liquidation, kamino_liquidation, kamino_scope, swap,
+};
 use scryer_store::Dataset;
 use serde::Deserialize;
 
@@ -374,6 +377,73 @@ pub async fn run_fluid_vault_configs(args: FluidVaultConfigsArgs) -> Result<()> 
         .context("Dataset::write")?;
     println!(
         "fluid_vault_configs fetched: rows_added={} rows_deduped={} partitions_written={}",
+        stats.rows_added, stats.rows_deduped, stats.partitions_written
+    );
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+pub struct KaminoScopeTapeArgs {
+    /// Single-tick mode. Currently the only supported mode; future
+    /// `--daemon` (with internal 60s ticker) will land if cron /
+    /// launchd cadence proves insufficient.
+    #[arg(long, default_value_t = true)]
+    once: bool,
+    /// Optional JSON map for `{symbol: chain_id}` overriding the
+    /// hardcoded canonical xStock map. Useful when Kamino governance
+    /// rewires a reserve's Scope chain index.
+    #[arg(long)]
+    chain_map: Option<PathBuf>,
+    /// Override the OraclePrices PDA. Defaults to Kamino's shared
+    /// xStock feed `3t4JZcueEzTbVP6kLxXrL3VpWx45jDer4eqysweBchNH`.
+    #[arg(long, default_value = SCOPE_PDA)]
+    feed_pda: String,
+    #[arg(long, default_value = "http://127.0.0.1:8899/rpc")]
+    proxy_url: String,
+    #[arg(long, default_value = "kamino:scope-tape")]
+    source: String,
+    #[arg(long, default_value = "./dataset")]
+    dataset: PathBuf,
+    #[arg(long, default_value = scryer_store::venue::KAMINO_SCOPE)]
+    venue: String,
+}
+
+pub async fn run_kamino_scope_tape(args: KaminoScopeTapeArgs) -> Result<()> {
+    use std::collections::HashMap;
+
+    let chain_map: HashMap<String, u32> = if let Some(path) = &args.chain_map {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("reading chain map {}", path.display()))?;
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing chain map {}", path.display()))?
+    } else {
+        canonical_xstock_chain_map()
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent(concat!("scry/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("building reqwest client")?;
+
+    tracing::info!(
+        feed_pda = args.feed_pda,
+        symbols = chain_map.len(),
+        proxy = args.proxy_url,
+        "polling Kamino-Scope tape"
+    );
+    let rows =
+        poll_kamino_scope_once(&client, &args.proxy_url, &args.feed_pda, &chain_map, &args.source)
+            .await
+            .context("poll_once_via_proxy")?;
+    tracing::info!(rows = rows.len(), "decoded; writing");
+
+    let ds = Dataset::new(&args.dataset);
+    let stats = ds
+        .write::<kamino_scope::v1::Reading>(&args.venue, None, &rows)
+        .context("Dataset::write")?;
+    println!(
+        "kamino_scope_tape polled: rows_added={} rows_deduped={} partitions_written={}",
         stats.rows_added, stats.rows_deduped, stats.partitions_written
     );
     Ok(())
