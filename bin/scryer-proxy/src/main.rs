@@ -15,6 +15,12 @@ use scryer_proxy::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load .env from CWD or any ancestor before tracing init so that
+    // tracing-env-filter sees the right values too. Silently ignored
+    // if no .env is present (production deployments wire env vars via
+    // launchd / systemd / k8s env directly).
+    let _ = dotenvy::dotenv();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("SCRYER_PROXY_LOG")

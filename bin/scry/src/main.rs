@@ -85,6 +85,10 @@ enum SolanaTarget {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load .env before clap parses so that env-bound flags like
+    // `--helius-api-key` (`#[arg(env = "HELIUS_API_KEY")]`) resolve.
+    let _ = dotenvy::dotenv();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("SCRY_LOG")
