@@ -1113,7 +1113,30 @@ exists in workspace; needs implementation.
 **Effort.** ~6+ hours per protocol (separate methodology entries
 each).
 
-### 30. `vix_term_structure.v1` — VIX1D / VIX9D / VIX / VIX3M / VIX6M forward  `[methodology-entry-needed]`
+### 30. `vix_term_structure.v1` — VIX1D / VIX9D / VIX / VIX3M / VIX6M forward  `[methodology-entry-needed; deferred — no upstream identified]`
+
+> **Status (2026-04-28).** Probed Databento (the natural fit given
+> Phase 38's CME futures infrastructure): **VIX index calculations
+> are NOT licensed via Databento.** Probed `OPRA.PILLAR`,
+> `XCBO.PILLAR` (not a valid Databento dataset name — Databento's
+> CBOE coverage is `BATS.PITCH`/`BATY.PITCH`/`EDGA`/`EDGX` options
+> venues only), `GLBX.MDP3`, `DBEQ.BASIC` — all returned zero
+> records or "invalid dataset" for `VIX`, `VIX9D`, `VIX1D`,
+> `VIX.c.0`. CBOE's VIX index calculations are licensed separately
+> via CBOE Direct (paid, ~$90/mo).
+>
+> **Other upstream candidates** (none verified yet):
+> - Stooq has `^vix` per scryer-fetch-equities's `symbol_to_stooq`.
+>   Term-structure variants (`^vix9d`, `^vix1d`, `^vix3m`, `^vix6m`)
+>   need to be probed.
+> - Yahoo `^VIX` etc. — same bot-detection problems that broke item
+>   14's Yahoo path; ruled out.
+> - FRED has `VIXCLS` daily but not the term-structure variants.
+>
+> **Path forward:** quick Stooq probe to enumerate which VIX-family
+> indices are present; if all 5 are there ship via the existing
+> `scry equities bars` Stooq path. If only `VIX`, decide whether
+> partial coverage is useful for Paper 2's vol-regime work.
 
 **What.** Daily forward tape of VIX term-structure points beyond the
 single VIX index that paper 1 currently uses. The slope (e.g.,
@@ -1625,6 +1648,115 @@ disclosure.
 
 ---
 
+### 44. `soothsayer-pyth-poster` daemon — bring Pyth equity feeds onto Solana  `[methodology-entry-needed]`
+
+**What.** Off-chain daemon that fetches Hermes price-update VAAs for a
+configured equity feed-id set (SPY, QQQ, AAPL, GOOGL, NVDA, TSLA, HOOD,
+MSTR, GLD, TLT) and posts them to Pyth's Solana receiver program. The
+result is a continuously-updated `PriceUpdateV2` PDA per feed that the
+soothsayer-router reads passively via its existing
+`upstreams::read_pyth_aggregate` decoder (no router-side changes needed).
+
+**Why.** Per the 2026-04-29 (evening) entry of
+`soothsayer/reports/methodology_history.md`: a direct query of Solana
+mainnet found that Pyth does NOT operate a sponsored-feed posting
+service for popular US equities (SPY, QQQ, AAPL, NVDA, TSLA, MSTR
+all return `AccountNotFound` at the standard shard-0 derivation).
+The feed_ids exist in Pyth's Hermes catalog and are signed by Wormhole
+guardians; Pyth simply doesn't continuously post them to Solana the
+way they do for crypto majors. To consume Pyth equity prices on-chain,
+soothsayer must operate the poster.
+
+**On-chain footprint: ZERO new programs.** Pyth's existing receiver
+(`rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ` on mainnet) already
+implements the relay pattern with permissionless writes — anyone can
+fetch a Hermes VAA and CPI into the receiver to update a `PriceUpdateV2`
+PDA. The receiver does Wormhole-guardian signature verification on-chain.
+Soothsayer's responsibility is the off-chain fetcher + the posting
+daemon, nothing else.
+
+This is the architectural distinction from item 42 (Chainlink Streams
+Relay): Chainlink's Verifier program returns decoded data via per-tx
+`return_data` only — there is no Chainlink-controlled PDA to read
+passively, hence soothsayer's own relay program. Pyth's receiver
+already provides the pattern.
+
+**Source.** Pyth Hermes API (`https://hermes.pyth.network/v2/`):
+- `GET /price_feeds?query=<symbol>` — discovers feed_ids
+- `GET /updates/price/latest?ids[]=<feed_id_hex>` — retrieves a fresh
+  signed VAA + parsed price for posting
+- WebSocket `/updates/price/stream?ids[]=...` for continuous streaming
+
+The `@pythnetwork/pyth-solana-receiver` TypeScript SDK provides the
+canonical receiver-CPI pattern; for Rust, `pyth-solana-receiver-sdk`
+(already a soothsayer-router dep this session) exposes the same.
+
+**Daemon shape.**
+1. Boot: load configured feed_id set (config file).
+2. Loop per feed (~60s cadence, configurable):
+   a. Fetch latest update from Hermes for the feed_id.
+   b. Build a Solana tx that calls Pyth receiver's `post_update` (or
+      `post_update_atomic` for the encoded-VAA shorter path).
+   c. Submit + confirm. Log tx signature + posting latency.
+   d. On failure (rate-limit, congestion, etc.): exponential backoff,
+      alert if cadence falls below SLA threshold.
+3. Mirror tape (parallel write to scryer parquet at
+   `dataset/pyth_poster/posts/v1/...` for audit-trail purposes).
+
+**Schema** (proposed `pyth_poster_post.v1` for the mirror tape):
+```
+feed_id_hex            string
+underlier_symbol       string
+posted_pda             string  (PriceUpdateV2 PDA address)
+posting_signature      string  (Solana tx signature)
+hermes_update_id       string nullable
+hermes_publish_time    i64
+solana_post_ts         i64
+solana_post_slot       u64
+post_lamports          u64     (rent paid; useful for cost accounting)
+verification_level     string  ('full' | 'partial')
+_schema_version        string  ('pyth_poster_post.v1')
+_fetched_at            i64
+_source                string
+_dedup_key             string  (= feed_id + hermes_publish_time)
+```
+
+**CLI.** `scry pyth-poster --feeds ALL|SPY,QQQ,... --signer-keypair <path> --rpc-url URL`
+
+**Operational notes.**
+- Signing keypair: dedicated soothsayer-controlled hot key. Per O10
+  in `soothsayer/reports/methodology_history.md` §2, starts as a
+  single key and migrates to multi-writer in v1.
+- Cost: each PriceUpdateV2 PDA is ~134 bytes; rent-exempt ~0.001 SOL
+  per feed. Plus tx fees per post (~5000 lamports). At 60s cadence
+  × 10 feeds × 86400s/day = ~14400 posts/day × 5000 lamports = ~0.072
+  SOL/day = ~$10/day at SOL=$140. Manageable.
+- `closeUpdateAccounts: false` mode keeps a single PriceUpdateV2 per
+  feed and re-uses it; the alternative `closeUpdateAccounts: true`
+  creates ephemeral PDAs which is wrong for our consumer pattern.
+- Trust model: per the 2026-04-29 (evening) commitments, Verifier-CPI
+  is mandatory (the Pyth receiver does Wormhole-guardian verification
+  natively; soothsayer cannot persist a value not signed by the
+  guardian set). Open-source daemon code lives in scryer.
+
+**Effort.** ~3-5 days for a working devnet daemon with multi-feed
+support + launchd integration. Hermes API access is free / no auth
+needed. Phase-able:
+- 44a: single-feed daemon (e.g., SOL/USD) on devnet, prove out the
+  receiver-CPI shape end-to-end. ~1-2 days.
+- 44b: multi-feed support + cadence + retry + mirror tape. ~1-2 days.
+- 44c: launchd plist + alerting + failover behaviour. ~1 day.
+
+**Methodology log entries needed.** Required pre-flight per scryer's
+hard rule #1: feed-allowlist policy, signing-key rotation procedure,
+cost-attribution / sustainability disclosure, failure-mode handling.
+Plus one entry on the soothsayer side for the integration of poster-
+fed PriceUpdateV2 PDAs into the router's `read_pyth_aggregate` path
+(no code change needed — the addresses are just configured in
+`AssetConfig.upstreams[].pda` once known).
+
+---
+
 ## Methodology log entries needed (running list)
 
 Per hard rule #1, every new schema needs a pre-flight entry in
@@ -1665,6 +1797,7 @@ Added 2026-04-28 (Priority 1.5 / 2.5 / 3-extension / 4):
 - `mango_v4_market_tape.v1` (item 39; added 2026-04-28 for Layer 0 router)
 - `streams_relay_update.v1` (item 42; on-chain Anchor account; soothsayer-side schema lock recorded in `soothsayer/reports/methodology_history.md` 2026-04-29 (afternoon); cross-listed here for visibility)
 - `chainlink_streams_relay_tape.v1` (item 43; scryer-side mirror tape; methodology entry needed pre-implementation per scryer hard rule #1)
+- `pyth_poster_post.v1` (item 44; mirror tape for the Pyth equity-feed poster daemon; daemon-only, NO new on-chain program; methodology entry needed)
 - `raydium_pool_metadata.v1` (item 40; added 2026-04-28 with the LVR v0.7 cutover)
 - `geckoterminal_ohlcv.v1` (item 41; added 2026-04-28 with the LVR v0.7 cutover)
 

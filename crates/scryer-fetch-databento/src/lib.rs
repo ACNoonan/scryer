@@ -3,7 +3,7 @@
 //! Wraps the official `databento` Rust SDK
 //! (`HistoricalClient::timeseries::get_range`) for the
 //! `cme_intraday_1m.v1` schema. CME futures (`GLBX.MDP3`) front-month
-//! continuous contracts (`ES.c.0` / `NQ.c.0` / `GC.c.0` / `ZN.c.0`)
+//! continuous contracts (`ES.v.0` / `NQ.v.0` / `GC.v.0` / `ZN.v.0`)
 //! at 1-minute OHLCV resolution.
 //!
 //! # Pricing
@@ -17,12 +17,12 @@
 //!
 //! # Symbol mapping
 //!
-//! - `ES=F` → `ES.c.0` (E-mini S&P 500 front-month continuous)
-//! - `NQ=F` → `NQ.c.0` (E-mini Nasdaq 100)
-//! - `GC=F` → `GC.c.0` (COMEX Gold)
-//! - `ZN=F` → `ZN.c.0` (CBOT 10Y T-Note)
+//! - `ES=F` → `ES.v.0` (E-mini S&P 500 front-month continuous)
+//! - `NQ=F` → `NQ.v.0` (E-mini Nasdaq 100)
+//! - `GC=F` → `GC.v.0` (COMEX Gold)
+//! - `ZN=F` → `ZN.v.0` (CBOT 10Y T-Note)
 //!
-//! Databento's `SType::Continuous` consumes the `.c.0` form directly;
+//! Databento's `SType::Continuous` consumes the `.v.0` form directly;
 //! the `.0` suffix means front-month roll. The schema retains the
 //! yfinance-style `XX=F` symbol for downstream consumer parity.
 
@@ -33,6 +33,7 @@ use databento::dbn::{Dataset, OhlcvMsg, SType, Schema as DbnSchema};
 use databento::historical::timeseries::GetRangeParams;
 use databento::HistoricalClient;
 use scryer_schema::cme_intraday_1m::v1::Bar;
+use scryer_schema::yahoo::v1::Bar as YahooBar;
 use scryer_schema::Meta;
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -50,13 +51,19 @@ pub enum FetchError {
 }
 
 /// Map a yfinance-style CME symbol (`ES=F`) to Databento's continuous-
-/// contract syntax (`ES.c.0`). Returns `None` for symbols that don't
-/// follow the `XX=F` convention so the caller can decide whether to
-/// pass through verbatim.
+/// contract syntax (`ES.v.0` — volume-rolled front-month). Returns
+/// `None` for symbols that don't follow the `XX=F` convention so the
+/// caller can decide whether to pass through verbatim.
+///
+/// **Volume-rolled, not calendar-rolled.** Databento's `.v.0` calendar
+/// roll returns zero records for COMEX Gold (`GC.v.0` was empty in
+/// our 2026-04-28 probe); `.v.0` works uniformly for ES / NQ / GC /
+/// ZN. Volume rolling is also the more standard convention in
+/// industry continuous-contract data.
 pub fn symbol_to_databento_continuous(yf_symbol: &str) -> Option<String> {
     yf_symbol
         .strip_suffix("=F")
-        .map(|root| format!("{}.c.0", root.to_uppercase()))
+        .map(|root| format!("{}.v.0", root.to_uppercase()))
 }
 
 #[derive(Clone, Debug)]
@@ -140,16 +147,95 @@ pub async fn fetch_ohlcv_1m(
     Ok(out)
 }
 
+/// Fetch daily equity OHLCV bars via Databento's `DBEQ.BASIC` dataset.
+/// Reuses the existing `yahoo.v1::Bar` schema (the schema name is
+/// historical from soothsayer's yfinance era; the row shape is
+/// "OHLCV daily bars from somewhere", upstream-agnostic).
+///
+/// `DBEQ.BASIC` consolidates multiple US-equity venues; the same
+/// trading day for a symbol may appear as 2-4 records (one per
+/// consolidated venue / SIP listing). The store's
+/// `(symbol, ts)` dedup_key collapses these to one row per
+/// (symbol, day) — first observation wins.
+///
+/// `adj_close` is set equal to `close`: Databento doesn't pre-apply
+/// split/dividend adjustments. For paper-1 Stooq cross-check, both
+/// sources end up with adjusted prices in `close`/`adj_close`,
+/// directly comparable.
+pub async fn fetch_equities_daily(
+    api_key: &str,
+    cfg: &PollConfig,
+    symbol: &str,
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+    meta: &Meta,
+) -> Result<Vec<YahooBar>, FetchError> {
+    if api_key.is_empty() {
+        return Err(FetchError::NoApiKey);
+    }
+    let mut client = HistoricalClient::builder()
+        .key(api_key)
+        .map_err(|e| FetchError::Databento(format!("client key: {e}")))?
+        .build()
+        .map_err(|e| FetchError::Databento(format!("client build: {e}")))?;
+
+    let params = GetRangeParams::builder()
+        .dataset("DBEQ.BASIC")
+        .date_time_range(start..end)
+        .symbols(symbol)
+        .stype_in(SType::RawSymbol)
+        .schema(DbnSchema::Ohlcv1D)
+        .build();
+
+    let mut decoder = client
+        .timeseries()
+        .get_range(&params)
+        .await
+        .map_err(|e| FetchError::Databento(format!("get_range: {e}")))?;
+
+    let mut out: Vec<YahooBar> = Vec::new();
+    loop {
+        match decoder.decode_record::<OhlcvMsg>().await {
+            Ok(Some(rec)) => {
+                let scale = 1e-9;
+                let ts_ns: i64 = rec.hd.ts_event as i64;
+                // Convert ns-since-epoch → Date32 (days-since-epoch).
+                // `yahoo.v1::Bar.ts` is i32 days.
+                let ts_days_i64 = ts_ns / 86_400_000_000_000;
+                let ts: i32 = ts_days_i64 as i32;
+                let close = rec.close as f64 * scale;
+                out.push(YahooBar {
+                    symbol: symbol.to_string(),
+                    ts,
+                    open: rec.open as f64 * scale,
+                    high: rec.high as f64 * scale,
+                    low: rec.low as f64 * scale,
+                    close,
+                    adj_close: close,
+                    volume: rec.volume as i64,
+                    meta: meta.clone(),
+                });
+            }
+            Ok(None) => break,
+            Err(e) => {
+                return Err(FetchError::Databento(format!("decode: {e}")));
+            }
+        }
+    }
+    let _ = cfg.request_timeout;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn symbol_mapping_covers_known_cme_futures() {
-        assert_eq!(symbol_to_databento_continuous("ES=F").as_deref(), Some("ES.c.0"));
-        assert_eq!(symbol_to_databento_continuous("NQ=F").as_deref(), Some("NQ.c.0"));
-        assert_eq!(symbol_to_databento_continuous("GC=F").as_deref(), Some("GC.c.0"));
-        assert_eq!(symbol_to_databento_continuous("ZN=F").as_deref(), Some("ZN.c.0"));
+        assert_eq!(symbol_to_databento_continuous("ES=F").as_deref(), Some("ES.v.0"));
+        assert_eq!(symbol_to_databento_continuous("NQ=F").as_deref(), Some("NQ.v.0"));
+        assert_eq!(symbol_to_databento_continuous("GC=F").as_deref(), Some("GC.v.0"));
+        assert_eq!(symbol_to_databento_continuous("ZN=F").as_deref(), Some("ZN.v.0"));
     }
 
     #[test]

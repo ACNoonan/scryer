@@ -14,9 +14,10 @@ use anyhow::{Context, Result};
 use chrono::{NaiveDate, TimeZone, Utc};
 use clap::Parser;
 use scryer_fetch_databento::{
-    fetch_ohlcv_1m, symbol_to_databento_continuous, PollConfig,
+    fetch_equities_daily, fetch_ohlcv_1m, symbol_to_databento_continuous, PollConfig,
 };
 use scryer_schema::cme_intraday_1m::v1 as schema;
+use scryer_schema::yahoo::v1 as yahoo_schema;
 use scryer_schema::Meta;
 use scryer_store::{venue, Dataset};
 use time::OffsetDateTime;
@@ -140,6 +141,119 @@ pub async fn run_intraday(args: IntradayArgs) -> Result<()> {
     }
     println!(
         "databento intraday-1m: rows_added={} rows_deduped={} partitions_written={} total_records={} symbols_failed={}",
+        total_added, total_deduped, total_partitions, total_records, errors.len()
+    );
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+pub struct EquitiesDailyArgs {
+    /// Comma-separated US equity tickers. Default: the 10 paper-1
+    /// underliers (SPY/QQQ/AAPL/GOOGL/NVDA/TSLA/HOOD/MSTR/GLD/TLT).
+    #[arg(long, value_delimiter = ',')]
+    symbols: Vec<String>,
+    /// Window start as `YYYY-MM-DD` UTC.
+    #[arg(long)]
+    start: String,
+    /// Window end as `YYYY-MM-DD` UTC.
+    #[arg(long)]
+    end: String,
+    /// Databento API key. Defaults to `DATABENTO_API_KEY` env var.
+    #[arg(long, env = "DATABENTO_API_KEY")]
+    api_key: String,
+    #[arg(long, default_value = "databento:dbeq.basic")]
+    source: String,
+    #[arg(long, default_value_t = 120)]
+    request_timeout_secs: u64,
+    #[arg(long, default_value = "./dataset")]
+    dataset: PathBuf,
+    /// Venue. Default `databento` so this lives separate from the
+    /// Stooq-sourced `yahoo` venue (operators can cross-check the
+    /// two sources without parquet collisions).
+    #[arg(long, default_value = venue::DATABENTO)]
+    venue: String,
+}
+
+const DEFAULT_EQUITY_SYMBOLS: &[&str] = &[
+    "SPY", "QQQ", "AAPL", "GOOGL", "NVDA", "TSLA", "HOOD", "MSTR", "GLD", "TLT",
+];
+
+pub async fn run_equities_daily(args: EquitiesDailyArgs) -> Result<()> {
+    if args.api_key.is_empty() {
+        anyhow::bail!(
+            "Databento API key required; pass --api-key or set DATABENTO_API_KEY env var"
+        );
+    }
+    let cfg = PollConfig {
+        source_label: args.source.clone(),
+        request_timeout: Duration::from_secs(args.request_timeout_secs),
+    };
+    let now = Utc::now();
+    let meta = Meta::new(yahoo_schema::SCHEMA_VERSION, now.timestamp(), &args.source);
+
+    let symbols: Vec<String> = if args.symbols.is_empty() {
+        DEFAULT_EQUITY_SYMBOLS.iter().map(|s| s.to_string()).collect()
+    } else {
+        args.symbols.clone()
+    };
+
+    let start_dt = parse_ymd_to_offset(&args.start)?;
+    let end_dt = parse_ymd_to_offset(&args.end)?;
+
+    tracing::info!(
+        symbols = symbols.len(),
+        start = args.start,
+        end = args.end,
+        "Databento DBEQ.BASIC daily equities batch"
+    );
+
+    let mut by_symbol: BTreeMap<String, Vec<yahoo_schema::Bar>> = BTreeMap::new();
+    let mut errors: Vec<(String, String)> = Vec::new();
+    let mut total_records = 0usize;
+    for sym in &symbols {
+        tracing::info!(sym, "fetching");
+        match fetch_equities_daily(&args.api_key, &cfg, sym, start_dt, end_dt, &meta).await {
+            Ok(rows) => {
+                tracing::info!(sym, records = rows.len(), "decoded");
+                total_records += rows.len();
+                by_symbol.entry(sym.clone()).or_default().extend(rows);
+            }
+            Err(e) => {
+                tracing::warn!(sym, error = %e, "fetch failed; continuing");
+                errors.push((sym.clone(), e.to_string()));
+            }
+        }
+    }
+
+    if by_symbol.values().all(|v| v.is_empty()) {
+        if !errors.is_empty() {
+            anyhow::bail!(
+                "all {} symbol(s) failed; first error: {}",
+                errors.len(),
+                errors.first().map(|(_, e)| e.as_str()).unwrap_or("?")
+            );
+        }
+        println!("databento equities-daily: rows_added=0 (empty window)");
+        return Ok(());
+    }
+
+    let ds = Dataset::new(&args.dataset);
+    let mut total_added = 0usize;
+    let mut total_deduped = 0usize;
+    let mut total_partitions = 0usize;
+    for (sym, rows) in &by_symbol {
+        if rows.is_empty() {
+            continue;
+        }
+        let stats = ds
+            .write::<yahoo_schema::Bar>(&args.venue, Some(sym), rows)
+            .with_context(|| format!("Dataset::write equities_daily for {sym}"))?;
+        total_added += stats.rows_added;
+        total_deduped += stats.rows_deduped;
+        total_partitions += stats.partitions_written;
+    }
+    println!(
+        "databento equities-daily: rows_added={} rows_deduped={} partitions_written={} total_records={} symbols_failed={}",
         total_added, total_deduped, total_partitions, total_records, errors.len()
     );
     Ok(())

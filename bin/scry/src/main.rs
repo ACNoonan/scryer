@@ -163,10 +163,16 @@ struct DatabentoCmd {
 
 #[derive(Subcommand, Debug)]
 enum DatabentoTarget {
-    /// CME futures 1-minute OHLCV bars (GLBX.MDP3 dataset, continuous
-    /// front-month contracts ES.c.0/NQ.c.0/GC.c.0/ZN.c.0). Writes
+    /// CME futures 1-minute OHLCV bars (GLBX.MDP3 dataset, volume-
+    /// rolled continuous front-month contracts ES.v.0/NQ.v.0/GC.v.0/
+    /// ZN.v.0). Writes
     /// dataset/cme/intraday_1m/v1/symbol={X}/year=Y/month=M/day=D.parquet.
     Intraday1m(databento_cmd::IntradayArgs),
+    /// Daily OHLCV equity bars via DBEQ.BASIC (Databento's
+    /// consolidated US-equity dataset). Writes to a separate venue
+    /// (`databento`, not `yahoo`) so cross-source validation against
+    /// Stooq-sourced bars is possible without parquet collisions.
+    EquitiesDaily(databento_cmd::EquitiesDailyArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -359,6 +365,7 @@ async fn main() -> Result<()> {
         },
         Command::Databento(c) => match c.target {
             DatabentoTarget::Intraday1m(a) => databento_cmd::run_intraday(a).await,
+            DatabentoTarget::EquitiesDaily(a) => databento_cmd::run_equities_daily(a).await,
         },
     }
 }

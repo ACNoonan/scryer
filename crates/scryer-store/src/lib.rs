@@ -68,6 +68,10 @@ pub mod venue {
     pub const LOOPSCALE: &str = "loopscale";
     pub const FRED: &str = "fred";
     pub const CME: &str = "cme";
+    /// Databento-sourced equity bars. Distinct from `yahoo` venue
+    /// (Stooq-sourced) so cross-source validation can compare both
+    /// without collision in the same parquet file.
+    pub const DATABENTO: &str = "databento";
     /// Cross-DEX xStock swap prints — venue catches every DEX
     /// touching xStock mints regardless of which program executed
     /// the swap (Orca, Meteora, Phoenix, Raydium variants,
