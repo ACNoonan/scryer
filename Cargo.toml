@@ -13,6 +13,7 @@ members = [
     "crates/scryer-fetch-equities",
     "crates/scryer-fetch-rss",
     "crates/scryer-fetch-fred",
+    "crates/scryer-fetch-databento",
     "crates/scryer-schema",
     "crates/scryer-store",
     "crates/scryer-portal",

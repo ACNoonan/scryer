@@ -19,6 +19,7 @@ mod import_cmd;
 mod jito_cmd;
 mod kamino_obligations_cmd;
 mod kamino_reserves_cmd;
+mod databento_cmd;
 mod dex_xstock_swaps_cmd;
 mod equities_cmd;
 mod fred_cmd;
@@ -68,6 +69,9 @@ enum Command {
     /// RetailSales by default). REST against api.stlouisfed.org;
     /// requires a free FRED_API_KEY.
     Fred(FredCmd),
+    /// Databento Historical API — CME futures 1-minute OHLCV bars.
+    /// Pay-as-you-go against the operator's $125 signup credit.
+    Databento(DatabentoCmd),
 }
 
 #[derive(Parser, Debug)]
@@ -149,6 +153,20 @@ struct RssCmd {
 struct FredCmd {
     #[command(subcommand)]
     target: FredTarget,
+}
+
+#[derive(Parser, Debug)]
+struct DatabentoCmd {
+    #[command(subcommand)]
+    target: DatabentoTarget,
+}
+
+#[derive(Subcommand, Debug)]
+enum DatabentoTarget {
+    /// CME futures 1-minute OHLCV bars (GLBX.MDP3 dataset, continuous
+    /// front-month contracts ES.c.0/NQ.c.0/GC.c.0/ZN.c.0). Writes
+    /// dataset/cme/intraday_1m/v1/symbol={X}/year=Y/month=M/day=D.parquet.
+    Intraday1m(databento_cmd::IntradayArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -338,6 +356,9 @@ async fn main() -> Result<()> {
         },
         Command::Fred(c) => match c.target {
             FredTarget::MacroCalendar(a) => fred_cmd::run_macro_calendar(a).await,
+        },
+        Command::Databento(c) => match c.target {
+            DatabentoTarget::Intraday1m(a) => databento_cmd::run_intraday(a).await,
         },
     }
 }

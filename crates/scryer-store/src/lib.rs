@@ -67,6 +67,7 @@ pub mod venue {
     pub const JITO: &str = "jito";
     pub const LOOPSCALE: &str = "loopscale";
     pub const FRED: &str = "fred";
+    pub const CME: &str = "cme";
     /// Cross-DEX xStock swap prints — venue catches every DEX
     /// touching xStock mints regardless of which program executed
     /// the swap (Orca, Meteora, Phoenix, Raydium variants,
