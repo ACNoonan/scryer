@@ -750,6 +750,172 @@ returns all VaultConfigs program-wide.
 
 ---
 
+## Portal — 2026-04-28 (locked)
+
+### Purpose
+
+Local-first management UI for scryer. Two jobs:
+
+1. Visualize and control scheduled fetcher jobs — read-only on plist
+   contents, action-only via `launchctl` (Run / Load / Unload).
+2. Explore the parquet store under `dataset/` and export slices to
+   CSV / XLSX / Parquet for downstream analysis.
+
+Single user (the operator). No auth in MVP. Future Linux-server deploy
+is gated by IP allowlist only — no user accounts, no roles.
+
+### Architecture
+
+**Locked 2026-04-28**: Tauri-on-Mac client + axum HTTP backend + native
+DuckDB + per-OS `JobBackend` trait.
+
+```
+crates/
+  scryer-portal/                     # Rust axum HTTP server (workspace member)
+    src/lib.rs                       # router, state, types
+    src/main.rs                      # binary: scryer-portal-server
+    src/jobs/                        # JobBackend trait + impls
+    src/data/                        # DuckDB engine + dataset discovery
+    src/api/                         # axum route handlers
+  scryer-portal-shell/               # Tauri desktop shell (workspace member)
+    src/main.rs                      # tauri::Builder, spawns sidecar
+    tauri.conf.json
+    ui/                              # Vite + React + TS frontend (separate npm project)
+      package.json
+      src/...
+```
+
+**The axum backend is the same binary in both deploy modes.** Locally,
+Tauri spawns it as a sidecar bound to `127.0.0.1:<port>` and the
+webview talks to it via `fetch`. On a future Linux server, that same
+`scryer-portal-server` binary runs as a systemd-managed daemon, bound
+to `0.0.0.0` with the operator's IP allowlisted at the firewall.
+Tauri stays on the operator's Mac and toggles the backend URL setting
+to point at the remote host. Frontend code is identical in both modes.
+
+This rules out using Tauri commands (IPC) for data — those don't exist
+in the standalone-daemon case. All data flow is HTTP/JSON, full stop.
+
+### `JobBackend` trait
+
+```rust
+pub trait JobBackend: Send + Sync {
+    fn list(&self) -> Result<Vec<JobSummary>>;
+    fn get(&self, label: &str) -> Result<JobDetail>;
+    fn run(&self, label: &str) -> Result<()>;
+    fn load(&self, label: &str) -> Result<()>;
+    fn unload(&self, label: &str) -> Result<()>;
+}
+```
+
+Two implementations in v0.1-portal-1:
+
+- `LaunchdBackend` (macOS): reads `~/Library/LaunchAgents/*.plist` via
+  the `plist` crate; calls `launchctl print/kickstart/load/unload`
+  by shelling out. Logs are tailed from `StandardOutPath` /
+  `StandardErrorPath` declared in the plist (scryer convention:
+  `~/Library/Logs/scryer/<job>.{out,err}.log`).
+- `SystemdBackend` (Linux): trait stub returning
+  `Err(NotYetImplemented)` from every method. Real impl deferred until
+  the dedicated-server deploy is real (not v0.1-portal scope).
+
+**Why both stubs land now**: the Cargo `cfg(target_os)` switch and the
+trait shape need to be locked before the Mac-side impl gets committed,
+or the abstraction will be retrofitted under pressure later.
+
+### Plist edits — out of scope
+
+**Locked 2026-04-28: read-only.** The portal does not write plist files.
+Editing routes to LaunchControl / Lingon / `$EDITOR` + `launchctl
+unload && launchctl load`. Rationale: a broken plist write silently
+disables a tape until the next manual verification; the cost of that
+silent failure is data loss in the partition. The action surface
+(Run / Load / Unload / Reveal in Finder / Open log in Console.app) covers
+operational needs without the foot-gun.
+
+### Job grouping
+
+The list view groups jobs into two sections:
+
+- **Scryer**: labels matching `com.adamnoonan.scryer.*` (current
+  convention; all five active plists match this prefix).
+- **Other**: every other launchd agent the user has installed.
+  Collapsed by default; rendered with muted styling. Surfaced so
+  temporal collisions (e.g. another agent firing at the same minute as
+  a scryer tape) are visible at a glance.
+
+A 24-hour timeline strip above the list shows next-fire times for all
+jobs (scryer-colored, others muted) so cron-style overlaps are
+visually obvious.
+
+### Data engine — native DuckDB
+
+**Locked 2026-04-28: native DuckDB via the Rust `duckdb` crate, not
+WASM.** The portal backend embeds DuckDB and queries
+`dataset/**/*.parquet` directly. Rationale:
+
+- Runs as a Rust dependency in the same process; no WASM bundle, no
+  browser file-system permission flow.
+- DuckDB's parquet reader is hive-partition-aware, so the
+  `dataset/{venue}/{data_type}/v{N}/year=Y/...` layout is queryable
+  without extra glue.
+- Same binary in the future Linux-server case has DuckDB available
+  for remote queries; nothing to re-architect.
+- Browser-only mode is not a goal — local Tauri or remote-via-API are
+  the two supported modes.
+
+Exports use DuckDB's native `COPY (...) TO 'path' (FORMAT csv)` for
+CSV and Parquet; XLSX uses `rust_xlsxwriter` over the Arrow result.
+
+### Schema discovery
+
+The portal auto-discovers schemas by walking `dataset/{venue}/{data_type}/v{N}/`
+directories. The `_schema_version` column on each parquet row is the
+authoritative version identifier; the directory name is a hint, not a
+contract. This matches the methodology's "rebuild from source is
+always cheaper than maintaining a migration layer" stance — the portal
+trusts what's actually in the parquet.
+
+### v0.1-portal-1 done definition
+
+The operator can:
+
+1. Open the Tauri app, see a list of running scryer plists with last-run /
+   exit-code / log tail, and click Run / Load / Unload on any of them.
+2. Browse a per-schema dashboard for each schema present in `dataset/`,
+   write a SQL query, run it against DuckDB, and export results as CSV or
+   XLSX.
+3. The same `scryer-portal-server` binary runs `cargo run` standalone
+   and serves the same API on localhost — no Tauri required for the
+   backend half.
+
+### Out of scope (v0.1-portal-1)
+
+- Plist editing / creation
+- Auth / multi-user / RBAC
+- Real `SystemdBackend` (trait stub only — Linux deploy is future work)
+- Mobile responsive design (desktop-only)
+- Realtime job-log streaming (poll/refresh is sufficient)
+- Failure-detection notifications (would consume scryer-proxy's
+  Prometheus metrics — separate effort)
+- Charts beyond line / bar / table (no heavy viz library)
+
+### Open questions (defer to v0.2-portal+)
+
+- **Linux deploy semantics.** When the dedicated-server reality lands,
+  what's the IP-allowlist mechanism — `iptables` / nginx in front /
+  axum middleware? Most likely nginx + IP allowlist, but the binary
+  itself stays simple.
+- **Saved query persistence location.** Currently planned at
+  `~/Library/Application Support/scryer/portal/queries.json`; needs
+  symmetry on Linux (XDG dirs).
+- **Per-schema dashboard composition.** v0.1-portal-1 ships a generic
+  default (row count, partition count, recent rows). Schema-specific
+  dashboards (e.g. `pyth.v1` confidence-band visualizer) are
+  implementation-rich and gated on actual analytical demand.
+
+---
+
 ## Decision log
 
 Append every architectural decision with its date and reason. The honest
@@ -778,7 +944,9 @@ without losing the rationale.
 | v0.1-phase-22 | 2026-04-28 | RedStone Live tape daemon. New crate `scryer-fetch-redstone` (REST-only, no proxy — the public `api.redstone.finance/prices` gateway is HTTP-with-auth-via-`provider`-param, single-endpoint, so no quota-routing surface to begin with). `PollConfig` with gateway URL / provider / poll label / source label / timeout / retry; `poll_one_symbol` issues one GET per symbol with `limit=1` and returns zero-or-more `redstone::v1::Reading` rows. Tolerates array-vs-object response shape, gateway-error envelope, missing `liteEvmSignature` (skipped — schema's `_dedup_key = "redstone:{signature}"` requires it). `source_json` and `raw_json` are canonicalized via `BTreeMap`-sorted recursion so on-disk content matches Python `json.dumps(sort_keys=True)`. New `scry redstone tape [--label cron-10m] [--symbols A,B,C] [--gateway-url URL] [--provider redstone]` CLI is a one-tick poll meant to be wrapped by launchd / cron at the desired cadence (typical 10m). 7 unit tests (array/object/empty/error/missing-sig/sorted-source/float-ms→us). Live-validated against the public gateway: 3 default symbols (SPY, QQQ, MSTR) returned plausible market values + EVM-signed observations; Phase 10's `redstone.v1` parquet round-trip confirmed end-to-end. | Phase 22 of the soothsayer-migration sub-plan — closes the ~2.5d RedStone gap left by the deleted-but-still-running Python collector script. Lives in its own crate (rather than `scryer-fetch-dexagg`) because RedStone is a signed-observation oracle feed, not a DEX trade tape — they share no upstream operational surface (auth, retry, JSON shape) so co-locating them would force a dual-use harness on two unrelated APIs. Rationale documented in the crate's lib.rs doc-block. |
 | v0.1-phase-23 | 2026-04-28 | Pyth Hermes tape daemon. New crate `scryer-fetch-pyth` (REST-only, no proxy — `hermes.pyth.network` is single-endpoint and the upstream batches all 32 feed IDs in a single response). `PollConfig` + `poll_once(client, cfg, feeds, poll_unix, poll_ts, meta)` issues one GET with `ids[]=…` repeated 32× and returns 32 `pyth::v1::Reading` rows (one per `(symbol, session)`). On batch failure: 32 rows emitted with `pyth_err` set + other fields zeroed, so the tape captures the outage rather than gapping. Per-feed missing-from-response: same error-row treatment, scoped to that feed. The 32-feed registry (8 xStock symbols × 4 sessions: regular / pre / post / on) is hardcoded as `DEFAULT_FEEDS`, derived from soothsayer commit `b29b09e` against `https://hermes.pyth.network/v2/price_feeds?asset_type=equity` 2026-04-26. CLI surface: `scry pyth tape [--feeds FILE] [--hermes-url URL]`. `poll_ts` rendered as ISO 8601 second-precision UTC with `+00:00` suffix to match Python `datetime.fromtimestamp(..., timezone.utc).isoformat()` byte-for-byte. 5 unit tests (registry shape / expo scaling / missing-fields-zeroed / error-row / id-normalization). Live-validated against Hermes: 32 rows decoded with plausible market values (SPY $715 / NVDA $216 / GOOGL $350) across all four sessions; the SPY pre-market feed had `age=1s` while the regular feed had `age=52397s` (~14.5h, last observed yesterday's close), confirming session-flavored feeds report independently. | Phase 23 of the soothsayer-migration sub-plan. Same single-endpoint REST-only architecture as Phase 22 RedStone; differs in batching (32 IDs in one call vs 1 per call) and in error semantics (full-tick error → 32 error rows, not zero rows). Boilerplate budget held: ~480 LOC for crate + CLI, comparable to RedStone's ~470. Live test confirmed the soothsayer "session feeds widen confidence asymmetrically off-hours" empirical observation reproduces — comparator-side analysis can pick the right feed per-window without re-deriving the registry. |
 | v0.1-phase-25 | 2026-04-28 | GeckoTerminal trades migration. New schema `scryer-schema::geckoterminal::v1::Trade` (11 logical fields: tx_hash, ts, block_number, side, price, sol_amount, usdc_amount, volume_in_usd, price_sol_in_usd, tx_from_address, kind + 4 metadata) — distinct from `swap.v1::Swap` because GT preserves richer per-trade fields (`volume_in_usd`, `price_sol_in_usd`, `tx_from_address`) that Helius parseTransactions doesn't expose. Schema rationale: keep `swap.v1` minimal-and-stable for the Helius-sourced collector (Phase 4) while letting GT-sourced consumers query the richer fields. Filled the previously-stub `scryer-fetch-dexagg` crate with `poll_pool_trades(client, cfg, pool, meta)` + tolerant deserializer (handles GT's mixed string/number `from_token_amount` representations + missing `tx_hash` skipping + unknown-leg-mints rejection). CLI `scry dexagg gt-trades [--pool ADDR]` defaults to Raydium-v4 SOL/USDC. Daily/keyed partition: `dataset/geckoterminal/trades/v1/pool={addr}/year=Y/month=M/day=D.parquet`. Live-validated against the public free-tier endpoint: 300 rows decoded in 1 partition (the free-tier batch size); SOL price range $83.51–$84.10 across a 45-minute window matches market close. Replaces `com.adamnoonan.quant-work.geckoterminal-fetcher` Python launchd job; new plist `com.adamnoonan.scryer.geckoterminal-trades` at 900s cadence. 4 schema unit tests + 6 fetcher unit tests pass. | Closes the GeckoTerminal entry in the launchd-data-ops inventory — the only non-V5 launchd-managed Python data pull. New schema rather than augmenting `swap.v1` because additive nullable fields would require import-side tolerance for older parquet files that lack the columns; cheaper to keep schemas distinct and let downstream consumers know whether they're reading Helius-sourced or GT-sourced data via the venue path. The previously-empty `scryer-fetch-dexagg` crate (described as "v0.2+ scope" at scaffold time) now lands in v0.1 alongside the rest of the migration. |
+| v0.1-portal-1 | 2026-04-28 | Methodology section "Portal" locked. New crates land: `scryer-portal` (axum HTTP backend, native DuckDB, `JobBackend` trait with `LaunchdBackend` impl + `SystemdBackend` stub) and `scryer-portal-shell` (Tauri desktop app + Vite/React UI under `ui/`). The same `scryer-portal-server` binary deploys standalone to a future Linux box; Tauri shell stays on the operator's Mac and toggles its backend URL. Read-only on plist contents; control via `launchctl` shell-out (Run / Load / Unload). Data engine = DuckDB native (not WASM); exports via `COPY ... TO` + `rust_xlsxwriter`. | Workspace-shape change requiring pre-flight per CLAUDE.md hard rule #1. Portal is a separate product track from the data-fetcher phases — uses its own `v0.1-portal-N` versioning so v0.1 fetcher phase counters don't get reordered. The "axum-as-the-deploy-unit" choice forecloses Tauri-IPC for data flow, which would have created an architectural bifurcation between local and remote modes; chose the constraint up front to avoid retrofitting. |
 | v0.1-phase-24 | 2026-04-28 | Proxy health-probe respects quarantine windows. Before this fix, the 5s probe ticker fired against every provider regardless of quarantine state — Helius (24h quota cooldown) and RPCFast (auth failure) were re-probed every 5s, re-classified as exhausted, re-quarantined, and re-logged at WARN. ~17 lines/min of `provider exhausted; quarantining` × 2 quarantined providers, plus real API calls hammering an already-exhausted Helius daily quota. Fix: in `health::spawn_loop`, skip providers where `is_quarantined()` returns true. The provider's `quarantined_until_ms` already governs when re-probing should resume (24h cooldown for `record_exhausted`; exponential 15→30→60→120→240s for `record_failure` after 3 consecutive failures); the loop just needed to consult it. New `scryer_proxy_probes_skipped_quarantined_total{provider}` metric so quarantine duration is observable. Defensive mirror in `probe_one` so direct callers see the same skip semantics. 3 new unit tests pin contract: `record_exhausted_quarantines_for_cooldown`, `exhausted_provider_clears_after_cooldown` (uses 0-second cooldown to avoid mocking time), `record_failure_quarantines_after_three_consecutive`. Live-verified after redeploy: pre-fix log fired the exhausted-warn line every ~5s; post-fix log fires it once on the first probe after restart, then silence. Skip metric increments correctly (Helius=8, RPCFast=5 within ~30s). | Operational-quality fix flagged during launchd verification. Doesn't change quarantine semantics — only suppresses the wasted re-probe + re-log loop while the existing cooldown timer counts down. Indirect benefit: stops burning API calls against an exhausted Helius daily quota (each pre-fix probe was a real billable request that returned 429 instantly; eliminated). Sets up Phase 26 V5 tape which will lean heavily on the proxy under Helius-quota pressure. |
+| v0.1-phase-29 | 2026-04-28 | Wishlist item 7 — `jito_bundles.v1` enrichment schema + fetcher + CLI. New schema `scryer-schema::jito_bundles::v1::Bundle` (7 logical fields: signature, slot u64, block_time i64, landed_via_bundle bool, plus 3 nullable fields — bundle_id, validator, accept_time_us — for the "landed via Jito" path). New crate `scryer-fetch-jito` (REST-only, no proxy — `mainnet.block-engine.jito.wtf` is single-endpoint with modest free-tier rate-limit, same architectural slot as Phase 22 RedStone / Phase 23 Pyth). Tolerant decoder accepts snake_case and camelCase field variants (`bundle_id`/`bundleId`, `validator`/`validatorPubkey`, `accept_time`/`acceptTime`/`earliestValidationTime`); accept_time normalized to unix-microseconds via magnitude heuristic (seconds vs millis vs micros) plus RFC3339-string parsing. **Load-bearing semantic**: 404 / null / empty-body responses produce a `landed_via_bundle = false` row, not an error — absence-of-bundle is the data point Paper 2 needs. Source-panel `slot` is the canonical timestamping column; upstream `slot` is cross-checked at decode and a disagreement logs a warn but trusts source. CLI `scry solana jito-bundles --signatures-from PATH [--limit N]` reads `(signature, slot, block_time)` triples from any kamino_liquidation.v1 / jupiter_lend_liquidation.v1 parquet (file or directory tree; both schemas share those exact column shapes), dedups input by signature, enriches each via the Block Engine, writes to `dataset/jito/bundles/v1/year=Y/month=M/day=D.parquet`. New `scryer_store::read_signature_slot_block_time(path)` public helper centralizes the column-extraction so the CLI doesn't pull parquet-rs directly. Single-signature ad-hoc mode `--signature SIG --slot N --block-time T` for spot probes. 5 schema tests + 12 fetcher tests pass; live smoke-test against the real Block Engine confirmed the 404 → unlanded-row path writes to the correct partition. | Item 7 of `wishlist.md`'s Priority-1 list. Smallest of the post-Priority-0 items (~3 hours actual vs ~2 hours estimated) and turns the existing Kamino + Jupiter Lend liquidation panels into directly-analyzable input for Paper 2's mechanism-design framing of private-info searcher rents. New crate rather than co-locating in `scryer-fetch-dexagg` because Block Engine is private-orderflow infrastructure, not a DEX trade tape — they share no upstream operational surface (auth pattern, JSON shape, rate-limit semantics). The "404 = data" decision is locked here: future enrichment passes that join external metadata to existing panels follow the same pattern (oracle_context.v1 in item 8 will ingest pre/post slots even when the upstream returns sparse). |
 
 ---
 

@@ -22,7 +22,7 @@
 use arrow_array::RecordBatch;
 use arrow_schema::ArrowError;
 use scryer_schema::{
-    backed, earnings, fluid_vault_config, geckoterminal, jupiter_lend_liquidation,
+    backed, earnings, fluid_vault_config, geckoterminal, jito_bundles, jupiter_lend_liquidation,
     kamino_liquidation, kamino_reserve, kamino_scope, kraken_funding, nasdaq_halts, pool_snapshot,
     pyth, redstone, swap, trade, v5_tape, yahoo, FromArrowError,
 };
@@ -241,6 +241,25 @@ impl DatasetSchema for kamino_liquidation::v1::Liquidation {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         kamino_liquidation::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for jito_bundles::v1::Bundle {
+    const DATA_TYPE: &'static str = "bundles";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.block_time
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        jito_bundles::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        jito_bundles::v1::from_record_batch(batch)
     }
 }
 

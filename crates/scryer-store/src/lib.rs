@@ -64,6 +64,7 @@ pub mod venue {
     pub const KAMINO: &str = "kamino";
     pub const JUPITER_LEND: &str = "jupiter_lend";
     pub const GECKOTERMINAL: &str = "geckoterminal";
+    pub const JITO: &str = "jito";
     /// Soothsayer experiment v5 (Chainlink + Jupiter joined tape).
     /// Per the methodology log "Soothsayer venue versioning" section,
     /// each soothsayer experiment iteration gets its own venue
@@ -376,4 +377,85 @@ fn tmp_path_for(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(".tmp");
     PathBuf::from(s)
+}
+
+/// Read `(signature, slot, block_time)` triples from one parquet file
+/// or every `*.parquet` file under a directory tree. Both liquidation
+/// schemas (`kamino_liquidation.v1`, `jupiter_lend_liquidation.v1`)
+/// share these exact columns, so a single reader works as the input
+/// surface for the Jito enrichment pass.
+///
+/// Skips files that don't carry all three columns (e.g. accidentally
+/// pointing at a different schema's parquet).
+pub fn read_signature_slot_block_time(
+    path: &Path,
+) -> Result<Vec<(String, u64, i64)>, StoreError> {
+    use arrow_array::{Int64Array, LargeStringArray};
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    if path.is_dir() {
+        collect_parquet_files(path, &mut files)?;
+    } else if path.exists() {
+        files.push(path.to_path_buf());
+    } else {
+        return Err(StoreError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "path does not exist"),
+        });
+    }
+
+    let mut out: Vec<(String, u64, i64)> = Vec::new();
+    for file in &files {
+        let Some(reader) = open_parquet_reader(file)? else {
+            continue;
+        };
+        for batch in reader {
+            let batch = batch.map_err(parquet::errors::ParquetError::from)?;
+            let schema = batch.schema();
+            let (Some(_), Some(_), Some(_)) = (
+                schema.index_of("signature").ok(),
+                schema.index_of("slot").ok(),
+                schema.index_of("block_time").ok(),
+            ) else {
+                continue;
+            };
+            let sig_idx = schema.index_of("signature").unwrap();
+            let slot_idx = schema.index_of("slot").unwrap();
+            let bt_idx = schema.index_of("block_time").unwrap();
+            let Some(sig) = batch.column(sig_idx).as_any().downcast_ref::<LargeStringArray>()
+            else {
+                continue;
+            };
+            let Some(slot) = batch.column(slot_idx).as_any().downcast_ref::<Int64Array>() else {
+                continue;
+            };
+            let Some(bt) = batch.column(bt_idx).as_any().downcast_ref::<Int64Array>() else {
+                continue;
+            };
+            for i in 0..batch.num_rows() {
+                out.push((sig.value(i).to_string(), slot.value(i) as u64, bt.value(i)));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn collect_parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), StoreError> {
+    let entries = std::fs::read_dir(dir).map_err(|e| StoreError::Io {
+        path: dir.to_path_buf(),
+        source: e,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| StoreError::Io {
+            path: dir.to_path_buf(),
+            source: e,
+        })?;
+        let p = entry.path();
+        if p.is_dir() {
+            collect_parquet_files(&p, out)?;
+        } else if p.extension().and_then(|s| s.to_str()) == Some("parquet") {
+            out.push(p);
+        }
+    }
+    Ok(())
 }

@@ -1,0 +1,28 @@
+[package]
+name = "scryer-portal-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tauri desktop shell for scryer-portal. Spawns the scryer-portal-server sidecar (axum + DuckDB) and renders the React UI in a webview."
+
+[[bin]]
+name = "scryer-portal-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-opener = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = "1"
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = []
+custom-protocol = ["tauri/custom-protocol"]

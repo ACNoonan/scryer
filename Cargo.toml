@@ -9,8 +9,11 @@ members = [
     "crates/scryer-fetch-dexagg",
     "crates/scryer-fetch-redstone",
     "crates/scryer-fetch-pyth",
+    "crates/scryer-fetch-jito",
     "crates/scryer-schema",
     "crates/scryer-store",
+    "crates/scryer-portal",
+    "crates/scryer-portal-shell",
     "bin/scryer-proxy",
     "bin/scry",
 ]

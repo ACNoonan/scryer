@@ -1,0 +1,151 @@
+.timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.timeline-axis {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  align-items: center;
+  padding-right: 12px;
+}
+.timeline-axis::before {
+  content: "";
+}
+.timeline-axis {
+  position: relative;
+  padding-left: 200px;
+  display: flex;
+  justify-content: space-between;
+}
+.timeline-axis .axis-mark {
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+}
+
+.timeline-lanes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.lane {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  align-items: center;
+  cursor: pointer;
+  transition: background 90ms ease;
+  padding: 6px 4px 6px 0;
+}
+.lane:hover {
+  background: rgba(244, 243, 238, 0.025);
+}
+
+.lane-name {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--ink-dim);
+  padding-right: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lane.scryer .lane-name {
+  color: var(--ink);
+}
+
+.lane-track {
+  position: relative;
+  height: 22px;
+  background: rgba(244, 243, 238, 0.03);
+  border: 1px solid var(--rule);
+}
+.lane.scryer .lane-track {
+  border-color: rgba(20, 241, 149, 0.25);
+  background: rgba(20, 241, 149, 0.04);
+}
+.lane.other .lane-track {
+  opacity: 0.7;
+}
+
+/* Conflict: a non-scryer lane whose fires collide with a scryer fire. */
+.lane.other.conflict {
+  opacity: 1;
+}
+.lane.other.conflict .lane-name {
+  color: var(--warn);
+}
+.lane.other.conflict .lane-track {
+  border-color: rgba(244, 180, 90, 0.45);
+  background: rgba(244, 180, 90, 0.06);
+  opacity: 1;
+}
+.lane.other.conflict .tick {
+  background: var(--warn);
+}
+
+/* Not-loaded: plist on disk but not bootstrapped into launchd. */
+.lane.not-loaded .lane-name {
+  color: var(--ink-faint);
+}
+.lane.not-loaded .lane-track {
+  border-style: dashed;
+  background: rgba(244, 243, 238, 0.015);
+  opacity: 0.55;
+}
+.lane.not-loaded .lane-empty {
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+.lane-name .status-tag {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  border: 1px solid var(--rule-strong);
+  padding: 1px 6px;
+  vertical-align: 1px;
+}
+
+.lane-name .conflict-tag {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--warn);
+  border: 1px solid rgba(244, 180, 90, 0.6);
+  padding: 1px 6px;
+  vertical-align: 1px;
+}
+
+.tick {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  width: 2px;
+  background: var(--ink-dim);
+  pointer-events: none;
+}
+.lane.scryer .tick {
+  background: var(--green);
+}
+
+.lane-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}

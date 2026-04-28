@@ -1,0 +1,33 @@
+[package]
+name = "scryer-portal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local-first management portal for scryer. axum HTTP server: launchd job control + DuckDB-backed parquet exploration. Same binary runs as a Tauri sidecar locally and as a standalone systemd daemon on a future Linux box."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "scryer-portal-server"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.7", features = ["macros"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "time", "process"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = { workspace = true }
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+plist = "1"
+duckdb = { version = "1.1", features = ["bundled"] }
+rust_xlsxwriter = "0.79"
+walkdir = "2"
+shellexpand = "3"
+dirs = "5"
+async-trait = "0.1"

@@ -16,6 +16,7 @@ use clap::{Parser, Subcommand};
 
 mod dexagg_cmd;
 mod import_cmd;
+mod jito_cmd;
 mod kamino_reserves_cmd;
 mod pool_snapshots_cmd;
 mod pyth_cmd;
@@ -169,6 +170,12 @@ enum SolanaTarget {
     /// configs (LTV / liquidation threshold / heuristic band /
     /// scope feed wiring + raw account bytes for forensic re-decode).
     KaminoReserves(kamino_reserves_cmd::ReservesArgs),
+    /// Jito Block Engine bundle-attachment enrichment over an existing
+    /// liquidation panel. Reads `(signature, slot, block_time)` from
+    /// kamino_liquidation.v1 / jupiter_lend_liquidation.v1 parquet,
+    /// queries `bundles/transaction/{sig}`, and writes one
+    /// `jito_bundles.v1` row per signature.
+    JitoBundles(jito_cmd::JitoBundlesArgs),
 }
 
 #[tokio::main]
@@ -207,6 +214,7 @@ async fn main() -> Result<()> {
             SolanaTarget::KaminoScopeTape(a) => solana_cmd::run_kamino_scope_tape(a).await,
             SolanaTarget::PoolSnapshots(a) => pool_snapshots_cmd::run_pool_snapshots(a).await,
             SolanaTarget::KaminoReserves(a) => kamino_reserves_cmd::run_reserves(a).await,
+            SolanaTarget::JitoBundles(a) => jito_cmd::run_jito_bundles(a).await,
         },
         Command::Redstone(c) => match c.target {
             RedstoneTarget::Tape(a) => redstone_cmd::run_tape(a).await,

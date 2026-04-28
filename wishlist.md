@@ -4,7 +4,7 @@ Source-of-truth TODO for scryer fetchers, schemas, daemons, and one-shot
 snapshots. Soothsayer is being migrated to a pure analysis consumer; all
 data scraping moves here.
 
-Last updated: 2026-04-27.
+Last updated: 2026-04-28.
 
 Each item lists schema name + version, fetcher placement, CLI surface,
 on-chain layout notes if applicable, and rough effort. Items needing a
@@ -349,6 +349,250 @@ cross-Kamino-market scan (10x bigger panel), batch by slot to amortize.
 
 ---
 
+## Priority 1.5 — paper-1 incumbent-benchmark forward tapes (TIME-GATED — start now)
+
+These five items close paper 1 §9.8's "no numerical incumbent benchmark"
+disclosure. Every item is forward-tape-only — there is no historical
+buy-the-data path, so calendar time is the binding constraint on the
+panel. Starting all five today gives ~5 months of matched-window
+coverage by Q3 2026, which is the gating constraint for converting
+paper 1's currently-qualitative "incumbents publish no calibration
+claim" critique into a numerical "incumbents fail their implicit
+coverage claim by X bps on Y% of weekends" empirical result.
+
+### 21. `chainlink_streams_tape.v1` — Chainlink Data Streams continuous forward tape  `[methodology-entry-needed]`
+
+**What.** Continuous (≤60s cadence) deep tape of every Chainlink Data
+Streams report touching xStock underliers (SPY, QQQ, AAPL, GOOGL,
+NVDA, TSLA, HOOD, MSTR, GLD, TLT). Captures the v10 `tokenizedPrice`
+field — the methodologically-undisclosed continuous CEX-aggregated
+mark that paper 1 §1.1 critiques — plus v11 `bid` / `ask` / `mid` /
+`last_traded_price` and `marketStatus`. Distinct from item 17 (a
+periodic schema/cadence verifier); this is the consumer-facing
+forward daemon that supplies paper 1 with the empirical drift
+evidence against Chainlink.
+
+**Source.** On-chain Solana mainnet. Chainlink Verifier program scan
+filtered to v10 (schema id `0x000a`) and v11 (`0x000b`) reports for
+xStock-underlier feed IDs. Decoders already in
+`crates/soothsayer-core/src/chainlink/` (soothsayer-side, byte-for-byte
+verified) — port into a scryer decode crate (or call out to soothsayer
+via a Rust dep).
+
+**Schema** (proposed `chainlink_streams_tape.v1`):
+```
+schema_id            string  ('v10' | 'v11')
+feed_id              string
+underlier_symbol     string  ('SPY', 'QQQ', ...)
+market_status        u8
+price                f64
+tokenized_price      f64 nullable          (v10 continuous CEX-mark)
+bid                  f64 nullable          (v11)
+ask                  f64 nullable          (v11)
+mid                  f64 nullable          (v11)
+last_traded_price    f64 nullable          (v11)
+observation_ts       i64
+signature            string
+slot                 u64
+_schema_version      string ('chainlink_streams_tape.v1')
+_fetched_at          i64
+_source              string
+_dedup_key           string  (= signature + feed_id)
+```
+
+**CLI.** `scry solana chainlink-streams --once [--symbols ALL|SPY,QQQ,...] --proxy-url URL --helius-api-key KEY`
+
+**Notes.**
+- This is paper 1's biggest single empirical-evidence gap. Without
+  this tape the §1.1 critique stays qualitative. With it, "Chainlink's
+  continuously-updating mark drifted X bps/hr with std Y; here's where
+  it disagreed with realised Monday open" becomes a numerical finding.
+- Item 17's cadence-verifier shape is a one-shot diagnostic; this is
+  the forward daemon. Item 17 is marked `superseded-by-21` for the
+  daemon role and retained for the schema-classification one-shot.
+- Soothsayer-side: when this lands, drop the Chainlink portion of
+  `v5_tape` (item 9) and read `chainlink_streams_tape.v1` directly.
+
+**Effort.** ~3 hours (decoder reuse + daemon ergonomics + launchd).
+
+### 22. `switchboard_ondemand_tape.v1` — Switchboard On-Demand equity feeds forward tape  `[methodology-entry-needed]`
+
+**What.** Continuous tape of Switchboard On-Demand price feeds for
+the xStock underliers + GLD + TLT. Switchboard is the fourth Solana
+oracle stack and is currently absent from soothsayer's incumbent
+comparison; adding it broadens the "we benchmarked all four major
+Solana oracle providers" claim from three (Pyth, Chainlink, RedStone)
+to four with marginal additional code.
+
+**Source.** Switchboard On-Demand on Solana mainnet. PullFeed PDAs
+per underlier; query via Switchboard SDK or direct PDA read. Feed-ID
+registry to be enumerated in the methodology entry; start point
+`https://app.switchboard.xyz/solana/mainnet`.
+
+**Schema** (proposed `switchboard_ondemand_tape.v1`):
+```
+feed_pda              string
+underlier_symbol      string
+price                 f64
+confidence            f64 nullable
+result_ts             i64
+slot                  u64
+signature             string nullable
+_schema_version       string ('switchboard_ondemand_tape.v1')
+_fetched_at           i64
+_source               string
+_dedup_key            string  (= feed_pda + slot)
+```
+
+**CLI.** `scry solana switchboard-ondemand --once [--symbols ALL|...] --proxy-url URL`
+
+**Effort.** ~3 hours.
+
+### 23. `pyth_publisher.v1` — Pyth per-publisher submissions forward tape  `[methodology-entry-needed]`
+
+**What.** Per-publisher price + confidence submissions to Pyth
+aggregator PDAs, in addition to the aggregate `pyth.v1` tape from
+item 11. Paper 1 §1.1 distinguishes Pyth's *publisher-level* self-
+attestation (each publisher recommended to calibrate their CI to
+~95% coverage) from the *aggregate* served feed (no aggregate-level
+coverage claim). Without per-publisher data the "aggregate fails
+where publishers individually pass" claim is qualitative; with it,
+the claim becomes "publisher P's submitted CI realised X% coverage,
+aggregate CI realised Y% — and Y < min over publishers of X."
+
+**Source.** Pyth Solana program. Each PriceAccount carries a `comp[N]`
+array of per-publisher PriceComp entries:
+`{publisher: Pubkey, agg: PriceInfo, latest: PriceInfo}`. Layout in
+`pyth-sdk-solana`. Read forward via the same `getAccountInfo` cadence
+as item 11 but expand the parser to emit one row per (slot, publisher)
+instead of one row per (slot, feed).
+
+**Schema** (proposed `pyth_publisher.v1`):
+```
+feed_pda                 string
+underlier_symbol         string
+publisher_pubkey         string
+publisher_price          f64
+publisher_confidence     f64
+publisher_status         u8
+publisher_pub_slot       u64
+agg_price                f64
+agg_confidence           f64
+agg_slot                 u64
+slot                     u64
+_schema_version          string
+_fetched_at              i64
+_source                  string
+_dedup_key               string  (= feed_pda + publisher_pubkey + slot)
+```
+
+**CLI.** `scry solana pyth-publisher --once [--symbols ALL|...] --proxy-url URL`
+
+**Notes.**
+- Layered with the existing aggregate tape (item 11), this enables
+  the per-publisher-vs-aggregate calibration comparison that's the
+  most load-bearing piece of paper 1's §1.1 numerical evidence.
+- Per-publisher submissions are public on-chain data — no permissioned
+  API needed. Pyth Lazer is a separate latency-optimised path and is
+  not required here.
+
+**Effort.** ~4 hours.
+
+### 24. `dex_xstock_swaps.v1` — cross-DEX xStock swap prints  `[methodology-entry-needed]`
+
+**What.** Per-swap row across all major Solana DEXs touching xStock
+mints: Orca Whirlpools, Meteora DLMM, Phoenix, Raydium CLMM (in
+addition to the existing Raydium V4 panel via the venue
+`solana_raydium_v4`). Without cross-DEX coverage, the §9.11 future-
+work F_tok forecaster (which uses on-chain xStock price as a
+weekend-anticipation signal, citing Cong et al.) is reading 5–15%
+of the actual flow; with full cross-DEX coverage F_tok becomes
+implementable.
+
+**Source.** On-chain Solana mainnet. Per-DEX swap-IX decoders:
+- Orca Whirlpools: `whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc`
+- Meteora DLMM: `LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo`
+- Phoenix: `PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY`
+- Raydium CLMM: `CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK`
+
+For each, filter post-decode by xStock-mint set (loaded from constants
+shared with item 18).
+
+**Schema** (proposed `dex_xstock_swaps.v1`): same shape as
+`solana_raydium_v4.swap.v1` plus a `dex_program` discriminator column.
+```
+signature              string
+slot                   u64
+block_time             i64
+dex_program            string  ('orca_whirlpools' | 'meteora_dlmm' | 'phoenix' | 'raydium_clmm')
+pool_pda               string
+xstock_mint            string
+xstock_symbol          string
+counter_mint           string  (typically USDC; occasionally SOL)
+xstock_amount          i128    (signed: + bought xStock, − sold)
+counter_amount         i128
+price_per_xstock       f64     (counter_amount / xstock_amount, sign-corrected)
+trader                 string  pubkey
+_schema_version        string
+_fetched_at            i64
+_source                string
+_dedup_key             string  (= signature + ix_index)
+```
+
+**CLI.** `scry solana dex-xstock-swaps --start DATE --end DATE [--dex ALL|orca,meteora,phoenix,raydium_clmm] --proxy-url URL --helius-api-key KEY`
+
+**Notes.**
+- Soothsayer-side analysis joins this with `kamino_liquidation.v1`
+  and `kamino_scope.v1` for the F_tok-vs-Scope-vs-realised triple
+  comparison.
+- The Cong et al. weekend-anticipation finding requires
+  *contemporaneous* weekend xStock prints; any one DEX being sparse
+  is fine if cumulative cross-DEX print volume covers each weekend
+  window.
+
+**Effort.** ~6–8 hours (Orca + Meteora + Phoenix all have published
+IDLs; Raydium CLMM is the messiest of the four).
+
+### 25. `cme_intraday_1m.v1` — CME ES / NQ / GC / ZN 1-min forward tape  `[methodology-entry-needed]`
+
+**What.** Forward 1-minute OHLCV bars for ES (E-mini S&P), NQ (E-mini
+Nasdaq), GC (gold), ZN (10Y T-note). Paper 1's point estimate uses
+*daily* yfinance returns; replacing the closed-market-window factor
+return with an intraday trajectory tightens the F1_emp_regime point
+estimate and is a candidate ablation for v2. yfinance's 1m bars only
+go back ~30 days for free, so calendar time accumulates the panel.
+
+**Source.** yfinance `Ticker.history(interval='1m', period='8d')`
+called every ~24h. Symbols: `ES=F`, `NQ=F`, `GC=F`, `ZN=F`.
+
+**Schema** (proposed `cme_intraday_1m.v1`):
+```
+symbol           string  ('ES=F', 'NQ=F', 'GC=F', 'ZN=F')
+ts               i64                (minute timestamp, UTC)
+open             f64
+high             f64
+low              f64
+close            f64
+volume           u64 nullable
+_schema_version  string ('cme_intraday_1m.v1')
+_fetched_at      i64
+_source          string
+_dedup_key       string  (= symbol + ts)
+```
+
+**CLI.** `scry yfinance intraday-1m --symbols ES=F,NQ=F,GC=F,ZN=F --once`
+
+**Notes.**
+- Goes through the same Python-import path as item 14 (yfinance batch
+  fetches).
+- Paper 2 also benefits: weekend ES drift trajectories are the natural
+  "what was fair value through this weekend" reference for OEV
+  measurement at band-edge events.
+
+**Effort.** ~2 hours (yfinance 1m wrapper + import path).
+
+---
+
 ## Priority 2 — migrate existing daemons from soothsayer
 
 These are running daily on the user's machine and need to keep running.
@@ -476,9 +720,151 @@ crate or co-located in `scryer-fetch-dexagg`.
 
 ---
 
+## Priority 2.5 — paper-2/3 cross-protocol expansion
+
+These four broaden the cross-protocol comparator surface for papers 2
+and 3. None block the trilogy as currently scoped, but each materially
+widens the empirical surface a reviewer can look at and converts
+"Kamino + Jupiter Lend" claims into "every major Solana lending /
+perps venue."
+
+### 26. `drift_liquidation.v1` — Drift Protocol liquidation events  `[methodology-entry-needed]`
+
+**What.** Per-liquidation-event row from Drift Protocol's perpetual-
+futures and spot-margin liquidations. Drift is the third major Solana
+lending/perps venue (after Kamino and Jupiter Lend) and uses Pyth-
+anchored prices with custom validity logic distinct from Kamino's
+`PriceHeuristic` and Jupiter Lend's Fluid oracle, so it's a clean
+third data point for paper 3's cross-protocol policy comparison.
+
+**Source.** On-chain Solana mainnet. Drift V2 program
+`dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH`. Liquidation IXs:
+`liquidate_perp`, `liquidate_spot`, `liquidate_borrow_for_perp_pnl`,
+`liquidate_perp_pnl_for_deposit`, `resolve_perp_bankruptcy`,
+`resolve_spot_bankruptcy`. Discriminators + account layouts from
+Drift's published IDL.
+
+**Schema** (proposed `drift_liquidation.v1`):
+```
+signature            string
+slot                 u64
+block_time           i64
+liquidation_type     string  ('perp' | 'spot' | 'perp_pnl_for_deposit' | ...)
+liquidator           string  pubkey
+liquidatee           string  pubkey  (User PDA owner)
+market_index         u16
+market_symbol        string  ('SOL-PERP', 'BTC-PERP', ...)
+oracle_price         f64
+liquidator_fee_paid  u64 nullable
+amount_liquidated    u64 nullable
+_schema_version      string
+_fetched_at          i64
+_source              string
+_dedup_key           string  (= signature + ix_index)
+```
+
+**CLI.** `scry solana drift-liquidations --start DATE --end DATE --proxy-url URL --helius-api-key KEY`
+
+**Effort.** ~3-4 hours.
+
+### 27. `solana_priority_fees.v1` — block-level priority-fee + Jito-tip distribution  `[methodology-entry-needed]`
+
+**What.** Per-block aggregates of priority-fee distribution (median /
+p90 / p99 / max) and Jito-tip distribution (same percentiles). The
+"OEV-intensity" signal for paper 2: when did searcher competition
+spike, around what events. Companion to item 7 (`jito_bundles.v1`):
+that gives bundle-level metadata; this gives the system-wide intensity
+context against which bundle activity is benchmarked.
+
+**Source.** Solana RPC `getRecentPrioritizationFees` + Jito's
+`getTipDistribution` endpoint. Daemon polls every block (or every N
+blocks if rate-limited).
+
+**Schema** (proposed `solana_priority_fees.v1`):
+```
+slot                 u64
+block_time           i64
+prio_fee_median      u64
+prio_fee_p90         u64
+prio_fee_p99         u64
+prio_fee_max         u64
+jito_tip_median      u64 nullable
+jito_tip_p90         u64 nullable
+jito_tip_p99         u64 nullable
+jito_tip_max         u64 nullable
+n_txs                u32
+_schema_version      string
+_fetched_at          i64
+_source              string
+_dedup_key           string  (= slot)
+```
+
+**CLI.** `scry solana priority-fees --once --proxy-url URL`
+
+**Effort.** ~3 hours.
+
+### 28. `mango_v4_liquidation.v1` + `mango_v4_oracle_config.v1` — Mango Markets v4  `[methodology-entry-needed]`
+
+**What.** Mango v4 has a deviation-aware oracle methodology that's
+the closest production analog to soothsayer's calibration-aware
+approach: Mango actively clamps oracle deviations and publishes
+documentation on its methodology. For paper 3, including Mango's
+policy in the cross-protocol baseline table is materially stronger
+than "Kamino flat ±300 bps" — Mango is the production system that
+already does some of what soothsayer proposes, and we want to
+quantify the gap.
+
+Two related schemas:
+- `mango_v4_liquidation.v1` — liquidation event panel (similar shape
+  to Drift).
+- `mango_v4_oracle_config.v1` — per-market oracle config snapshot
+  (oracle PDA, max-staleness, max-confidence, deviation thresholds).
+
+**Source.** On-chain Solana mainnet. Mango v4 program
+`4MangoMjqJ2firMokCjjGgoK8d4MXcrgL7XJaL3w6fVg`. IDL published.
+
+**CLIs.**
+- `scry solana mango-v4-liquidations --start DATE --end DATE`
+- `scry solana mango-v4-oracle-configs`
+
+**Effort.** ~5-6 hours combined.
+
+### 29. `cex_perp_funding_multi.v1` — multi-CEX perp funding rates  `[methodology-entry-needed]`
+
+**What.** Broadens item 13 (Kraken-only) to Binance, OKX, Bybit, and
+Coinbase (where listed). Funding rates across CEXs are a cross-venue
+consensus signal for crypto risk-on/risk-off; useful for high_vol
+regime detection on MSTR and any future BTC-correlated tokens. Free
+WS / REST APIs across all four exchanges.
+
+**Source.** Public WebSocket / REST APIs:
+- Binance: `/fapi/v1/fundingRate`
+- OKX: `/api/v5/public/funding-rate-history`
+- Bybit: `/v5/market/funding/history`
+- Coinbase: `/api/v3/brokerage/products/{product}/funding-rates`
+
+**Schema** (proposed `cex_perp_funding_multi.v1`):
+```
+exchange              string  ('binance' | 'okx' | 'bybit' | 'coinbase')
+symbol                string  ('BTCUSDT', 'ETHUSDT', 'SOLUSDT', ...)
+funding_ts            i64
+funding_rate          f64
+mark_price            f64 nullable
+_schema_version       string
+_fetched_at           i64
+_source               string
+_dedup_key            string  (= exchange + symbol + funding_ts)
+```
+
+**CLI.** `scry cex-funding multi --once --exchanges ALL --symbols ALL`
+
+**Effort.** ~4 hours (four similar REST/WS clients).
+
+---
+
 ## Priority 3 — enrichment / nice-to-have
 
-### 17. Chainlink schema/cadence verification
+### 17. Chainlink schema/cadence verification  `[daemon role superseded by item 21]`
 
 **What.** Soothsayer scripts `scan_chainlink_schemas.py` and
 `verify_v11_cadence.py`. Periodic Chainlink Verifier program scan
@@ -486,6 +872,12 @@ that classifies recent reports by schema (v10 = 0x000a, v11 = 0x000b)
 and confirms 24/5 cadence behavior. Today (2026-04-27) is the
 scheduled day for the v11 24/5 verification; this should land in
 scryer if not already done by the other agent.
+
+**Note (2026-04-28).** The continuous-daemon role is now item 21
+(`chainlink_streams_tape.v1`). This item is retained as a one-shot
+diagnostic for schema-classification + cadence-verification that
+would not be useful as a continuous tape. If item 21 lands first,
+keep this as a pure verifier reusing item 21's decoder.
 
 **Schema.** New `chainlink_report.v1` with columns: schema_id,
 feed_id, market_status, price, tokenized_price, last_traded_price,
@@ -536,6 +928,264 @@ exists in workspace; needs implementation.
 **Effort.** ~6+ hours per protocol (separate methodology entries
 each).
 
+### 30. `vix_term_structure.v1` — VIX1D / VIX9D / VIX / VIX3M / VIX6M forward  `[methodology-entry-needed]`
+
+**What.** Daily forward tape of VIX term-structure points beyond the
+single VIX index that paper 1 currently uses. The slope (e.g.,
+VIX1D − VIX, VIX − VIX3M) is a sharper "is the market pricing this
+weekend as bumpy?" signal than VIX level alone, and is a candidate
+regressor for v2 of the log-log vol model.
+
+**Source.** yfinance: `^VIX1D`, `^VIX9D`, `^VIX`, `^VIX3M`, `^VIX6M`.
+
+**Schema** (proposed `vix_term_structure.v1`):
+```
+date              date
+horizon           string  ('1D' | '9D' | '30D' | '3M' | '6M')
+close             f64
+_schema_version   string
+_fetched_at       i64
+_source           string
+_dedup_key        string  (= date + horizon)
+```
+
+**CLI.** `scry yfinance vix-term --start DATE --end DATE`
+
+**Effort.** ~1 hour (yfinance import path).
+
+### 31. `deribit_iv.v1` — Deribit BTC / ETH options IV (DVOL) forward  `[methodology-entry-needed]`
+
+**What.** Daily Deribit DVOL index for BTC and ETH (their VIX-
+equivalent). Real options-implied vol signal for crypto-correlated
+tokens (MSTR today; ETH-correlated tokens later). Supplements per-
+symbol vol indices in F1_emp_regime regression.
+
+**Source.** Deribit public API: `/public/get_volatility_index_data`
+(no auth).
+
+**Schema** (proposed `deribit_iv.v1`):
+```
+underlying        string  ('BTC' | 'ETH')
+ts                i64
+dvol              f64
+_schema_version   string
+_fetched_at       i64
+_source           string
+_dedup_key        string  (= underlying + ts)
+```
+
+**CLI.** `scry deribit dvol --once --symbols BTC,ETH`
+
+**Effort.** ~1-2 hours.
+
+### 32. `intl_session_etfs.v1` — overnight-session ETF proxies  `[methodology-entry-needed]`
+
+**What.** Daily forward bars for ETFs that proxy Asian / European
+session signals: EWJ (Japan), EWG (Germany), EWU (UK), FXI (China),
+EWQ (France). Sunday-evening Asian session is a real signal for
+Monday US open; F1_emp_regime currently ignores it. Candidate v2
+regressor.
+
+**Source.** yfinance.
+
+**Schema** (proposed `intl_session_etfs.v1`):
+```
+symbol            string
+date              date
+open              f64
+high              f64
+low               f64
+close             f64
+volume            u64 nullable
+_schema_version   string
+_fetched_at       i64
+_source           string
+_dedup_key        string  (= symbol + date)
+```
+
+**CLI.** `scry yfinance intl-etfs --start DATE --end DATE`
+
+**Effort.** ~1 hour (yfinance batch).
+
+### 33. `cboe_pc_skew.v1` — Cboe daily put/call ratio + SKEW index  `[methodology-entry-needed]`
+
+**What.** Daily Cboe equity P/C ratio and SKEW index. Tail-risk
+regime signal complementary to VIX level — captures "the market is
+paying unusually for tail protection," a different regime than "the
+market is pricing high vol uniformly."
+
+**Source.** Cboe public download URLs:
+- `https://www.cboe.com/us/options/market_statistics/daily/`
+- `https://www.cboe.com/tradable_products/skew/`
+
+**Schema** (proposed `cboe_pc_skew.v1`):
+```
+date               date
+total_pc_ratio     f64
+equity_pc_ratio    f64
+index_pc_ratio     f64 nullable
+skew_index         f64 nullable
+_schema_version    string
+_fetched_at        i64
+_source            string
+_dedup_key         string  (= date)
+```
+
+**CLI.** `scry cboe pc-skew --start DATE --end DATE`
+
+**Effort.** ~2 hours.
+
+### 34. `edgar_8k.v1` — SEC EDGAR 8-K filing timestamps + form-type tags  `[methodology-entry-needed]`
+
+**What.** Per-filing timestamp + form-type for 8-K filings on the
+10 xStock underliers. Material-event fingerprint at second-resolution.
+The §9.5 "earnings regressor is a disclosure not a contribution"
+weakness comes from using a *weekly* earnings flag; replacing with
+a precise event-time flag (8-K item 2.02 = "Results of Operations
+and Financial Condition" = the earnings-release 8-K) is the natural
+fix.
+
+**Source.** SEC EDGAR API:
+- Per-company submissions index:
+  `https://data.sec.gov/submissions/CIK{cik}.json`
+- Per-filing form-type tagging via `/cgi-bin/browse-edgar`.
+
+**Schema** (proposed `edgar_8k.v1`):
+```
+cik                string
+ticker             string
+filing_ts          i64                (first-filed timestamp, UTC)
+form_type          string  ('8-K' | '8-K/A')
+items              string  (e.g., '2.02,9.01' for earnings 8-K)
+accession_number   string
+_schema_version    string
+_fetched_at        i64
+_source            string
+_dedup_key         string  (= accession_number)
+```
+
+**CLI.** `scry sec edgar-8k --tickers SPY,QQQ,...`
+
+**Effort.** ~3-4 hours.
+
+### 35. `fred_macro_extended.v1` — TIPS breakevens / credit spreads / term-premium  `[methodology-entry-needed]`
+
+**What.** Extends item 16 (FRED macro calendar) from event-calendar-
+only to also include daily series useful as regime regressors or
+context: TIPS breakevens (T10YIE, T5YIE), credit spreads
+(BAMLH0A0HYM2 = HY OAS, BAMLC0A0CM = IG OAS), term premium
+(THREEFY10), DGS series (DGS10, DGS2, DGS30, DGS3MO).
+
+**Source.** FRED public API (no key required for daily-resolution
+series; optional key removes rate limits).
+
+**Schema** (proposed `fred_macro_extended.v1`):
+```
+series_id          string  ('T10YIE', 'BAMLH0A0HYM2', 'DGS10', ...)
+date               date
+value              f64
+_schema_version    string
+_fetched_at        i64
+_source            string
+_dedup_key         string  (= series_id + date)
+```
+
+**CLI.** `scry fred series --series-ids T10YIE,BAMLH0A0HYM2,DGS10,DGS2 --start DATE --end DATE`
+
+**Effort.** ~2 hours (extension of item-16 fetcher).
+
+---
+
+## Priority 4 — multi-class scope extensions (gated on a deliberate scope decision)
+
+These three items are gated on a deliberate decision to extend
+soothsayer's methodology-scope from tokenized equities + commodities
+to tokenized treasuries. Per the 2026-04-28 trilogy-pessimistic-
+analysis: treasuries fit the methodology shape (TLT-style: ZN=F + MOVE)
+but their commercial value is weaker because issuer NAV strikes anchor
+the token price. Items live here so the path is documented if/when an
+integrator asks for the extension.
+
+### 36. `dex_treasury_swaps.v1` — BUIDL / OUSG / USDY / USTB on-chain DEX prints  `[methodology-entry-needed]`
+
+**What.** Per-swap row across Solana DEXs touching tokenized-treasury
+mints (BUIDL — when bridged, OUSG — when listed, USDY, USTB). Same
+shape as item 24 (`dex_xstock_swaps.v1`) with a different mint set.
+Lets soothsayer publish a "we also ran the calibration on treasury
+tokens, here are the results" appendix once a multi-class paper
+revision is in scope.
+
+**Source.** Same DEX programs as item 24; mint allowlist swapped to
+the tokenized-treasury set.
+
+**Schema.** Same column shape as `dex_xstock_swaps.v1`; recommend
+separate version `dex_treasury_swaps.v1` so the venue / data-type /
+version triple cleanly partitions queries by asset class.
+
+**CLI.** `scry solana dex-treasury-swaps --start DATE --end DATE [--dex ALL|...] --proxy-url URL --helius-api-key KEY`
+
+**Effort.** ~2 hours (mint allowlist + reuse of item 24 decoders).
+
+### 37. `backed_nav_strikes.v1` — Backed Finance NAV strike timestamps for xStocks  `[methodology-entry-needed]`
+
+**What.** Backed Finance publishes NAV references for its issued
+tokens (the on-chain xStock series) on a cadence. Capturing strike-
+time + NAV value lets soothsayer measure tracking error of xStock
+secondary on-chain price vs. Backed-published NAV directly — a number
+nobody has published, and useful as a v2 paper data point or
+empirical material for design-partner conversations.
+
+**Source.** Backed Finance public reference: their token-issuance
+disclosures page; if structured feed available, parse it; otherwise
+HTML-scrape on a cadence.
+
+**Schema** (proposed `backed_nav_strikes.v1`):
+```
+token_symbol       string  ('SPYx', 'QQQx', ...)
+nav_ts             i64
+nav_value          f64
+nav_currency       string  ('USD')
+source_url         string
+_schema_version    string
+_fetched_at        i64
+_source            string
+_dedup_key         string  (= token_symbol + nav_ts)
+```
+
+**CLI.** `scry backed nav-strikes --once`
+
+**Effort.** ~3 hours (scrape ergonomics + cadence detection).
+
+### 38. `treasury_auction.v1` — TreasuryDirect auction calendar + results  `[methodology-entry-needed]`
+
+**What.** US Treasury auction schedule + results (auction date,
+settlement date, term, high yield, bid-to-cover). Useful as a regime
+regressor for treasury tokens — auction-week dynamics are a real
+feature of the US treasury market that ZN futures alone don't fully
+capture.
+
+**Source.** TreasuryDirect public XML feeds:
+- `https://www.treasurydirect.gov/TA_WS/securities/auctioned`
+
+**Schema** (proposed `treasury_auction.v1`):
+```
+auction_date       date
+settlement_date    date
+security_type      string  ('Bill' | 'Note' | 'Bond' | 'TIPS' | 'FRN')
+term               string  ('4-Week', '13-Week', '10-Year', ...)
+cusip              string
+high_yield         f64 nullable
+bid_to_cover       f64 nullable
+_schema_version    string
+_fetched_at        i64
+_source            string
+_dedup_key         string  (= cusip)
+```
+
+**CLI.** `scry treasury auctions --start DATE --end DATE`
+
+**Effort.** ~2 hours.
+
 ---
 
 ## Methodology log entries needed (running list)
@@ -555,6 +1205,26 @@ items above:
 - `chainlink_report.v1` (item 17)
 - `xstock_holders.v1` (item 18)
 - `fred_macro.v1` (item 16)
+
+Added 2026-04-28 (Priority 1.5 / 2.5 / 3-extension / 4):
+- `chainlink_streams_tape.v1` (item 21)
+- `switchboard_ondemand_tape.v1` (item 22)
+- `pyth_publisher.v1` (item 23)
+- `dex_xstock_swaps.v1` (item 24)
+- `cme_intraday_1m.v1` (item 25)
+- `drift_liquidation.v1` (item 26)
+- `solana_priority_fees.v1` (item 27)
+- `mango_v4_liquidation.v1` + `mango_v4_oracle_config.v1` (item 28)
+- `cex_perp_funding_multi.v1` (item 29)
+- `vix_term_structure.v1` (item 30)
+- `deribit_iv.v1` (item 31)
+- `intl_session_etfs.v1` (item 32)
+- `cboe_pc_skew.v1` (item 33)
+- `edgar_8k.v1` (item 34)
+- `fred_macro_extended.v1` (item 35)
+- `dex_treasury_swaps.v1` (item 36)
+- `backed_nav_strikes.v1` (item 37)
+- `treasury_auction.v1` (item 38)
 
 ---
 
@@ -591,9 +1261,22 @@ items above:
    trilogy-blocker).
 3. Launch the deep scans (Kamino 9-month, Jupiter Lend 30-day,
    Fluid VaultConfig snapshot).
-4. Items 7 + 8 (enrichment passes) once event panels exist.
-5. Items 4, 5, 6 (book + reserve + Loopscale snapshots).
-6. Daemon migrations (items 9-13) one at a time, each running
+4. **Stand up Priority 1.5 forward daemons (items 21–25) ASAP.**
+   Calendar time is the binding constraint here — every week that
+   passes without these tapes running is a week you don't have for
+   the Q3 2026 incumbent-benchmark publication. Start them in
+   parallel with steps 5–7 below; they require zero blocking work
+   from the trilogy items.
+5. Items 7 + 8 (enrichment passes) once event panels exist.
+6. Items 4, 5, 6 (book + reserve + Loopscale snapshots).
+7. Daemon migrations (items 9–13) one at a time, each running
    side-by-side with soothsayer until parity verified.
-7. The remaining batch fetches (14-16).
-8. Priority 3 items as research needs surface them.
+8. The remaining batch fetches (14–16).
+9. Priority 2.5 items (26–29) as paper 3 cross-protocol scope
+   firms up.
+10. Priority 3 enrichment items (17–20, 30–35) as research needs
+    surface them. Items 30–35 are individually small (~1–4 hours
+    each, mostly yfinance / public-API extensions); batch them when
+    convenient.
+11. Priority 4 items (36–38) only after a deliberate scope decision
+    to extend soothsayer to the tokenized-treasury class.

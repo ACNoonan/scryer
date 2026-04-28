@@ -1,0 +1,22 @@
+[package]
+name = "scryer-fetch-jito"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Jito Block Engine bundle-attachment fetcher — REST client for mainnet.block-engine.jito.wtf. Per-call retry; no proxy (HTTP-only, single endpoint)."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+scryer-schema = { path = "../scryer-schema" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

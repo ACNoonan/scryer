@@ -1,0 +1,25 @@
+/* Design tokens — mirrored from soothsayer/landing/index.html so the two
+   surfaces feel like siblings. */
+
+:root {
+  --bg: #0a0b0d;
+  --bg-elev: #111216;
+  --bg-elev-2: #15171c;
+  --ink: #f4f3ee;
+  --ink-dim: #a6a8ad;
+  --ink-faint: #6b6e75;
+  --rule: rgba(244, 243, 238, 0.09);
+  --rule-strong: rgba(244, 243, 238, 0.18);
+  --purple: #9945ff;
+  --green: #14f195;
+  --warn: #f4b45a;
+  --red: #f26a5a;
+
+  --sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --maxw: 1480px;
+  --pad-x: clamp(16px, 2.4vw, 36px);
+
+  --radius: 2px;
+}

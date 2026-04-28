@@ -1,0 +1,134 @@
+.jobs-view .err {
+  border: 1px solid var(--red);
+  background: rgba(242, 106, 90, 0.08);
+  color: var(--red);
+  padding: 10px 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  margin-bottom: 14px;
+}
+
+.jobs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.jobs-table th {
+  text-align: left;
+  padding: 12px 14px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  border-bottom: 1px solid var(--rule-strong);
+  font-weight: 500;
+}
+.jobs-table td {
+  padding: 14px 14px;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: middle;
+}
+.jobs-table td.label {
+  font-weight: 500;
+  letter-spacing: -0.005em;
+}
+.jobs-table tr {
+  cursor: pointer;
+  transition: background 80ms ease;
+}
+.jobs-table tr:hover {
+  background: rgba(244, 243, 238, 0.025);
+}
+.jobs-table tr.selected {
+  background: rgba(20, 241, 149, 0.05);
+}
+.jobs-table tr.selected td.label {
+  color: var(--green);
+}
+.jobs-table tr.failed td {
+  background: rgba(242, 106, 90, 0.05);
+}
+.jobs-table tr.failed:hover td {
+  background: rgba(242, 106, 90, 0.09);
+}
+.jobs-table tr.failed td.label {
+  color: var(--red);
+}
+.jobs-table .error-preview {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--red);
+  opacity: 0.85;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  max-width: 580px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Failure banner — top-of-view "needs attention" surface */
+.failure-banner {
+  border: 1px solid rgba(242, 106, 90, 0.45);
+  background: rgba(242, 106, 90, 0.05);
+  padding: 14px 18px;
+  margin-bottom: 18px;
+}
+.failure-banner-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.failure-banner ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.failure-banner .failure-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 14px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  background: transparent;
+  text-transform: none;
+  letter-spacing: 0;
+  font-family: var(--sans);
+  cursor: pointer;
+}
+.failure-banner .failure-row:hover {
+  border-color: var(--red);
+  background: rgba(242, 106, 90, 0.07);
+}
+.failure-banner .failure-label {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+.failure-banner .failure-msg {
+  color: var(--red);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-align: right;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 780px) {
+  .failure-banner .failure-row {
+    grid-template-columns: 1fr;
+  }
+  .failure-banner .failure-msg {
+    max-width: 100%;
+    text-align: left;
+  }
+}

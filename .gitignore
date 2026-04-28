@@ -26,3 +26,9 @@ data/
 # Logs
 *.log
 logs/
+
+# JS / Tauri build artifacts (scryer-portal-shell/ui)
+node_modules/
+dist/
+*.tsbuildinfo
+.vite/
