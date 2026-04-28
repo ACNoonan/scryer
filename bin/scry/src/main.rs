@@ -19,6 +19,7 @@ mod import_cmd;
 mod pyth_cmd;
 mod redstone_cmd;
 mod solana_cmd;
+mod v5_cmd;
 
 #[derive(Parser, Debug)]
 #[command(name = "scry", version, about = "scryer CLI: fetch + import + manage")]
@@ -39,6 +40,9 @@ enum Command {
     Pyth(PythCmd),
     /// DEX aggregator clients (GeckoTerminal). REST per-venue; no proxy.
     Dexagg(DexaggCmd),
+    /// Soothsayer V5 tape — joined Chainlink + Jupiter observation
+    /// per xStock per poll iteration. Soothsayer-experiment scope.
+    V5tape(V5tapeCmd),
 }
 
 #[derive(Parser, Debug)]
@@ -98,6 +102,12 @@ struct DexaggCmd {
     target: DexaggTarget,
 }
 
+#[derive(Parser, Debug)]
+struct V5tapeCmd {
+    #[command(subcommand)]
+    target: V5tapeTarget,
+}
+
 #[derive(Subcommand, Debug)]
 enum RedstoneTarget {
     /// One-tick poll of api.redstone.finance/prices for the
@@ -122,6 +132,14 @@ enum DexaggTarget {
     /// — re-runs within the trade-coverage window dedup cleanly on
     /// `tx_hash`.
     GtTrades(dexagg_cmd::GtTradesArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum V5tapeTarget {
+    /// One-tick joined Chainlink + Jupiter poll across the 8 xStocks.
+    /// Schedule via launchd / cron at the desired cadence
+    /// (typical: 60s).
+    Tape(v5_cmd::TapeArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -183,6 +201,9 @@ async fn main() -> Result<()> {
         },
         Command::Dexagg(c) => match c.target {
             DexaggTarget::GtTrades(a) => dexagg_cmd::run_gt_trades(a).await,
+        },
+        Command::V5tape(c) => match c.target {
+            V5tapeTarget::Tape(a) => v5_cmd::run_tape(a).await,
         },
     }
 }

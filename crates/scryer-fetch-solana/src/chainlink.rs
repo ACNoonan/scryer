@@ -25,6 +25,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::error::FetchError;
+use crate::get_transactions::{get_transactions_via_proxy, GetTxConfig};
 use crate::parse_transactions::{parse_all, ParseTxsConfig};
 use crate::sig_paginate::{get_signatures_in_window, SigPaginateConfig};
 use crate::types::ParsedTx;
@@ -350,12 +351,18 @@ pub struct ChainlinkFetcherConfig {
     pub helius_parse_url: String,
     pub paginate: SigPaginateConfig,
     pub parse_txs: ParseTxsConfig,
+    pub get_tx: GetTxConfig,
     pub source_label: String,
     /// Lookback window to walk from `end_ts` backward when searching
     /// for the latest observation per xStock. 24h is the soothsayer
     /// default — long enough to cover overnight gaps but short enough
     /// to bound the worst case.
     pub lookback_secs: i64,
+    /// If true, use proxy-routed `getTransaction` for stage-2 instead
+    /// of Helius `parseTransactions`. Slower (~5-50 tx/s vs ~100 tx/s
+    /// batched) but multi-provider quota-resilient — same trade-off
+    /// as Kamino / Jupiter-Lend liquidation fetchers (Phase 20B).
+    pub use_get_transaction: bool,
 }
 
 impl ChainlinkFetcherConfig {
@@ -365,9 +372,27 @@ impl ChainlinkFetcherConfig {
             helius_parse_url,
             paginate: SigPaginateConfig::default(),
             parse_txs: ParseTxsConfig::default(),
+            get_tx: GetTxConfig::default(),
             source_label: "helius:parseTransactions".to_string(),
             lookback_secs: 24 * 3600,
+            use_get_transaction: false,
         }
+    }
+
+    /// Override the default 24h lookback window. V5 tape uses 900s
+    /// (15 min) — long enough to cover off-hours pauses, short enough
+    /// to bound the parseTransactions cost per tick.
+    pub fn with_lookback(mut self, secs: i64) -> Self {
+        self.lookback_secs = secs;
+        self
+    }
+
+    /// Switch stage-2 to proxy-routed `getTransaction`. Updates
+    /// `source_label` to reflect the routing.
+    pub fn with_get_transaction(mut self) -> Self {
+        self.use_get_transaction = true;
+        self.source_label = "rpc:getTransaction".to_string();
+        self
     }
 }
 
@@ -394,7 +419,11 @@ pub async fn fetch_latest_per_xstock(
         return Ok(HashMap::new());
     }
     let sig_strs: Vec<String> = sigs.iter().map(|s| s.signature.clone()).collect();
-    let txs = parse_all(client, &cfg.helius_parse_url, &sig_strs, &cfg.parse_txs).await?;
+    let txs = if cfg.use_get_transaction {
+        get_transactions_via_proxy(client, &cfg.proxy_rpc_url, &sig_strs, &cfg.get_tx).await?
+    } else {
+        parse_all(client, &cfg.helius_parse_url, &sig_strs, &cfg.parse_txs).await?
+    };
 
     // Iterate newest-first (sigs returned in newest-first order from
     // getSignaturesForAddress).
