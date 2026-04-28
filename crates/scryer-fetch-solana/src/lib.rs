@@ -17,6 +17,7 @@
 //! (`scryer-store`) handles partition layout + dedup at write time.
 
 pub mod error;
+pub mod fluid_vault_configs;
 pub mod jupiter_lend_liquidations;
 pub mod kamino_liquidations;
 pub mod parse;
@@ -25,6 +26,10 @@ pub mod sig_paginate;
 pub mod types;
 
 pub use error::FetchError;
+pub use fluid_vault_configs::{
+    decode_vault_config_bytes, FluidVaultConfigsFetcher, FluidVaultConfigsFetcherConfig,
+    SupplyMintFilter,
+};
 pub use jupiter_lend_liquidations::{
     extract_liquidations as extract_jupiter_lend_liquidations, CollateralFilter,
     FLUID_VAULTS_PROGRAM, LIQUIDATE_DISC as JUPITER_LEND_LIQUIDATE_DISC,

@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use scryer_fetch_solana::{
-    mints, CollateralFilter, JupiterLendLiquidationsFetcher, JupiterLendLiquidationsFetcherConfig,
+    mints, CollateralFilter, FluidVaultConfigsFetcher, FluidVaultConfigsFetcherConfig,
+    JupiterLendLiquidationsFetcher, JupiterLendLiquidationsFetcherConfig,
     KaminoLiquidationsFetcher, KaminoLiquidationsFetcherConfig, PoolMetadata, ReserveSymbolMap,
-    SwapsFetcher, SwapsFetcherConfig,
+    SupplyMintFilter, SwapsFetcher, SwapsFetcherConfig,
 };
-use scryer_schema::{jupiter_lend_liquidation, kamino_liquidation, swap};
+use scryer_schema::{fluid_vault_config, jupiter_lend_liquidation, kamino_liquidation, swap};
 use scryer_store::Dataset;
 use serde::Deserialize;
 
@@ -284,6 +285,75 @@ pub async fn run_jupiter_lend_liquidations(args: JupiterLendLiquidationsArgs) ->
         .context("Dataset::write")?;
     println!(
         "jupiter_lend_liquidations fetched: rows_added={} rows_deduped={} partitions_written={}",
+        stats.rows_added, stats.rows_deduped, stats.partitions_written
+    );
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+pub struct FluidVaultConfigsArgs {
+    /// Disables the post-decode supply-mint filter. With this flag the
+    /// snapshot includes every VaultConfig program-wide; default mode
+    /// keeps only configs whose `supply_token` is in `--symbol-map`'s
+    /// keys.
+    #[arg(long, default_value_t = false)]
+    all: bool,
+    /// JSON map for `(mint_pubkey) -> (symbol, decimals)`. Required
+    /// unless `--all` is set; in default xstock-only mode the keys
+    /// also serve as the allowed-supply-mint set.
+    #[arg(long)]
+    symbol_map: Option<PathBuf>,
+    #[arg(long, default_value = "http://127.0.0.1:8899/rpc")]
+    proxy_url: String,
+    #[arg(long, default_value = "./dataset")]
+    dataset: PathBuf,
+    #[arg(long, default_value = scryer_store::venue::JUPITER_LEND)]
+    venue: String,
+}
+
+pub async fn run_fluid_vault_configs(args: FluidVaultConfigsArgs) -> Result<()> {
+    use std::collections::HashSet;
+
+    let mut symbol_map = ReserveSymbolMap::new();
+    let mut allowed_mints: HashSet<String> = HashSet::new();
+    if let Some(path) = &args.symbol_map {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("reading symbol map {}", path.display()))?;
+        let parsed: std::collections::HashMap<String, SymbolMapEntry> =
+            serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing symbol map {}", path.display()))?;
+        for (mint, entry) in parsed {
+            allowed_mints.insert(mint.clone());
+            symbol_map.insert(mint, entry.symbol, entry.decimals);
+        }
+    } else if !args.all {
+        anyhow::bail!(
+            "--symbol-map is required unless --all is set; provide a JSON file \
+             mapping xstock supply-mint pubkeys to (symbol, decimals), or pass \
+             --all to disable the filter."
+        );
+    }
+
+    let supply_filter = if args.all {
+        SupplyMintFilter::Any
+    } else {
+        SupplyMintFilter::Only(allowed_mints)
+    };
+
+    let cfg = FluidVaultConfigsFetcherConfig::new(args.proxy_url.clone(), supply_filter);
+    let fetcher = FluidVaultConfigsFetcher::new(cfg, symbol_map)
+        .context("building FluidVaultConfigsFetcher")?;
+
+    tracing::info!(all = args.all, "snapshotting fluid vault configs");
+    let rows = fetcher.fetch().await.context("fetcher.fetch")?;
+    tracing::info!(rows = rows.len(), "fetched; writing");
+
+    let ds = Dataset::new(&args.dataset);
+    let stats = ds
+        .write::<fluid_vault_config::v1::Config>(&args.venue, None, &rows)
+        .context("Dataset::write")?;
+    println!(
+        "fluid_vault_configs fetched: rows_added={} rows_deduped={} partitions_written={}",
         stats.rows_added, stats.rows_deduped, stats.partitions_written
     );
     Ok(())

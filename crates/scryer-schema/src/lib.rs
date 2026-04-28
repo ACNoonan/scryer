@@ -22,6 +22,7 @@
 pub mod backed;
 pub mod earnings;
 pub mod error;
+pub mod fluid_vault_config;
 pub mod jupiter_lend_liquidation;
 pub mod kamino_liquidation;
 pub mod kamino_scope;
