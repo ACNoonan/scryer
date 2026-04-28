@@ -2,12 +2,14 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use scryer_schema::{backed, earnings, kamino_scope, pyth, redstone, swap, trade, v5_tape, yahoo};
+use scryer_schema::{
+    backed, earnings, kamino_scope, nasdaq_halts, pyth, redstone, swap, trade, v5_tape, yahoo,
+};
 use scryer_store::import::{
     read_legacy_backed_parquet, read_legacy_earnings_parquet, read_legacy_kamino_scope_parquet,
-    read_legacy_pyth_parquet, read_legacy_redstone_parquet, read_legacy_swap_parquet,
-    read_legacy_trade_parquet, read_legacy_v5_tape_parquet, read_legacy_yahoo_parquet,
-    ImportOptions,
+    read_legacy_nasdaq_halts_parquet, read_legacy_pyth_parquet, read_legacy_redstone_parquet,
+    read_legacy_swap_parquet, read_legacy_trade_parquet, read_legacy_v5_tape_parquet,
+    read_legacy_yahoo_parquet, ImportOptions,
 };
 use scryer_store::Dataset;
 
@@ -408,6 +410,43 @@ pub async fn run_backed(args: BackedArgs) -> Result<()> {
         .with_context(|| format!("writing to {}", args.dataset.display()))?;
     println!(
         "backed imported: rows_added={} rows_deduped={} partitions_written={}",
+        stats.rows_added, stats.rows_deduped, stats.partitions_written
+    );
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+pub struct NasdaqHaltsArgs {
+    #[arg(long)]
+    input: PathBuf,
+    #[arg(long, default_value = scryer_store::venue::NASDAQ)]
+    venue: String,
+    #[arg(long)]
+    source: Option<String>,
+    #[arg(long, default_value = "./dataset")]
+    dataset: PathBuf,
+}
+
+pub async fn run_nasdaq_halts(args: NasdaqHaltsArgs) -> Result<()> {
+    let label = args.source.clone().unwrap_or_else(|| default_source(&args.input));
+    let opts = ImportOptions::from_file_mtime(&args.input, &label)
+        .with_context(|| format!("reading mtime of {}", args.input.display()))?;
+    tracing::info!(
+        path = %args.input.display(),
+        source = %opts.source_label,
+        fetched_at = opts.fetched_at,
+        "loading legacy nasdaq_halts parquet"
+    );
+    let rows = read_legacy_nasdaq_halts_parquet(&args.input, &opts)
+        .with_context(|| format!("reading {}", args.input.display()))?;
+    tracing::info!(rows = rows.len(), "loaded; writing to dataset");
+
+    let ds = Dataset::new(&args.dataset);
+    let stats = ds
+        .write::<nasdaq_halts::v1::Halt>(&args.venue, None, &rows)
+        .with_context(|| format!("writing to {}", args.dataset.display()))?;
+    println!(
+        "nasdaq_halts imported: rows_added={} rows_deduped={} partitions_written={}",
         stats.rows_added, stats.rows_deduped, stats.partitions_written
     );
     Ok(())

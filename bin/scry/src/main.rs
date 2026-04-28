@@ -59,6 +59,8 @@ enum ImportTarget {
     Earnings(import_cmd::EarningsArgs),
     /// Import backed.v1 corp-actions parquet (soothsayer/data/processed/backed_corp_actions.parquet).
     Backed(import_cmd::BackedArgs),
+    /// Import nasdaq_halts.v1 RSS-halt parquet (soothsayer/data/processed/nasdaq_halts_live.parquet).
+    NasdaqHalts(import_cmd::NasdaqHaltsArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -94,6 +96,7 @@ async fn main() -> Result<()> {
             ImportTarget::Yahoo(a) => import_cmd::run_yahoo(a).await,
             ImportTarget::Earnings(a) => import_cmd::run_earnings(a).await,
             ImportTarget::Backed(a) => import_cmd::run_backed(a).await,
+            ImportTarget::NasdaqHalts(a) => import_cmd::run_nasdaq_halts(a).await,
         },
         Command::Solana(c) => match c.target {
             SolanaTarget::Swaps(a) => solana_cmd::run_swaps(a).await,

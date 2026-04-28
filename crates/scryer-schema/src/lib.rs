@@ -24,6 +24,7 @@ pub mod earnings;
 pub mod error;
 pub mod kamino_scope;
 pub mod meta;
+pub mod nasdaq_halts;
 pub mod pyth;
 pub mod redstone;
 pub mod swap;

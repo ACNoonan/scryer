@@ -60,6 +60,7 @@ pub mod venue {
     pub const REDSTONE: &str = "redstone";
     pub const YAHOO: &str = "yahoo";
     pub const BACKED: &str = "backed";
+    pub const NASDAQ: &str = "nasdaq";
     /// Soothsayer experiment v5 (Chainlink + Jupiter joined tape).
     /// Per the methodology log "Soothsayer venue versioning" section,
     /// each soothsayer experiment iteration gets its own venue

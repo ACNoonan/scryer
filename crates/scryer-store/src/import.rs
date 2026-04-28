@@ -21,6 +21,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use scryer_schema::backed::v1 as backed_v1;
 use scryer_schema::earnings::v1 as earnings_v1;
 use scryer_schema::kamino_scope::v1 as kamino_scope_v1;
+use scryer_schema::nasdaq_halts::v1 as nasdaq_halts_v1;
 use scryer_schema::pyth::v1 as pyth_v1;
 use scryer_schema::redstone::v1 as redstone_v1;
 use scryer_schema::swap::v1 as swap_v1;
@@ -121,6 +122,23 @@ pub fn read_legacy_pyth_parquet(
     opts: &ImportOptions,
 ) -> Result<Vec<pyth_v1::Reading>, StoreError> {
     read_legacy_parquet(path, opts, extract_pyth)
+}
+
+/// Read Nasdaq Trader RSS halt entries from the existing soothsayer
+/// `data/processed/nasdaq_halts_live.parquet`. The `_implied`
+/// companion file is currently empty (the implied-halt detector
+/// hasn't run); a separate schema will land if/when it does.
+/// `halt_date` and (when present) `resumption_date` are parsed from
+/// upstream `"MM/DD/YYYY"` strings to Date32. The four
+/// `pause_threshold_price` / `resumption_*` fields are nullable in
+/// the source (pyarrow `null` dtype when the entire column is null
+/// for active-only halts) and are normalized to typed-with-nulls
+/// in the scryer output.
+pub fn read_legacy_nasdaq_halts_parquet(
+    path: &Path,
+    opts: &ImportOptions,
+) -> Result<Vec<nasdaq_halts_v1::Halt>, StoreError> {
+    read_legacy_parquet(path, opts, extract_nasdaq_halts)
 }
 
 /// Read Backed Finance corp-action commits from the existing
@@ -377,6 +395,65 @@ fn extract_pyth(
             pyth_err,
             meta: Meta::new(
                 pyth_v1::SCHEMA_VERSION,
+                opts.fetched_at,
+                opts.source_label.clone(),
+            ),
+        });
+    }
+    Ok(out)
+}
+
+/// Parse a `MM/DD/YYYY` date string to days-since-unix-epoch (Date32
+/// representation). Used for both `halt_date` and `resumption_date`.
+fn parse_us_date(s: &str) -> Result<i32, StoreError> {
+    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("static date");
+    let parsed = chrono::NaiveDate::parse_from_str(s, "%m/%d/%Y").map_err(|_| {
+        StoreError::Arrow(arrow_schema::ArrowError::ComputeError(format!(
+            "could not parse date `{s}` as MM/DD/YYYY"
+        )))
+    })?;
+    Ok(parsed.signed_duration_since(epoch).num_days() as i32)
+}
+
+fn extract_nasdaq_halts(
+    batch: &RecordBatch,
+    opts: &ImportOptions,
+) -> Result<Vec<nasdaq_halts_v1::Halt>, StoreError> {
+    let poll_ts = downcast::<TimestampMicrosecondArray>(batch, "poll_ts")?;
+    let halt_date_str = string_column(batch, "halt_date")?;
+    let halt_time = string_column(batch, "halt_time")?;
+    let underlying = string_column(batch, "underlying")?;
+    let issue_name = string_column(batch, "issue_name")?;
+    let market_category = string_column(batch, "market_category")?;
+    let reason_code = string_column(batch, "reason_code")?;
+    let raw_xml = string_column(batch, "raw_xml")?;
+    let pause_threshold_price = optional_float64_column(batch, "pause_threshold_price")?;
+    let resumption_date_str = optional_string_column(batch, "resumption_date")?;
+    let resumption_quote_time = optional_string_column(batch, "resumption_quote_time")?;
+    let resumption_trade_time = optional_string_column(batch, "resumption_trade_time")?;
+
+    let mut out = Vec::with_capacity(batch.num_rows());
+    for i in 0..batch.num_rows() {
+        let halt_date = parse_us_date(&halt_date_str.value(i))?;
+        let resumption_date = match resumption_date_str.value(i) {
+            Some(s) => Some(parse_us_date(&s)?),
+            None => None,
+        };
+        out.push(nasdaq_halts_v1::Halt {
+            poll_ts: poll_ts.value(i),
+            halt_date,
+            halt_time: halt_time.value(i),
+            underlying: underlying.value(i),
+            issue_name: issue_name.value(i),
+            market_category: market_category.value(i),
+            reason_code: reason_code.value(i),
+            pause_threshold_price: pause_threshold_price.value(i),
+            resumption_date,
+            resumption_quote_time: resumption_quote_time.value(i),
+            resumption_trade_time: resumption_trade_time.value(i),
+            raw_xml: raw_xml.value(i),
+            meta: Meta::new(
+                nasdaq_halts_v1::SCHEMA_VERSION,
                 opts.fetched_at,
                 opts.source_label.clone(),
             ),
