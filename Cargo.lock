@@ -4847,6 +4847,7 @@ dependencies = [
  "clap",
  "dotenvy",
  "reqwest 0.12.28",
+ "scryer-fetch-cex-perps",
  "scryer-fetch-databento",
  "scryer-fetch-dexagg",
  "scryer-fetch-equities",
@@ -4873,6 +4874,19 @@ version = "0.1.0"
 [[package]]
 name = "scryer-fetch-cex-kraken"
 version = "0.1.0"
+
+[[package]]
+name = "scryer-fetch-cex-perps"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "scryer-schema",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "scryer-fetch-databento"

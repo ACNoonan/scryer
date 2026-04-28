@@ -913,7 +913,37 @@ widens the empirical surface a reviewer can look at and converts
 "Kamino + Jupiter Lend" claims into "every major Solana lending /
 perps venue."
 
-### 26. `drift_liquidation.v1` — Drift Protocol liquidation events  `[methodology-entry-needed]`
+### 26. `drift_liquidation.v1` — Drift Protocol liquidation events  `[v1 shipped 2026-04-28; v2 follow-ups below]`
+
+> **Status (2026-04-28).** v1 landed (Phase 40): schema + 5-IX-disc
+> decoder + CLI `scry solana drift-liquidations`. 5 schema tests +
+> 10 decoder tests pass (synthetic-data, all 5 IX paths). Live
+> verification structurally OK but rate-limit-truncated on the
+> proxy side (see below).
+>
+> **v2 deferrals to land later:**
+>
+> 1. **`oracle_price` + `liquidator_fee_paid` from log-event parse.**
+>    Drift emits these via `LiquidationRecord` events in
+>    `meta.logMessages`, NOT IX args. Log-event parsing requires a
+>    state-machine decoder (well-defined byte layout in Drift's
+>    IDL events section). Implementable as a v2 follow-up phase
+>    once the v1 panel accumulates enough rows to validate at scale.
+>
+> 2. **Narrower account filters for high-density sampling.**
+>    `getSignaturesForAddress(DRIFT_PROGRAM)` over a 1-day window
+>    gets aggressively throttled (Drift's tx volume is millions/day).
+>    Future work: enumerate Liquidator Stats PDAs (fixed set of
+>    known liquidator bots) and scan THOSE for signatures —
+>    100x-1000x denser hit rate. Or filter on specific PerpMarket
+>    PDAs for per-market liquidation panels.
+>
+> 3. **Market-registry expansion.** v1 has 33 perp + 20 spot
+>    markets hardcoded; Drift adds new markets periodically.
+>    Re-enumerate from Drift's IDL constants when symbol coverage
+>    drifts; unknown indices currently resolve to `"?"`.
+
+
 
 **What.** Per-liquidation-event row from Drift Protocol's perpetual-
 futures and spot-margin liquidations. Drift is the third major Solana
@@ -1014,36 +1044,55 @@ Two related schemas:
 
 **Effort.** ~5-6 hours combined.
 
-### 29. `cex_perp_funding_multi.v1` — multi-CEX perp funding rates  `[methodology-entry-needed]`
+### 29. `cex_perp_funding_multi.v1` — multi-venue perp funding rates  `[done — phase 41]`
 
-**What.** Broadens item 13 (Kraken-only) to Binance, OKX, Bybit, and
-Coinbase (where listed). Funding rates across CEXs are a cross-venue
-consensus signal for crypto risk-on/risk-off; useful for high_vol
-regime detection on MSTR and any future BTC-correlated tokens. Free
-WS / REST APIs across all four exchanges.
+**Status (2026-04-28).** Shipped. Scope pivoted from the original
+Binance/OKX/Bybit/Coinbase set to **OKX + Coinbase International +
+Hyperliquid + dYdX v4** because Binance and Bybit are geo-restricted
+from the operator's home IP (Binance 451; Bybit CloudFront blocks the
+country). Hyperliquid and dYdX v4 expand the panel into the
+decentralized-perp half of the market — load-bearing for paper 2's
+cross-venue OEV / risk-on-off claims.
 
-**Source.** Public WebSocket / REST APIs:
-- Binance: `/fapi/v1/fundingRate`
-- OKX: `/api/v5/public/funding-rate-history`
-- Bybit: `/v5/market/funding/history`
-- Coinbase: `/api/v3/brokerage/products/{product}/funding-rates`
+**Schema (locked).** `cex_perp_funding_multi.v1::Rate` — fields:
+exchange, symbol, exchange_symbol, funding_ts, funding_rate,
+mark_price (nullable), funding_period_secs.
+Dedup key = `cex_perp_funding:{exchange}:{symbol}:{funding_ts}`.
 
-**Schema** (proposed `cex_perp_funding_multi.v1`):
-```
-exchange              string  ('binance' | 'okx' | 'bybit' | 'coinbase')
-symbol                string  ('BTCUSDT', 'ETHUSDT', 'SOLUSDT', ...)
-funding_ts            i64
-funding_rate          f64
-mark_price            f64 nullable
-_schema_version       string
-_fetched_at           i64
-_source               string
-_dedup_key            string  (= exchange + symbol + funding_ts)
-```
+**Storage.** `dataset/cex_perp_funding/funding/v1/symbol={SYM}/year=Y/
+month=M/day=D.parquet`. Symbol-keyed partition with `exchange` inside
+the row (not the path), so OKX-BTC + Hyperliquid-BTC stack cleanly.
 
-**CLI.** `scry cex-funding multi --once --exchanges ALL --symbols ALL`
+**CLI.** `scry cex-funding multi --symbols BTC,ETH,SOL
+[--no-okx] [--no-coinbase-intl] [--no-hyperliquid] [--no-dydx-v4]
+[--okx-limit 100] [--coinbase-limit 100] [--hyperliquid-hours 168]`
 
-**Effort.** ~4 hours (four similar REST/WS clients).
+**Future-work caveats.**
+- (a) **Binance + Bybit additions** blocked on a VPN-access path. The
+  schema and store layout already accommodate them as extra `exchange`
+  enum values; only the fetcher modules (with their own retry / 429
+  logic) need to be added once VPN routing is in place. Funding
+  cadence: Binance 8h, Bybit 8h.
+- (b) **Annualized-APR helper deferred to consumer code.** The
+  `funding_rate` column is the venue's raw paid rate per period; the
+  `funding_period_secs` column is captured per-row, so consumers
+  compute `apr = rate * (365.25 * 86400 / funding_period_secs)` at
+  query time. Materializing APR into the schema would conflict with
+  the "rates are upstream-faithful, derived metrics live in
+  consumers" rule.
+- (c) **mark_price asymmetry.** Coinbase International and dYdX v4
+  populate `mark_price`; OKX and Hyperliquid don't expose it on this
+  endpoint and leave it `None`. Documented as upstream-asymmetric,
+  not schema-asymmetric.
+- (d) **Backfill walks.** OKX and Coinbase paginate via cursor
+  (`before` ms-timestamp / `result_offset`); dYdX v4 returns 1000
+  rows per call without explicit pagination; Hyperliquid takes a
+  `startTime` ms argument capped at 500 records per call. Backfill
+  jobs need different walk strategies per venue — defer until a
+  specific historical-window need arises.
+
+**Effort actual.** ~4 hours (vs ~4 estimated). 22 unit tests + 1 live
+integration smoke against all 4 venues.
 
 ---
 

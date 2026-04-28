@@ -22,7 +22,7 @@
 use arrow_array::RecordBatch;
 use arrow_schema::ArrowError;
 use scryer_schema::{
-    backed, cme_intraday_1m, dex_xstock_swaps, drift_liquidation, earnings, fluid_vault_config, fred_macro, geckoterminal,
+    backed, cex_perp_funding_multi, cme_intraday_1m, dex_xstock_swaps, drift_liquidation, earnings, fluid_vault_config, fred_macro, geckoterminal,
     jito_bundles, jupiter_lend_liquidation, kamino_liquidation, kamino_obligation,
     kamino_obligation_position, kamino_reserve, kamino_scope, kraken_funding, loopscale_loan,
     loopscale_loan_collateral, nasdaq_halts, oracle_context, pool_snapshot, pyth, pyth_publisher,
@@ -366,6 +366,25 @@ impl DatasetSchema for kamino_obligation_position::v1::Position {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         kamino_obligation_position::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for cex_perp_funding_multi::v1::Rate {
+    const DATA_TYPE: &'static str = "funding";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("symbol");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.funding_ts
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        cex_perp_funding_multi::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        cex_perp_funding_multi::v1::from_record_batch(batch)
     }
 }
 

@@ -6,6 +6,7 @@ members = [
     "crates/scryer-fetch-evm",
     "crates/scryer-fetch-cex-kraken",
     "crates/scryer-fetch-cex-hyperliquid",
+    "crates/scryer-fetch-cex-perps",
     "crates/scryer-fetch-dexagg",
     "crates/scryer-fetch-redstone",
     "crates/scryer-fetch-pyth",
