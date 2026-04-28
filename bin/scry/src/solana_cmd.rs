@@ -3,10 +3,11 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use scryer_fetch_solana::{
-    mints, LiquidationsFetcher, LiquidationsFetcherConfig, PoolMetadata, ReserveSymbolMap,
+    mints, CollateralFilter, JupiterLendLiquidationsFetcher, JupiterLendLiquidationsFetcherConfig,
+    KaminoLiquidationsFetcher, KaminoLiquidationsFetcherConfig, PoolMetadata, ReserveSymbolMap,
     SwapsFetcher, SwapsFetcherConfig,
 };
-use scryer_schema::{kamino_liquidation, swap};
+use scryer_schema::{jupiter_lend_liquidation, kamino_liquidation, swap};
 use scryer_store::Dataset;
 use serde::Deserialize;
 
@@ -162,7 +163,7 @@ pub async fn run_kamino_liquidations(args: KaminoLiquidationsArgs) -> Result<()>
         "https://api.helius.xyz/v0/transactions/?api-key={}",
         args.helius_api_key
     );
-    let mut cfg = LiquidationsFetcherConfig::new(
+    let mut cfg = KaminoLiquidationsFetcherConfig::new(
         args.proxy_url.clone(),
         helius_url,
         args.lending_market.clone(),
@@ -170,7 +171,7 @@ pub async fn run_kamino_liquidations(args: KaminoLiquidationsArgs) -> Result<()>
     if args.all_markets {
         cfg = cfg.all_markets();
     }
-    let fetcher = LiquidationsFetcher::new(cfg, symbol_map).context("building LiquidationsFetcher")?;
+    let fetcher = KaminoLiquidationsFetcher::new(cfg, symbol_map).context("building KaminoLiquidationsFetcher")?;
 
     tracing::info!(
         market = args.lending_market,
@@ -188,6 +189,101 @@ pub async fn run_kamino_liquidations(args: KaminoLiquidationsArgs) -> Result<()>
         .context("Dataset::write")?;
     println!(
         "kamino_liquidations fetched: rows_added={} rows_deduped={} partitions_written={}",
+        stats.rows_added, stats.rows_deduped, stats.partitions_written
+    );
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+pub struct JupiterLendLiquidationsArgs {
+    /// Window start (`YYYY-MM-DD`, RFC 3339, or unix seconds).
+    #[arg(long)]
+    start: String,
+    /// Window end. Same formats as `--start`.
+    #[arg(long)]
+    end: String,
+    /// Disables the post-decode collateral-mint filter. With this
+    /// flag the panel includes liquidations on any collateral, not
+    /// just the xStock mints in `--symbol-map`.
+    #[arg(long, default_value_t = false)]
+    all_collateral: bool,
+    /// JSON map for `(mint_pubkey) -> (symbol, decimals)` resolution.
+    /// In default xstock-only mode the keys also serve as the
+    /// allowed-collateral set; with `--all-collateral` only the
+    /// symbol/decimals lookup applies. Required unless
+    /// `--all-collateral` is set.
+    #[arg(long)]
+    symbol_map: Option<PathBuf>,
+    #[arg(long, default_value = "http://127.0.0.1:8899/rpc")]
+    proxy_url: String,
+    #[arg(long, env = "HELIUS_API_KEY")]
+    helius_api_key: String,
+    #[arg(long, default_value = "./dataset")]
+    dataset: PathBuf,
+    #[arg(long, default_value = scryer_store::venue::JUPITER_LEND)]
+    venue: String,
+}
+
+pub async fn run_jupiter_lend_liquidations(args: JupiterLendLiquidationsArgs) -> Result<()> {
+    let start_ts = crate::parse_unix_seconds(&args.start).context("parsing --start")?;
+    let end_ts = crate::parse_unix_seconds(&args.end).context("parsing --end")?;
+    if end_ts <= start_ts {
+        anyhow::bail!("--end ({end_ts}) must be > --start ({start_ts})");
+    }
+
+    let mut symbol_map = ReserveSymbolMap::new();
+    let mut allowed_mints: Vec<String> = Vec::new();
+    if let Some(path) = &args.symbol_map {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("reading symbol map {}", path.display()))?;
+        let parsed: std::collections::HashMap<String, SymbolMapEntry> =
+            serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing symbol map {}", path.display()))?;
+        for (mint, entry) in parsed {
+            allowed_mints.push(mint.clone());
+            symbol_map.insert(mint, entry.symbol, entry.decimals);
+        }
+    } else if !args.all_collateral {
+        anyhow::bail!(
+            "--symbol-map is required unless --all-collateral is set; \
+             provide a JSON file mapping xstock mint pubkeys to (symbol, decimals), \
+             or pass --all-collateral to disable the filter."
+        );
+    }
+
+    let collateral_filter = if args.all_collateral {
+        CollateralFilter::Any
+    } else {
+        CollateralFilter::Only(allowed_mints)
+    };
+
+    let helius_url = format!(
+        "https://api.helius.xyz/v0/transactions/?api-key={}",
+        args.helius_api_key
+    );
+    let cfg = JupiterLendLiquidationsFetcherConfig::new(
+        args.proxy_url.clone(),
+        helius_url,
+        collateral_filter,
+    );
+    let fetcher = JupiterLendLiquidationsFetcher::new(cfg, symbol_map)
+        .context("building JupiterLendLiquidationsFetcher")?;
+
+    tracing::info!(
+        start_ts,
+        end_ts,
+        all_collateral = args.all_collateral,
+        "fetching jupiter lend liquidations"
+    );
+    let rows = fetcher.fetch(start_ts, end_ts).await.context("fetcher.fetch")?;
+    tracing::info!(rows = rows.len(), "fetched; writing");
+
+    let ds = Dataset::new(&args.dataset);
+    let stats = ds
+        .write::<jupiter_lend_liquidation::v1::Liquidation>(&args.venue, None, &rows)
+        .context("Dataset::write")?;
+    println!(
+        "jupiter_lend_liquidations fetched: rows_added={} rows_deduped={} partitions_written={}",
         stats.rows_added, stats.rows_deduped, stats.partitions_written
     );
     Ok(())

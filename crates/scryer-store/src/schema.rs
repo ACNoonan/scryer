@@ -22,8 +22,8 @@
 use arrow_array::RecordBatch;
 use arrow_schema::ArrowError;
 use scryer_schema::{
-    backed, earnings, kamino_liquidation, kamino_scope, kraken_funding, nasdaq_halts, pyth,
-    redstone, swap, trade, v5_tape, yahoo, FromArrowError,
+    backed, earnings, jupiter_lend_liquidation, kamino_liquidation, kamino_scope, kraken_funding,
+    nasdaq_halts, pyth, redstone, swap, trade, v5_tape, yahoo, FromArrowError,
 };
 
 /// Time granularity of a dataset's partitioning. Each schema picks
@@ -181,6 +181,25 @@ impl DatasetSchema for redstone::v1::Reading {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         redstone::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for jupiter_lend_liquidation::v1::Liquidation {
+    const DATA_TYPE: &'static str = "liquidations";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.block_time
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        jupiter_lend_liquidation::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        jupiter_lend_liquidation::v1::from_record_batch(batch)
     }
 }
 

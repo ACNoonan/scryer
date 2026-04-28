@@ -17,6 +17,7 @@
 //! (`scryer-store`) handles partition layout + dedup at write time.
 
 pub mod error;
+pub mod jupiter_lend_liquidations;
 pub mod kamino_liquidations;
 pub mod parse;
 pub mod parse_transactions;
@@ -24,6 +25,10 @@ pub mod sig_paginate;
 pub mod types;
 
 pub use error::FetchError;
+pub use jupiter_lend_liquidations::{
+    extract_liquidations as extract_jupiter_lend_liquidations, CollateralFilter,
+    FLUID_VAULTS_PROGRAM, LIQUIDATE_DISC as JUPITER_LEND_LIQUIDATE_DISC,
+};
 pub use kamino_liquidations::{
     extract_liquidations, MarketFilter, ReserveSymbolMap, KLEND_PROGRAM, LIQUIDATE_V1_DISC,
     LIQUIDATE_V2_DISC,
@@ -35,6 +40,7 @@ pub use types::{mints, HeliusInstruction, ParsedTx, PoolMetadata, SignatureInfo}
 
 use std::time::Duration;
 
+use scryer_schema::jupiter_lend_liquidation::v1::Liquidation as JupiterLendLiquidation;
 use scryer_schema::kamino_liquidation::v1::Liquidation;
 use scryer_schema::swap::v1::Swap;
 use scryer_schema::Meta;
@@ -159,7 +165,7 @@ impl SwapsFetcher {
 }
 
 #[derive(Clone, Debug)]
-pub struct LiquidationsFetcherConfig {
+pub struct KaminoLiquidationsFetcherConfig {
     pub proxy_rpc_url: String,
     pub helius_parse_url: String,
     /// `_source` label for emitted rows.
@@ -178,7 +184,7 @@ pub struct LiquidationsFetcherConfig {
     pub request_timeout: Duration,
 }
 
-impl LiquidationsFetcherConfig {
+impl KaminoLiquidationsFetcherConfig {
     pub fn new(
         proxy_rpc_url: impl Into<String>,
         helius_parse_url: impl Into<String>,
@@ -208,15 +214,15 @@ impl LiquidationsFetcherConfig {
     }
 }
 
-pub struct LiquidationsFetcher {
-    cfg: LiquidationsFetcherConfig,
+pub struct KaminoLiquidationsFetcher {
+    cfg: KaminoLiquidationsFetcherConfig,
     client: reqwest::Client,
     symbol_map: ReserveSymbolMap,
 }
 
-impl LiquidationsFetcher {
+impl KaminoLiquidationsFetcher {
     pub fn new(
-        cfg: LiquidationsFetcherConfig,
+        cfg: KaminoLiquidationsFetcherConfig,
         symbol_map: ReserveSymbolMap,
     ) -> Result<Self, FetchError> {
         let client = reqwest::Client::builder()
@@ -302,3 +308,143 @@ impl LiquidationsFetcher {
         Ok(out)
     }
 }
+
+#[derive(Clone, Debug)]
+pub struct JupiterLendLiquidationsFetcherConfig {
+    pub proxy_rpc_url: String,
+    pub helius_parse_url: String,
+    pub source_label: String,
+    /// Address used for `getSignaturesForAddress` pagination.
+    /// Defaults to the Fluid Vaults program ID — every tx that
+    /// includes a `liquidate` IX appears in that signature stream
+    /// (along with deposits, withdraws, etc., which the disc filter
+    /// drops). Advanced users can point at a specific vault state
+    /// PDA for narrower scans.
+    pub sig_source_address: String,
+    /// Post-decode filter on `supply_token`. `Only(set)` for
+    /// xstock-only mode, `Any` for `--all-collateral`.
+    pub collateral_filter: CollateralFilter,
+    pub paginate: SigPaginateConfig,
+    pub parse_txs: ParseTxsConfig,
+    pub request_timeout: Duration,
+}
+
+impl JupiterLendLiquidationsFetcherConfig {
+    pub fn new(
+        proxy_rpc_url: impl Into<String>,
+        helius_parse_url: impl Into<String>,
+        collateral_filter: CollateralFilter,
+    ) -> Self {
+        Self {
+            proxy_rpc_url: proxy_rpc_url.into(),
+            helius_parse_url: helius_parse_url.into(),
+            source_label: "helius:parseTransactions".into(),
+            sig_source_address: FLUID_VAULTS_PROGRAM.to_string(),
+            collateral_filter,
+            paginate: SigPaginateConfig::default(),
+            parse_txs: ParseTxsConfig::default(),
+            request_timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+pub struct JupiterLendLiquidationsFetcher {
+    cfg: JupiterLendLiquidationsFetcherConfig,
+    client: reqwest::Client,
+    symbol_map: ReserveSymbolMap,
+}
+
+impl JupiterLendLiquidationsFetcher {
+    pub fn new(
+        cfg: JupiterLendLiquidationsFetcherConfig,
+        symbol_map: ReserveSymbolMap,
+    ) -> Result<Self, FetchError> {
+        let client = reqwest::Client::builder()
+            .timeout(cfg.request_timeout)
+            .user_agent(concat!("scryer-fetch-solana/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .map_err(FetchError::Transport)?;
+        Ok(Self {
+            cfg,
+            client,
+            symbol_map,
+        })
+    }
+
+    /// Fetch Jupiter-Lend (Fluid Vaults) liquidations in `[start_ts,
+    /// end_ts]`. Mirror of `KaminoLiquidationsFetcher::fetch`.
+    pub async fn fetch(
+        &self,
+        start_ts: i64,
+        end_ts: i64,
+    ) -> Result<Vec<JupiterLendLiquidation>, FetchError> {
+        let fetched_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let meta = Meta::new(
+            scryer_schema::jupiter_lend_liquidation::v1::SCHEMA_VERSION,
+            fetched_at,
+            self.cfg.source_label.clone(),
+        );
+
+        tracing::info!(
+            sig_source = self.cfg.sig_source_address,
+            start_ts,
+            end_ts,
+            "stage 1: paginating signatures"
+        );
+        let sigs = get_signatures_in_window(
+            &self.client,
+            &self.cfg.proxy_rpc_url,
+            &self.cfg.sig_source_address,
+            start_ts,
+            end_ts,
+            &self.cfg.paginate,
+        )
+        .await?;
+        tracing::info!(count = sigs.len(), "sig pagination complete");
+
+        if sigs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sig_strs: Vec<String> = sigs.iter().map(|s| s.signature.clone()).collect();
+        tracing::info!(
+            sigs = sig_strs.len(),
+            batch_size = self.cfg.parse_txs.batch_size,
+            "stage 2: parseTransactions batches"
+        );
+        let txs = parse_all(
+            &self.client,
+            &self.cfg.helius_parse_url,
+            &sig_strs,
+            &self.cfg.parse_txs,
+        )
+        .await?;
+        tracing::info!(parsed = txs.len(), "parseTransactions complete");
+
+        let mut out = Vec::new();
+        let mut n_ignored = 0u64;
+        for tx in &txs {
+            let rows = jupiter_lend_liquidations::extract_liquidations(
+                tx,
+                &self.cfg.collateral_filter,
+                &self.symbol_map,
+                &meta,
+            );
+            if rows.is_empty() {
+                n_ignored += 1;
+            } else {
+                out.extend(rows);
+            }
+        }
+        tracing::info!(
+            liquidations = out.len(),
+            txs_without_liquidation = n_ignored,
+            missing = sig_strs.len() - txs.len(),
+            "decode complete"
+        );
+        Ok(out)
+    }
+}
+

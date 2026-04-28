@@ -77,6 +77,8 @@ enum SolanaTarget {
     Swaps(solana_cmd::SwapsArgs),
     /// Fetch Kamino Klend liquidation events from a window.
     KaminoLiquidations(solana_cmd::KaminoLiquidationsArgs),
+    /// Fetch Jupiter Lend (Fluid Vaults) liquidation events from a window.
+    JupiterLendLiquidations(solana_cmd::JupiterLendLiquidationsArgs),
 }
 
 #[tokio::main]
@@ -106,6 +108,7 @@ async fn main() -> Result<()> {
         Command::Solana(c) => match c.target {
             SolanaTarget::Swaps(a) => solana_cmd::run_swaps(a).await,
             SolanaTarget::KaminoLiquidations(a) => solana_cmd::run_kamino_liquidations(a).await,
+            SolanaTarget::JupiterLendLiquidations(a) => solana_cmd::run_jupiter_lend_liquidations(a).await,
         },
     }
 }
