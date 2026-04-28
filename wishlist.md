@@ -603,7 +603,24 @@ _dedup_key       string  (= symbol + ts)
 
 **Effort.** ~2 hours (yfinance 1m wrapper + import path).
 
-### 39. `mango_v4_market_tape.v1` — Mango v4 post-deviation-guard market price tape  `[methodology-entry-needed]`
+### 39. `mango_v4_market_tape.v1` — Mango v4 post-deviation-guard market price tape  `[premise-incorrect — DO NOT IMPLEMENT]`
+
+> **Status (2026-04-29) — RETRACTED.** Source verification
+> (blockworks-foundation/mango-v4 `programs/mango-v4/src/state/perp_market.rs`)
+> shows that Mango v4's `PerpMarket` does not persist a post-deviation-guard
+> `oracle_price` field. The guard runs ephemerally during Mango's own
+> instructions and the result is never written to account state. The schema
+> below cannot be populated from on-chain reads as proposed.
+>
+> Mango v4's actual contribution to soothsayer is *deviation-guard
+> methodology only* — adopted as the Layer 0 filter per the 2026-04-28
+> (midday) methodology entry, retracted as a literal upstream by the
+> 2026-04-29 entry. See `soothsayer/reports/methodology_history.md`
+> 2026-04-29 entry for the full reasoning + the strategic v0/v1/v2
+> product reframe this verification triggered.
+>
+> Do not implement this tape. Original draft retained below for historical
+> traceability.
 
 **What.** Forward tape (≤60s cadence) of Mango v4's per-market post-
 deviation-guard prices for crypto markets (BTC-PERP, ETH-PERP,

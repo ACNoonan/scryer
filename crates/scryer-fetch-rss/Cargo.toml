@@ -1,0 +1,23 @@
+[package]
+name = "scryer-fetch-rss"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RSS / Atom feed fetchers — Nasdaq trade halts (RSS 2.0) and Backed Finance corp-actions (GitHub commits Atom feed). REST-only, no proxy."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+scryer-schema = { path = "../scryer-schema" }
+serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+quick-xml = "0.36"
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

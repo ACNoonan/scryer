@@ -22,6 +22,7 @@ mod kamino_reserves_cmd;
 mod equities_cmd;
 mod loopscale_loans_cmd;
 mod oracle_context_cmd;
+mod rss_cmd;
 mod pool_snapshots_cmd;
 mod pyth_cmd;
 mod redstone_cmd;
@@ -55,6 +56,11 @@ enum Command {
     /// Yahoo Finance to escape its bot-detection treadmill; replaces
     /// soothsayer's `run_v1_scrape.py`.
     Equities(EquitiesCmd),
+    /// RSS / Atom-feed fetchers. `backed` polls the Backed Finance
+    /// corp-actions GitHub commit feed; `nasdaq-halts` polls Nasdaq
+    /// Trader's trade-halts RSS. Single-tick; cadence wrapped by
+    /// launchd / cron.
+    Rss(RssCmd),
 }
 
 #[derive(Parser, Debug)]
@@ -124,6 +130,20 @@ struct V5tapeCmd {
 struct EquitiesCmd {
     #[command(subcommand)]
     target: EquitiesTarget,
+}
+
+#[derive(Parser, Debug)]
+struct RssCmd {
+    #[command(subcommand)]
+    target: RssTarget,
+}
+
+#[derive(Subcommand, Debug)]
+enum RssTarget {
+    /// Backed Finance corp-actions GitHub commit feed.
+    Backed(rss_cmd::BackedArgs),
+    /// Nasdaq Trader trade-halts RSS feed.
+    NasdaqHalts(rss_cmd::NasdaqHaltsArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -278,6 +298,10 @@ async fn main() -> Result<()> {
         Command::Equities(c) => match c.target {
             EquitiesTarget::Bars(a) => equities_cmd::run_bars(a).await,
             EquitiesTarget::Earnings(a) => equities_cmd::run_earnings(a).await,
+        },
+        Command::Rss(c) => match c.target {
+            RssTarget::Backed(a) => rss_cmd::run_backed(a).await,
+            RssTarget::NasdaqHalts(a) => rss_cmd::run_nasdaq_halts(a).await,
         },
     }
 }
