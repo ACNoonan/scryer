@@ -18,6 +18,7 @@
 
 pub mod error;
 pub mod fluid_vault_configs;
+pub mod get_transactions;
 pub mod jupiter_lend_liquidations;
 pub mod kamino_liquidations;
 pub mod parse;
@@ -30,6 +31,7 @@ pub use fluid_vault_configs::{
     decode_vault_config_bytes, FluidVaultConfigsFetcher, FluidVaultConfigsFetcherConfig,
     SupplyMintFilter,
 };
+pub use get_transactions::{get_transactions_via_proxy, GetTxConfig};
 pub use jupiter_lend_liquidations::{
     extract_liquidations as extract_jupiter_lend_liquidations, CollateralFilter,
     FLUID_VAULTS_PROGRAM, LIQUIDATE_DISC as JUPITER_LEND_LIQUIDATE_DISC,
@@ -186,6 +188,14 @@ pub struct KaminoLiquidationsFetcherConfig {
     pub market_filter: MarketFilter,
     pub paginate: SigPaginateConfig,
     pub parse_txs: ParseTxsConfig,
+    /// Use proxy-routed `getTransaction` instead of Helius
+    /// `parseTransactions` for stage 2. Slower (~5-50 tx/s vs
+    /// ~100 tx/s) but multi-provider quota-resilient via the
+    /// proxy's failover. Defaults to `false` (use parseTransactions
+    /// per the methodology lock); set `true` when the Helius daily
+    /// quota is gone or you want full proxy routing.
+    pub use_get_transaction: bool,
+    pub get_tx: get_transactions::GetTxConfig,
     pub request_timeout: Duration,
 }
 
@@ -204,6 +214,8 @@ impl KaminoLiquidationsFetcherConfig {
             market_pda,
             paginate: SigPaginateConfig::default(),
             parse_txs: ParseTxsConfig::default(),
+            use_get_transaction: false,
+            get_tx: get_transactions::GetTxConfig::default(),
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -280,19 +292,33 @@ impl KaminoLiquidationsFetcher {
             return Ok(Vec::new());
         }
         let sig_strs: Vec<String> = sigs.iter().map(|s| s.signature.clone()).collect();
-        tracing::info!(
-            sigs = sig_strs.len(),
-            batch_size = self.cfg.parse_txs.batch_size,
-            "stage 2: parseTransactions batches"
-        );
-        let txs = parse_all(
-            &self.client,
-            &self.cfg.helius_parse_url,
-            &sig_strs,
-            &self.cfg.parse_txs,
-        )
-        .await?;
-        tracing::info!(parsed = txs.len(), "parseTransactions complete");
+        let txs = if self.cfg.use_get_transaction {
+            tracing::info!(
+                sigs = sig_strs.len(),
+                "stage 2: getTransaction (proxy-routed)"
+            );
+            get_transactions::get_transactions_via_proxy(
+                &self.client,
+                &self.cfg.proxy_rpc_url,
+                &sig_strs,
+                &self.cfg.get_tx,
+            )
+            .await?
+        } else {
+            tracing::info!(
+                sigs = sig_strs.len(),
+                batch_size = self.cfg.parse_txs.batch_size,
+                "stage 2: parseTransactions batches"
+            );
+            parse_all(
+                &self.client,
+                &self.cfg.helius_parse_url,
+                &sig_strs,
+                &self.cfg.parse_txs,
+            )
+            .await?
+        };
+        tracing::info!(parsed = txs.len(), "stage 2 complete");
 
         let mut out = Vec::new();
         let mut n_ignored = 0u64;
@@ -331,6 +357,10 @@ pub struct JupiterLendLiquidationsFetcherConfig {
     pub collateral_filter: CollateralFilter,
     pub paginate: SigPaginateConfig,
     pub parse_txs: ParseTxsConfig,
+    /// Same semantics as the Kamino fetcher's `use_get_transaction`:
+    /// switches stage 2 to the proxy-routed `getTransaction` path.
+    pub use_get_transaction: bool,
+    pub get_tx: get_transactions::GetTxConfig,
     pub request_timeout: Duration,
 }
 
@@ -348,6 +378,8 @@ impl JupiterLendLiquidationsFetcherConfig {
             collateral_filter,
             paginate: SigPaginateConfig::default(),
             parse_txs: ParseTxsConfig::default(),
+            use_get_transaction: false,
+            get_tx: get_transactions::GetTxConfig::default(),
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -414,19 +446,33 @@ impl JupiterLendLiquidationsFetcher {
             return Ok(Vec::new());
         }
         let sig_strs: Vec<String> = sigs.iter().map(|s| s.signature.clone()).collect();
-        tracing::info!(
-            sigs = sig_strs.len(),
-            batch_size = self.cfg.parse_txs.batch_size,
-            "stage 2: parseTransactions batches"
-        );
-        let txs = parse_all(
-            &self.client,
-            &self.cfg.helius_parse_url,
-            &sig_strs,
-            &self.cfg.parse_txs,
-        )
-        .await?;
-        tracing::info!(parsed = txs.len(), "parseTransactions complete");
+        let txs = if self.cfg.use_get_transaction {
+            tracing::info!(
+                sigs = sig_strs.len(),
+                "stage 2: getTransaction (proxy-routed)"
+            );
+            get_transactions::get_transactions_via_proxy(
+                &self.client,
+                &self.cfg.proxy_rpc_url,
+                &sig_strs,
+                &self.cfg.get_tx,
+            )
+            .await?
+        } else {
+            tracing::info!(
+                sigs = sig_strs.len(),
+                batch_size = self.cfg.parse_txs.batch_size,
+                "stage 2: parseTransactions batches"
+            );
+            parse_all(
+                &self.client,
+                &self.cfg.helius_parse_url,
+                &sig_strs,
+                &self.cfg.parse_txs,
+            )
+            .await?
+        };
+        tracing::info!(parsed = txs.len(), "stage 2 complete");
 
         let mut out = Vec::new();
         let mut n_ignored = 0u64;

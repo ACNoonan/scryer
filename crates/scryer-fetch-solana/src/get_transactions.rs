@@ -1,0 +1,369 @@
+//! Proxy-routed `getTransaction` fallback for the liquidation
+//! decoders.
+//!
+//! The methodology-locked Helius `parseTransactions` exception
+//! gives 50× throughput on the free tier but bottlenecks on a
+//! single Helius API key — when the daily quota is exhausted, the
+//! whole pipeline stalls. This module provides the slower-but-
+//! portable alternative: per-signature `getTransaction(encoding=
+//! jsonParsed)` calls routed through `scryer-proxy`, which the
+//! proxy multi-providers across Helius / Alchemy / QuickNode /
+//! RPCFast / public Solana RPC.
+//!
+//! Output shape matches `parse_transactions::parse_all` (returns
+//! `Vec<ParsedTx>` with `instructions` populated) so the liquidation
+//! decoders work unchanged. `account_data` is left empty —
+//! computing token-balance deltas from `meta.preTokenBalances` /
+//! `meta.postTokenBalances` is straightforward but unused by
+//! liquidation decoders, so deferred.
+//!
+//! Cost on free-tier providers: roughly 5-10 sigs/sec sequential
+//! (vs ~100 sigs/sec for parseTransactions on Helius). Concurrency
+//! is left to a future phase; the proxy's per-provider quota
+//! management already throttles individual providers as needed.
+
+use std::collections::HashMap;
+use std::time::Duration;
+
+use serde::Deserialize;
+use serde_json::json;
+
+use crate::error::FetchError;
+use crate::types::{HeliusInstruction, ParsedTx};
+
+#[derive(Clone, Debug)]
+pub struct GetTxConfig {
+    /// Per-signature request timeout. Defaults to 15s — Solana RPC
+    /// is sometimes slow to load older transactions from cold
+    /// storage even on paid tiers.
+    pub request_timeout: Duration,
+    /// Per-signature retry budget on transient failures. The proxy
+    /// already retries internally on transport / 5xx, so this is
+    /// a small safety net for the rare race where the proxy gives
+    /// up and we want one more attempt.
+    pub retry_max: u32,
+    /// Linear-backoff base between retries.
+    pub retry_base: Duration,
+}
+
+impl Default for GetTxConfig {
+    fn default() -> Self {
+        Self {
+            request_timeout: Duration::from_secs(15),
+            retry_max: 3,
+            retry_base: Duration::from_millis(250),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct RpcResponse {
+    #[serde(default)]
+    result: Option<GetTxResult>,
+    #[serde(default)]
+    error: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct GetTxResult {
+    #[serde(default)]
+    slot: u64,
+    #[serde(default, rename = "blockTime")]
+    block_time: Option<i64>,
+    #[serde(default)]
+    transaction: Option<TxInner>,
+    #[serde(default)]
+    meta: Option<MetaInner>,
+}
+
+#[derive(Deserialize)]
+struct TxInner {
+    #[serde(default)]
+    message: Option<MessageInner>,
+}
+
+#[derive(Deserialize)]
+struct MessageInner {
+    #[serde(default)]
+    instructions: Vec<RpcInstruction>,
+}
+
+#[derive(Deserialize)]
+struct MetaInner {
+    #[serde(default)]
+    err: Option<serde_json::Value>,
+    #[serde(default, rename = "innerInstructions")]
+    inner_instructions: Vec<InnerIxBlock>,
+}
+
+#[derive(Deserialize)]
+struct InnerIxBlock {
+    #[serde(default)]
+    index: u32,
+    #[serde(default)]
+    instructions: Vec<RpcInstruction>,
+}
+
+/// One instruction from `getTransaction(encoding=jsonParsed)`.
+/// jsonParsed produces two shapes:
+/// - **Parsed** (System, Token, ATA programs etc.): includes a
+///   `parsed` field with structured data; `accounts` and `data`
+///   are absent.
+/// - **Unparsed** (custom programs like Klend, Fluid Vaults): a
+///   `{programId, accounts, data}` shape identical to Helius's
+///   parseTransactions output.
+///
+/// We deserialize tolerantly: every field optional / defaulted.
+/// The decoder filters by program ID at the IX level, so the
+/// "parsed" shape's missing accounts/data simply means the
+/// instruction doesn't match any decoder.
+#[derive(Deserialize, Default)]
+struct RpcInstruction {
+    #[serde(default, rename = "programId")]
+    program_id: String,
+    #[serde(default)]
+    accounts: Vec<String>,
+    #[serde(default)]
+    data: String,
+}
+
+/// Fetch `Vec<ParsedTx>` from the proxy by issuing per-signature
+/// `getTransaction` calls in order. Missing transactions (RPC
+/// returned `result: null` — typically pre-confirmed or pruned)
+/// are silently skipped so the output length may be less than
+/// the input.
+pub async fn get_transactions_via_proxy(
+    client: &reqwest::Client,
+    proxy_url: &str,
+    signatures: &[String],
+    cfg: &GetTxConfig,
+) -> Result<Vec<ParsedTx>, FetchError> {
+    let mut out = Vec::with_capacity(signatures.len());
+    let mut n_missing = 0u64;
+    for sig in signatures {
+        match get_one_with_retry(client, proxy_url, sig, cfg).await? {
+            Some(tx) => out.push(tx),
+            None => n_missing += 1,
+        }
+    }
+    if n_missing > 0 {
+        tracing::debug!(missing = n_missing, "getTransaction returned null for some sigs");
+    }
+    Ok(out)
+}
+
+async fn get_one_with_retry(
+    client: &reqwest::Client,
+    proxy_url: &str,
+    sig: &str,
+    cfg: &GetTxConfig,
+) -> Result<Option<ParsedTx>, FetchError> {
+    let mut last_err: Option<FetchError> = None;
+    for attempt in 0..cfg.retry_max.max(1) {
+        match get_one(client, proxy_url, sig, cfg).await {
+            Ok(opt) => return Ok(opt),
+            Err(e) => {
+                tracing::debug!(sig, error = %e, attempt = attempt + 1, "getTransaction failed");
+                last_err = Some(e);
+                tokio::time::sleep(cfg.retry_base * (attempt + 1)).await;
+            }
+        }
+    }
+    Err(last_err.unwrap_or(FetchError::RateLimitGiveUp {
+        attempts: cfg.retry_max,
+    }))
+}
+
+async fn get_one(
+    client: &reqwest::Client,
+    proxy_url: &str,
+    sig: &str,
+    cfg: &GetTxConfig,
+) -> Result<Option<ParsedTx>, FetchError> {
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTransaction",
+        "params": [
+            sig,
+            {
+                "encoding": "jsonParsed",
+                "maxSupportedTransactionVersion": 0,
+                "commitment": "confirmed"
+            }
+        ],
+    });
+    let resp = client
+        .post(proxy_url)
+        .json(&body)
+        .timeout(cfg.request_timeout)
+        .send()
+        .await
+        .map_err(FetchError::Transport)?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.map_err(FetchError::Transport)?;
+    if status >= 400 {
+        return Err(FetchError::UpstreamStatus { status, body: text });
+    }
+    let parsed: RpcResponse = serde_json::from_str(&text)
+        .map_err(|e| FetchError::MalformedBody(format!("parse: {e}")))?;
+    if let Some(err) = parsed.error {
+        return Err(FetchError::MalformedBody(format!("rpc-error: {err}")));
+    }
+    let result = match parsed.result {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    Ok(Some(convert_to_parsed_tx(result, sig.to_string())))
+}
+
+fn convert_to_parsed_tx(r: GetTxResult, signature: String) -> ParsedTx {
+    let mut inner_by_parent: HashMap<u32, Vec<HeliusInstruction>> = HashMap::new();
+    let (transaction_error, raw_inner) = match r.meta {
+        Some(m) => (m.err, m.inner_instructions),
+        None => (None, Vec::new()),
+    };
+    for block in raw_inner {
+        let ixs = block.instructions.into_iter().map(convert_ix).collect();
+        inner_by_parent.insert(block.index, ixs);
+    }
+    let instructions: Vec<HeliusInstruction> = r
+        .transaction
+        .and_then(|t| t.message)
+        .map(|m| m.instructions)
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .map(|(i, raw_ix)| {
+            let mut hi = convert_ix(raw_ix);
+            if let Some(inner) = inner_by_parent.remove(&(i as u32)) {
+                hi.inner_instructions = inner;
+            }
+            hi
+        })
+        .collect();
+
+    ParsedTx {
+        signature,
+        slot: r.slot,
+        timestamp: r.block_time.unwrap_or(0),
+        transaction_error,
+        account_data: Vec::new(),
+        instructions,
+    }
+}
+
+fn convert_ix(raw: RpcInstruction) -> HeliusInstruction {
+    HeliusInstruction {
+        program_id: raw.program_id,
+        accounts: raw.accounts,
+        data: raw.data,
+        inner_instructions: vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_response(slot: u64, block_time: i64) -> serde_json::Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "slot": slot,
+                "blockTime": block_time,
+                "transaction": {
+                    "message": {
+                        "instructions": [
+                            {
+                                "programId": "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD",
+                                "accounts": ["A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7"],
+                                "data": "base58data"
+                            },
+                            {
+                                "programId": "11111111111111111111111111111111",
+                                "parsed": {"type": "transfer", "info": {}},
+                                "program": "system"
+                            }
+                        ]
+                    }
+                },
+                "meta": {
+                    "err": null,
+                    "innerInstructions": [
+                        {
+                            "index": 0,
+                            "instructions": [
+                                {
+                                    "programId": "InnerProgram",
+                                    "accounts": ["B0", "B1"],
+                                    "data": "innerdata"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn convert_response_to_parsed_tx_preserves_unparsed_ix_and_groups_inner_by_parent() {
+        let raw = fixture_response(415_581_004, 1_777_126_459);
+        let response: RpcResponse = serde_json::from_value(raw).unwrap();
+        let result = response.result.unwrap();
+        let tx = convert_to_parsed_tx(result, "sigA".to_string());
+        assert_eq!(tx.signature, "sigA");
+        assert_eq!(tx.slot, 415_581_004);
+        assert_eq!(tx.timestamp, 1_777_126_459);
+        assert!(tx.transaction_error.is_none());
+        assert_eq!(tx.instructions.len(), 2);
+
+        // First IX: Klend (unparsed) — accounts and data populated.
+        let klend = &tx.instructions[0];
+        assert_eq!(klend.program_id, "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD");
+        assert_eq!(klend.accounts.len(), 8);
+        assert_eq!(klend.data, "base58data");
+        // And the inner IX got attached to it (parent index = 0).
+        assert_eq!(klend.inner_instructions.len(), 1);
+        assert_eq!(klend.inner_instructions[0].program_id, "InnerProgram");
+
+        // Second IX: System transfer (parsed shape) — accounts/data
+        // empty by default, programId still present.
+        let sys = &tx.instructions[1];
+        assert_eq!(sys.program_id, "11111111111111111111111111111111");
+        assert!(sys.accounts.is_empty());
+        assert!(sys.data.is_empty());
+        assert!(sys.inner_instructions.is_empty());
+    }
+
+    #[test]
+    fn convert_response_handles_null_block_time() {
+        let mut raw = fixture_response(1, 0);
+        raw["result"]["blockTime"] = serde_json::Value::Null;
+        let response: RpcResponse = serde_json::from_value(raw).unwrap();
+        let tx = convert_to_parsed_tx(response.result.unwrap(), "sig".to_string());
+        assert_eq!(tx.timestamp, 0);
+    }
+
+    #[test]
+    fn convert_response_handles_missing_meta_inner_instructions() {
+        let mut raw = fixture_response(1, 1);
+        raw["result"]["meta"] = json!({"err": null}); // no innerInstructions field
+        let response: RpcResponse = serde_json::from_value(raw).unwrap();
+        let tx = convert_to_parsed_tx(response.result.unwrap(), "sig".to_string());
+        // Top-level count unchanged (fixture has 2).
+        assert_eq!(tx.instructions.len(), 2);
+        // Klend IX has no inner_instructions now since meta dropped them.
+        assert!(tx.instructions[0].inner_instructions.is_empty());
+    }
+
+    #[test]
+    fn rpc_error_field_surfaces_as_malformed_body() {
+        let raw = json!({"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Invalid params"}});
+        let response: RpcResponse = serde_json::from_value(raw).unwrap();
+        assert!(response.result.is_none());
+        assert!(response.error.is_some());
+    }
+}

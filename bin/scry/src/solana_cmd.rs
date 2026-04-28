@@ -129,6 +129,13 @@ pub struct KaminoLiquidationsArgs {
     /// `("?", 0)` per the Phase-17 methodology lock.
     #[arg(long)]
     symbol_map: Option<PathBuf>,
+    /// Use proxy-routed `getTransaction` for stage 2 instead of
+    /// Helius `parseTransactions`. Slower (~5-50 tx/s vs ~100 tx/s)
+    /// but multi-provider quota-resilient via the proxy. Use this
+    /// when Helius's daily quota is exhausted or you want full
+    /// proxy routing.
+    #[arg(long, default_value_t = false)]
+    use_get_transaction: bool,
     #[arg(long, default_value = "./dataset")]
     dataset: PathBuf,
     #[arg(long, default_value = scryer_store::venue::KAMINO)]
@@ -171,6 +178,10 @@ pub async fn run_kamino_liquidations(args: KaminoLiquidationsArgs) -> Result<()>
     );
     if args.all_markets {
         cfg = cfg.all_markets();
+    }
+    if args.use_get_transaction {
+        cfg.use_get_transaction = true;
+        cfg.source_label = "rpc:getTransaction".to_string();
     }
     let fetcher = KaminoLiquidationsFetcher::new(cfg, symbol_map).context("building KaminoLiquidationsFetcher")?;
 
@@ -215,6 +226,11 @@ pub struct JupiterLendLiquidationsArgs {
     /// `--all-collateral` is set.
     #[arg(long)]
     symbol_map: Option<PathBuf>,
+    /// Same semantics as `kamino-liquidations`: use proxy-routed
+    /// `getTransaction` for stage 2 instead of Helius
+    /// `parseTransactions`.
+    #[arg(long, default_value_t = false)]
+    use_get_transaction: bool,
     #[arg(long, default_value = "http://127.0.0.1:8899/rpc")]
     proxy_url: String,
     #[arg(long, env = "HELIUS_API_KEY")]
@@ -262,11 +278,15 @@ pub async fn run_jupiter_lend_liquidations(args: JupiterLendLiquidationsArgs) ->
         "https://api.helius.xyz/v0/transactions/?api-key={}",
         args.helius_api_key
     );
-    let cfg = JupiterLendLiquidationsFetcherConfig::new(
+    let mut cfg = JupiterLendLiquidationsFetcherConfig::new(
         args.proxy_url.clone(),
         helius_url,
         collateral_filter,
     );
+    if args.use_get_transaction {
+        cfg.use_get_transaction = true;
+        cfg.source_label = "rpc:getTransaction".to_string();
+    }
     let fetcher = JupiterLendLiquidationsFetcher::new(cfg, symbol_map)
         .context("building JupiterLendLiquidationsFetcher")?;
 
