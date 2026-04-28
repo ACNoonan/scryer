@@ -548,6 +548,206 @@ at the old venue forever.
    shipped one day; no production consumers have read it; one-shot
    rename in the same Phase 9 commit is safe.
 
+## Priority-0 schemas — 2026-04-28 (locked)
+
+Three soothsayer-side scanners are gating the trilogy's empirical
+content (Paper 2 §C4 + Paper 3 cost-anchor inputs). These schemas
+land before the implementation phases (Phase 17 / 18 / 19) to
+satisfy CLAUDE.md hard rule #1. Source of detailed scope is
+`wishlist.md` items 1, 2, 3.
+
+### kamino_liquidation.v1
+
+**Source.** On-chain Solana mainnet. Klend program
+`KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD`. Two anchor
+discriminators decode to the same panel:
+
+- V1: `b1479abce2854a37` = `liquidate_obligation_and_redeem_reserve_collateral`
+- V2: `a2a1238f1ebbb967` = `liquidate_obligation_and_redeem_reserve_collateral_v2`
+
+Both share the first 20 accounts of the inner `liquidationAccounts`
+substruct. Account indices used by the panel:
+`liquidator=0, obligation=1, lending_market=2, repay_reserve=4,
+withdraw_reserve=7`. IX args after disc: three little-endian
+`u64`s — `liquidity_amount`, `min_acceptable_received_liquidity_amount`,
+`max_allowed_ltv_override_pct`.
+
+**Schema columns.**
+
+```
+signature                                string
+slot                                     u64
+block_time                               i64       // unix seconds
+ix_version                               string    // "v1" | "v2"
+liquidator                               string    // base58 pubkey
+obligation                               string
+lending_market                           string
+repay_reserve                            string
+repay_symbol                             string    // "USDC" | "SPYx" | "?"
+repay_decimals                           u8
+withdraw_reserve                         string
+withdraw_symbol                          string
+withdraw_decimals                        u8
+liquidity_amount_lamports                u64
+min_acceptable_received_liquidity_amount u64
+max_allowed_ltv_override_pct             u64
+```
+
+Plus standard `_schema_version` / `_fetched_at` / `_source` /
+`_dedup_key`. `_dedup_key = signature` (one liquidation IX per tx
+in practice; if a future codepath bundles multiple, dedup by
+`(signature, ix_index)` and bump to v2).
+
+**Fetcher.** New module
+`crates/scryer-fetch-solana/src/kamino_liquidations.rs`. Reuses
+`sig_paginate::get_signatures_in_window` (filter: lending-market
+PDA) + `parse_transactions::parse_all`. Decode loop: walk
+parsed-tx instructions (top-level + inner), filter to Klend
+program, match leading-8-bytes against `LIQUIDATE_V1_DISC` /
+`LIQUIDATE_V2_DISC`, extract accounts at fixed indices, decode
+3-u64 args.
+
+**Storage.** `dataset/kamino/liquidations/v1/year=YYYY/month=MM/day=DD.parquet`
+(no key, daily — event-stream pattern). venue = `"kamino"`,
+data_type = `"liquidations"`. Granularity = Daily because the
+deep-scan window is 9+ months and per-day partitioning makes
+backfill resumability cleaner.
+
+**Symbol resolution.** `repay_symbol` / `withdraw_symbol` /
+decimals are filled from a reserve-snapshot lookup at fetch time.
+The reserve snapshot ships in Phase 19's companion schema
+(`kamino_reserve.v1`, wishlist item 4) but for Phase 17 a static
+hardcoded map (loaded from `quant-work/data/pool_metadata.json` or
+similar) is sufficient — full lookup-table integration deferred.
+
+**CLI.** `scry solana kamino-liquidations --start DATE --end DATE
+--lending-market PDA [--all-markets] --proxy-url URL
+--helius-api-key KEY`
+
+### jupiter_lend_liquidation.v1
+
+**Source.** On-chain Solana mainnet. Fluid Vaults program
+`jupr81YtYssSyPt8jbnGuiWon5f6x9TcDEFxYe3Bdzi`. Single anchor
+discriminator: `dfb3e27d302e274a` = `liquidate`.
+
+Account ordering (from
+`Instadapp/fluid-solana-programs/programs/vaults/src/state/context.rs::Liquidate`):
+
+```
+[0]  signer (liquidator)
+[1]  signer_token_account
+[2]  to (position owner)
+[3]  to_token_account
+[4]  vault_config
+[5]  vault_state
+[6]  supply_token        // collateral mint
+[7]  borrow_token        // debt mint
+[8]  oracle
+```
+
+IX args after disc: `debt_amt: u64` (8B) +
+`col_per_unit_debt: u128` (16B) + `absorb: bool` (1B) +
+`transfer_type: Option<...>` (variable) +
+`remaining_accounts_indices: Vec<u8>` (length-prefixed). Only
+the first three are typed into the panel; the variable-length
+trailing args are skipped at decode time (length is enough to
+locate the next instruction).
+
+**Schema columns.**
+
+```
+signature                       string
+slot                            u64
+block_time                      i64
+liquidator                      string  // pubkey
+position_owner                  string
+vault_config                    string
+vault_state                     string
+supply_token                    string  // collateral mint
+supply_symbol                   string  // xStock symbol or mint
+borrow_token                    string  // debt mint
+borrow_symbol                   string
+debt_amt_lamports               u64
+col_per_unit_debt_raw           u128    // stored as String in arrow
+                                        //   (no native u128 in arrow);
+                                        //   decimal-string representation
+absorb                          bool
+```
+
+Plus standard `_schema_version` / `_fetched_at` / `_source` /
+`_dedup_key`. `_dedup_key = signature`.
+
+`col_per_unit_debt_raw` arrow-side gotcha: arrow has no native
+u128 type. Stored as `LargeUtf8` decimal string (e.g.
+`"123456789012345678901234567890"`) because (a) the precision is
+load-bearing (Fluid's `col_per_unit_debt` is a Q128.18 fixed-point
+collateral-scaled-by-debt ratio), (b) downstream consumers can
+parse to `decimal.Decimal` in Python or `i256` in arrow-rs at
+read time, and (c) `Decimal128(38, 0)` would lose the leading
+digits for some realistic values. Locked: store as decimal
+string.
+
+**Fetcher.** New module
+`crates/scryer-fetch-solana/src/jupiter_lend_liquidations.rs`.
+Same primitives as kamino_liquidations. Filter post-decode by
+xStock-mint set (loaded from constants); `--all-collateral` flag
+disables that filter for the full panel.
+
+**Storage.** `dataset/jupiter_lend/liquidations/v1/year=Y/month=M/day=D.parquet`.
+venue = `"jupiter_lend"`, data_type = `"liquidations"`. Daily,
+no-key.
+
+**CLI.** `scry solana jupiter-lend-liquidations --start DATE
+--end DATE [--all-collateral] --proxy-url URL --helius-api-key KEY`
+
+### fluid_vault_config.v1
+
+**Source.** `getProgramAccounts(jupr81YtYssSyPt8jbnGuiWon5f6x9TcDEFxYe3Bdzi,
+filters=[{memcmp: {offset: 154, bytes: <xstock_mint_b58>}}])`.
+The 154-byte offset is `8 (anchor disc) + 146 (start of
+supply_token field within VaultConfig)`. One-shot snapshot, not
+paginated.
+
+VaultConfig layout (after 8-byte disc):
+
+```
+0   vault_id              u16
+2   supply_rate_magnifier  i16
+4   borrow_rate_magnifier  i16
+6   collateral_factor      u16
+8   liquidation_threshold  u16
+10  liquidation_max_limit  u16
+12  withdraw_gap           u16
+14  liquidation_penalty    u16
+16  borrow_fee             u16
+18  oracle                 Pubkey  (32B)
+50  rebalancer             Pubkey
+82  liquidity_program      Pubkey
+114 oracle_program         Pubkey
+146 supply_token           Pubkey  ← memcmp filter target
+178 borrow_token           Pubkey
+210 bump                   u8
+```
+
+**Schema columns.** All of the above (raw integer / pubkey
+fields) plus standard `_meta`. `_dedup_key = vault_config_pda`
+(the account address of the VaultConfig itself, returned by
+`getProgramAccounts`).
+
+**Fetcher.** New module
+`crates/scryer-fetch-solana/src/fluid_vault_configs.rs`.
+Single `getProgramAccounts` call routed through the proxy. Decode
+the returned account-data byte arrays per the layout above.
+
+**Storage.** `dataset/jupiter_lend/vault_configs/v1/year=YYYY.parquet`.
+Yearly partitioning (snapshots run on-demand or weekly cadence;
+~10-100 vault configs per snapshot; year-level is right-sized).
+venue = `"jupiter_lend"`, data_type = `"vault_configs"`. No key.
+
+**CLI.** `scry solana fluid-vault-configs --xstock-only
+--proxy-url URL`. With `--all` it skips the memcmp filter and
+returns all VaultConfigs program-wide.
+
 ---
 
 ## Decision log
@@ -574,6 +774,7 @@ without losing the rationale.
 | v0.1-phase-13 | 2026-04-27 | Seventh soothsayer-side schema. `scryer-schema::backed::v1::Action` (10 fields: detected_at as Timestamp[us,UTC], commit_date as Date32, nullable underlying, plus 7 string fields) + `impl DatasetSchema` (Yearly + no-key) + `extract_backed` (parses upstream `commit_date` string `YYYY-MM-DD` to Date32 at import) + `scry import backed` CLI. Migrates only `backed_corp_actions.parquet` — the `_enriched` derivative is a soothsayer-side computed dataset and stays out of scryer per the "raw-only" rule. Cross-validated against the real soothsayer file: 13 source rows → 13 unique commits added → 2 yearly partitions (1 commit in 2025, 12 in 2026 YTD). Spot-check confirmed `commit_date` string-to-Date32 round-trip preserves "2025-05-30" exactly. | First scryer schema with a no-key Yearly partition (path: `dataset/backed/corp_actions/v1/year=YYYY.parquet`) — `repo` strings contain `/` which would violate the methodology's "no URL encoding" rule, so the partition is keyless and the repo is preserved in-row. First import that does string-to-Date32 type coercion at extract time (chrono parse with `%Y-%m-%d`); locks the pattern for future schemas where upstream emits dates as strings. The dispatch case `(None, _, PartitionTime::Yearly)` in `partition_path_for` (added but unused since Phase 11) is now actually exercised — completes the 2×2 partition-shape matrix. |
 | v0.1-phase-14 | 2026-04-28 | Eighth soothsayer-side schema. `scryer-schema::nasdaq_halts::v1::Halt` (12 fields: poll_ts as Timestamp[us,UTC], halt_date as Date32, four nullable resumption-related fields, plus six required strings) + `impl DatasetSchema` (Yearly + no-key) + `extract_nasdaq_halts` (parses upstream `halt_date` and optional `resumption_date` strings as `MM/DD/YYYY` to Date32) + `scry import nasdaq-halts` CLI. The companion `nasdaq_halts_implied.parquet` (yfinance-driven detection path) is empty in soothsayer's current dataset; an `nasdaq_halts_implied::v1` schema will land if/when the detector populates it. Cross-validated against the real soothsayer file (`nasdaq_halts_live.parquet`, 27 rows): imported into 3 yearly partitions (1 row in 2019, 15 in 2025, 11 in 2026 YTD). `halt_date` string `"04/24/2026"` correctly parsed to Date32 round-trip. | First import with a US-formatted date (`MM/DD/YYYY`); generalized the chrono-parse helper from Phase 13's ISO format to a `parse_us_date` helper. Reuses the optional-column tolerance helpers (`optional_float64_column`, `optional_string_column`) for the 4 nullable resumption-related columns that pyarrow currently emits as `null` dtype because no halt in the source has resumed yet. Same 2×2-matrix slot as Phase 13 (no-key + Yearly) — confirms the trait abstraction is mature and new same-shape schemas now cost ~390 LOC end-to-end. |
 | v0.1-phase-15 | 2026-04-28 | Ninth (and last v0.1-scope) soothsayer-side schema. `scryer-schema::kraken_funding::v1::Rate` (4 fields: symbol, ts as Timestamp[us,UTC], funding_rate, relative_funding_rate) + `impl DatasetSchema` (Monthly + symbol-keyed) + `extract_kraken_funding` + multi-input `scry import kraken-funding --input PATH...` CLI. New `PartitionGranularity::Monthly` variant + `PartitionTime::Monthly{year,month}` + `partition_path_keyed_monthly` / `partition_path_no_key_monthly` helpers complete the 3×2 partition-shape matrix (Daily/Monthly/Yearly × Keyed/NoKey). Methodology log "Storage layout" updated: funding-rate path simplified to `{key}={value}/year=YYYY/month=MM.parquet` (the locked-but-never-built `period={1h\|4h\|1d}` segment is now reserved for sources that emit period explicitly; Kraken Pro Futures' 1h cadence is implicit in the contract type). Cross-validated against the 10 real `soothsayer/data/raw/kraken_funding_*.parquet` cache files in one CLI invocation: 21,457 source rows → 21,457 added (no dedup needed since each file is a distinct symbol) → 10 symbols × 36 monthly partition files. | Last v0.1-scope partition shape; the Monthly granularity slot was reserved by methodology since Day 1 but only became necessary now. The dispatch in `partition_path_for` is now a 3×2 = 6-case match, all populated. With Phase 15 the soothsayer raw-data migration is complete (9 of 9 schemas) and the partition-shape catalog is exhausted — future schemas will reuse one of the 6 existing shapes rather than introduce a 7th. |
+| v0.1-phase-16 | 2026-04-28 | Wishlist landed (`wishlist.md`) — source-of-truth TODO listing 20 prioritized scryer fetcher / schema / daemon items extracted from the soothsayer migration plan. Three Priority-0 schemas locked in methodology before any code (per CLAUDE.md hard rule #1): `kamino_liquidation.v1` (Klend liquidation event panel; on-chain decode via parseTransactions; daily no-key partitions), `jupiter_lend_liquidation.v1` (Fluid Vaults `liquidate` IX panel; same shape as Kamino plus a u128 collateral-per-debt field stored as decimal-string in arrow because arrow has no native u128), `fluid_vault_config.v1` (one-shot `getProgramAccounts` snapshot of Fluid VaultConfig accounts; yearly no-key partition). Each section in the new "Priority-0 schemas" methodology block specifies discriminators, account ordering, IX arg layout, full column list, fetcher placement, storage path, and CLI surface — implementations in Phase 17 / 18 / 19 cite these as the spec. | These schemas gate the Soothsayer trilogy's empirical content (Paper 2 §C4, Paper 3 cost-anchor inputs). Wishlist was committed at the same time so the prioritized TODO is durable; future phases can reference it as the canonical "what should we build next" list. The locked methodology pre-empts a 1355-line Python-to-Rust port by extracting just the on-chain decode primitives — the implementation phases don't need to re-read the soothsayer scanners, only follow this section. |
 
 ---
 
