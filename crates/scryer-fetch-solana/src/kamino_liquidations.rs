@@ -188,7 +188,9 @@ mod tests {
             slot: 415_581_004,
             timestamp: 1_777_126_459,
             transaction_error: None,
+            fee_payer: String::new(),
             account_data: vec![AccountData {
+                account: String::new(),
                 token_balance_changes: vec![],
             }],
             instructions: ixs,

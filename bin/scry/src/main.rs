@@ -19,6 +19,7 @@ mod import_cmd;
 mod jito_cmd;
 mod kamino_obligations_cmd;
 mod kamino_reserves_cmd;
+mod dex_xstock_swaps_cmd;
 mod equities_cmd;
 mod fred_cmd;
 mod loopscale_loans_cmd;
@@ -247,6 +248,11 @@ enum SolanaTarget {
     /// schemas to dataset/loopscale/loans/v1 and
     /// dataset/loopscale/loan_collaterals/v1.
     LoopscaleLoans(loopscale_loans_cmd::LoopscaleLoansArgs),
+    /// Cross-DEX xStock swap prints. Vault-delta extraction across
+    /// every DEX touching xStock mints (Orca/Meteora/Phoenix/Raydium
+    /// variants/aggregator-routed). Writes to dataset/dex_xstock/
+    /// swaps/v1/symbol={X}/year=Y/month=M/day=D.parquet.
+    DexXstockSwaps(dex_xstock_swaps_cmd::DexXstockSwapsArgs),
     /// Jito Block Engine bundle-attachment enrichment over an existing
     /// liquidation panel. Reads `(signature, slot, block_time)` from
     /// kamino_liquidation.v1 / jupiter_lend_liquidation.v1 parquet,
@@ -299,6 +305,7 @@ async fn main() -> Result<()> {
             SolanaTarget::KaminoReserves(a) => kamino_reserves_cmd::run_reserves(a).await,
             SolanaTarget::KaminoObligations(a) => kamino_obligations_cmd::run_obligations(a).await,
             SolanaTarget::LoopscaleLoans(a) => loopscale_loans_cmd::run_loopscale_loans(a).await,
+            SolanaTarget::DexXstockSwaps(a) => dex_xstock_swaps_cmd::run_dex_xstock_swaps(a).await,
             SolanaTarget::JitoBundles(a) => jito_cmd::run_jito_bundles(a).await,
             SolanaTarget::OracleContext(a) => oracle_context_cmd::run_oracle_context(a).await,
         },

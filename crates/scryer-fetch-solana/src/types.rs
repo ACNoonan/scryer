@@ -44,6 +44,14 @@ pub struct ParsedTx {
     pub timestamp: i64,
     #[serde(default, rename = "transactionError")]
     pub transaction_error: Option<serde_json::Value>,
+    /// Fee-payer / first signer of the transaction. The
+    /// dex-xstock-swaps decoder uses this to identify the trader
+    /// (vs the pool, which is always a PDA and never a signer).
+    /// Helius provides this directly as `feePayer`; the
+    /// proxy-routed getTransaction path synthesizes it from
+    /// `transaction.message.accountKeys[0]`.
+    #[serde(default, rename = "feePayer")]
+    pub fee_payer: String,
     #[serde(default, rename = "accountData")]
     pub account_data: Vec<AccountData>,
     /// Top-level instructions in execution order. Each may contain
@@ -85,12 +93,21 @@ impl HeliusInstruction {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AccountData {
+    /// Owner / wallet address. Helius's parseTransactions response
+    /// groups `tokenBalanceChanges` under this account; for cross-DEX
+    /// swap extraction this is the trader (or pool) wallet.
+    #[serde(default)]
+    pub account: String,
     #[serde(default, rename = "tokenBalanceChanges")]
     pub token_balance_changes: Vec<TokenBalanceChange>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct TokenBalanceChange {
+    /// Owner of the token account (typically same as the parent
+    /// `AccountData.account`, but Helius surfaces it explicitly).
+    #[serde(default, rename = "userAccount")]
+    pub user_account: String,
     #[serde(default, rename = "tokenAccount")]
     pub token_account: String,
     #[serde(default)]

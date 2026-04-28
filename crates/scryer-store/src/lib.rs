@@ -67,6 +67,11 @@ pub mod venue {
     pub const JITO: &str = "jito";
     pub const LOOPSCALE: &str = "loopscale";
     pub const FRED: &str = "fred";
+    /// Cross-DEX xStock swap prints — venue catches every DEX
+    /// touching xStock mints regardless of which program executed
+    /// the swap (Orca, Meteora, Phoenix, Raydium variants,
+    /// aggregator-routed). Keyed by xstock symbol.
+    pub const DEX_XSTOCK: &str = "dex_xstock";
     /// Cross-source oracle context derived from joining the
     /// kamino_scope / pyth / v5_tape / redstone tapes against the
     /// liquidation panels.

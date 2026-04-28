@@ -20,6 +20,7 @@
 //! dialect, and the choice is easier to keep stable when it's explicit.
 
 pub mod backed;
+pub mod dex_xstock_swaps;
 pub mod earnings;
 pub mod error;
 pub mod fluid_vault_config;

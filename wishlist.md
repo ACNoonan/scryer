@@ -372,7 +372,27 @@ Items 21-23 were originally scoped as paper-1 benchmark data; the
 critical infrastructure for the open-hours aggregator. Same calendar
 urgency, two compounding reasons.
 
-### 21. `chainlink_streams_tape.v1` — Chainlink Data Streams continuous forward tape  `[methodology-entry-needed]`
+### 21. `chainlink_streams_tape.v1` — Chainlink Data Streams continuous forward tape  `[premise-incorrect — superseded by item 40 + 41]`
+
+> **Status (2026-04-29) — RETRACTED.** Source verification confirmed
+> Chainlink Data Streams on Solana is a per-tx report-submission model
+> (CPI to a Verifier program with the signed report blob), NOT a
+> continuously-published-PDA model. There is no on-chain account this
+> tape could read passively. Same architecture on mainnet ↔ devnet.
+> Chainlink Data Feeds (the legacy passive-PDA product) covers crypto
+> only on Solana — no equity feeds.
+>
+> Soothsayer's response (the 2026-04-29 (afternoon) entry in
+> `soothsayer/reports/methodology_history.md`) is **Option C: build a
+> soothsayer-controlled relay daemon + Anchor program** that fetches
+> Chainlink reports off-chain, validates them via the Verifier, and
+> writes decoded results to a soothsayer-controlled PDA the router
+> reads passively. Items **42 (relay program scaffold; soothsayer-side)**
+> and **43 (`chainlink_streams_relay_tape.v1`; scryer-side mirror tape)**
+> below replace this item.
+>
+> Original draft retained below for historical traceability; do NOT
+> implement as originally specified.
 
 **What.** Continuous (≤60s cadence) deep tape of every Chainlink Data
 Streams report touching xStock underliers (SPY, QQQ, AAPL, GOOGL,
@@ -427,7 +447,31 @@ _dedup_key           string  (= signature + feed_id)
 
 **Effort.** ~3 hours (decoder reuse + daemon ergonomics + launchd).
 
-### 22. `switchboard_ondemand_tape.v1` — Switchboard On-Demand equity feeds forward tape  `[methodology-entry-needed]`
+### 22. `switchboard_ondemand_tape.v1` — Switchboard On-Demand equity feeds forward tape  `[premise-incorrect — DO NOT IMPLEMENT]`
+
+> **Status (2026-04-28) — RETRACTED.** Research-agent verification
+> confirmed Switchboard On-Demand has **no canonical equity registry**
+> on Solana mainnet: the architecture is permissionless-on-demand
+> (anyone creates a `PullFeedAccountData` by defining a job spec),
+> not a fixed feed list like Pyth. The Switchboard Explorer requires
+> JS to render and there is no public REST endpoint that enumerates
+> "all equity feeds." Switchboard's institutional/financial marketing
+> centers on crypto pairs and LST yield rates — not equities.
+>
+> Critical context: xStocks itself uses **Chainlink Data Streams** as
+> the official oracle, not Switchboard or Pyth. Even on the venues
+> where xStocks trades, Switchboard isn't the price source.
+>
+> The "fourth Solana oracle provider" framing in the original draft
+> is incorrect — there are three real-coverage oracle providers for
+> xStock equities on Solana (Pyth, Chainlink Data Streams, RedStone),
+> and the fourth slot Switchboard would have filled doesn't exist for
+> equity assets. If Switchboard coverage is wanted, scope to crypto
+> pairs (where Switchboard does compete) and re-open under a
+> different schema name.
+>
+> Original draft retained below for historical traceability; do NOT
+> implement as originally specified.
 
 **What.** Continuous tape of Switchboard On-Demand price feeds for
 the xStock underliers + GLD + TLT. Switchboard is the fourth Solana
@@ -460,7 +504,26 @@ _dedup_key            string  (= feed_pda + slot)
 
 **Effort.** ~3 hours.
 
-### 23. `pyth_publisher.v1` — Pyth per-publisher submissions forward tape  `[methodology-entry-needed]`
+### 23. `pyth_publisher.v1` — Pyth per-publisher submissions forward tape  `[methodology-entry-needed; pivoted to Pythnet RPC 2026-04-28]`
+
+> **Status (2026-04-28).** Architecture pivoted after research-agent
+> verification: per-publisher `comp[]` data lives on **Pythnet**
+> (Pyth's private Solana fork), NOT on Solana mainnet. The mainnet
+> deployment is the Pyth Solana Receiver
+> (`rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ`) which stores
+> aggregate-only `PriceUpdateV2` accounts (verified via Wormhole
+> VAAs from Pythnet) — no per-publisher component array.
+>
+> The 32-publisher `comp[]` lives in legacy `PriceAccount` accounts
+> on the **Pythnet cluster** (Pyth's own Solana-fork validator
+> network, public RPC at `pythnet.rpcpool.com`). To implement this
+> tape: point the fetcher at Pythnet RPC (not Solana mainnet via
+> scryer-proxy), enumerate equity-feed PriceAccount PDAs by running
+> `getProgramAccounts` against the legacy Pyth program on Pythnet,
+> and decode the legacy `PriceAccount` byte layout (still valid
+> there).
+>
+> Spec below describes the corrected architecture.
 
 **What.** Per-publisher price + confidence submissions to Pyth
 aggregator PDAs, in addition to the aggregate `pyth.v1` tape from
@@ -472,10 +535,16 @@ where publishers individually pass" claim is qualitative; with it,
 the claim becomes "publisher P's submitted CI realised X% coverage,
 aggregate CI realised Y% — and Y < min over publishers of X."
 
-**Source.** Pyth Solana program. Each PriceAccount carries a `comp[N]`
-array of per-publisher PriceComp entries:
-`{publisher: Pubkey, agg: PriceInfo, latest: PriceInfo}`. Layout in
-`pyth-sdk-solana`. Read forward via the same `getAccountInfo` cadence
+**Source.** **Pythnet RPC** (`https://pythnet.rpcpool.com/` — Pyth's
+private Solana-fork validator network, public best-effort access).
+Legacy Pyth Oracle program on Pythnet
+(`FsJ3A3u2vn5cTVofAjvy6y5kwABJAqYWpe4975bi2epH`). Each PriceAccount
+carries a `comp[N]` array of per-publisher PriceComp entries:
+`{publisher: Pubkey, agg: PriceInfo, latest: PriceInfo}`. PDA
+enumeration via one-shot `getProgramAccounts` against the program
+on Pythnet (the same program ID that runs on the legacy Solana
+mainnet deployment, but with current data only on Pythnet). Read
+forward via the same `getAccountInfo` cadence
 as item 11 but expand the parser to emit one row per (slot, publisher)
 instead of one row per (slot, feed).
 
@@ -565,7 +634,30 @@ _dedup_key             string  (= signature + ix_index)
 **Effort.** ~6–8 hours (Orca + Meteora + Phoenix all have published
 IDLs; Raydium CLMM is the messiest of the four).
 
-### 25. `cme_intraday_1m.v1` — CME ES / NQ / GC / ZN 1-min forward tape  `[methodology-entry-needed]`
+### 25. `cme_intraday_1m.v1` — CME ES / NQ / GC / ZN 1-min forward tape  `[methodology-entry-needed; deferred — needs Databento credit]`
+
+> **Status (2026-04-28).** Upstream chosen via research agent:
+> **Databento** (`GLBX.MDP3` dataset, `ohlcv-1m` schema, continuous
+> contracts `ES.c.0` / `NQ.c.0` / `GC.c.0` / `ZN.c.0`). Databento is
+> the only candidate with first-party CME Globex MDP 3.0 access:
+> Polygon free tier excludes futures, Tiingo is IEX-equities-only,
+> Alpha Vantage and Twelve Data don't cover CME contracts.
+>
+> Databento operates pay-as-you-go with a $125 one-time signup credit
+> against historical data. Volume estimate (4 tickers × 8 days ×
+> 1440 bars ≈ 46k records/day) is < $1 against the credit. Live data
+> requires a separate subscription (post-2025-04-16 policy change);
+> historical pay-as-you-go is preserved.
+>
+> **Deferred** in v0.1 because Databento registration requires
+> payment info even for the free credit, and scryer is currently a
+> $0-spend project. Re-open when budget allows.
+>
+> Yahoo `/v8/finance/chart?interval=1m` ruled out: still triggers the
+> bot-detection throttle that broke item 14 (per yfinance issue
+> tracker #2128, #2288, #2422, #2456) even at very low call volume,
+> and the `interval=1m` window is 7 days not 8, silently undershooting
+> the spec.
 
 **What.** Forward 1-minute OHLCV bars for ES (E-mini S&P), NQ (E-mini
 Nasdaq), GC (gold), ZN (10Y T-note). Paper 1's point estimate uses
@@ -574,8 +666,9 @@ return with an intraday trajectory tightens the F1_emp_regime point
 estimate and is a candidate ablation for v2. yfinance's 1m bars only
 go back ~30 days for free, so calendar time accumulates the panel.
 
-**Source.** yfinance `Ticker.history(interval='1m', period='8d')`
-called every ~24h. Symbols: `ES=F`, `NQ=F`, `GC=F`, `ZN=F`.
+**Source.** Databento Historical API. Dataset `GLBX.MDP3`, schema
+`ohlcv-1m`, symbols `ES.c.0` / `NQ.c.0` / `GC.c.0` / `ZN.c.0`
+(continuous front-month contracts). API key required.
 
 **Schema** (proposed `cme_intraday_1m.v1`):
 ```
@@ -592,16 +685,16 @@ _source          string
 _dedup_key       string  (= symbol + ts)
 ```
 
-**CLI.** `scry yfinance intraday-1m --symbols ES=F,NQ=F,GC=F,ZN=F --once`
+**CLI.** `scry databento intraday-1m --symbols ES.c.0,NQ.c.0,GC.c.0,ZN.c.0 --start DATE --end DATE`
 
 **Notes.**
-- Goes through the same Python-import path as item 14 (yfinance batch
-  fetches).
+- Goes through a new `scryer-fetch-databento` crate (REST against
+  `client.timeseries.get_range`, `DATABENTO_API_KEY` env var).
 - Paper 2 also benefits: weekend ES drift trajectories are the natural
   "what was fair value through this weekend" reference for OEV
   measurement at band-edge events.
 
-**Effort.** ~2 hours (yfinance 1m wrapper + import path).
+**Effort.** ~3 hours once the API key exists.
 
 ### 39. `mango_v4_market_tape.v1` — Mango v4 post-deviation-guard market price tape  `[premise-incorrect — DO NOT IMPLEMENT]`
 
@@ -1407,6 +1500,131 @@ replaced by the scryer parquet read pattern.
 
 ---
 
+### 42. soothsayer-streams-relay-program scaffold + Verifier-CPI integration  `[soothsayer-side; methodology-entry-needed]`
+
+**What.** New Anchor program at `programs/soothsayer-streams-relay-program/`
+in the soothsayer repo. The on-chain side of the Chainlink Data Streams
+Option C relay (locked 2026-04-29 (afternoon) in
+`soothsayer/reports/methodology_history.md`). NOT a scryer fetcher —
+this item lives here for cross-repo visibility because the scryer-side
+relay daemon (item 43) calls the program's `post_relay_update`
+instruction.
+
+**Architecture.** Separate Anchor program from `soothsayer-router-program`.
+Owns per-feed `streams_relay_update.v1` PDAs seeded with
+`[b"streams_relay", feed_id]`. Authority + writer-set governance mirrors
+the router (multisig-controlled, upgradeable in v0, immutable on
+LOI gate). Instructions:
+- `initialize` — creates `RelayConfig` PDA (authority + writer signer set).
+- `add_feed(feed_id, underlier_symbol, exponent)` — authority-gated
+  registration of a feed for relay coverage.
+- `post_relay_update(feed_id, signed_report_blob, decoded_fields)` —
+  writer-keypair-signed; CPIs into the Chainlink Verifier program at
+  the canonical Solana mainnet/devnet address; on success, writes
+  the decoded fields into the per-feed PDA.
+- `set_paused`, `rotate_authority`, `rotate_writer_set` — operational
+  controls.
+
+**Schema lock.** `streams_relay_update.v1` is locked in the 2026-04-29
+(afternoon) methodology entry. Do not modify the wire format without a
+methodology entry per the soothsayer schema-versioning policy.
+
+**Implementation notes.**
+- Add `chainlink-data-streams-solana` SDK as a dependency. Verify
+  dep-graph compatibility with anchor-lang 0.31; same diligence as
+  the Pyth + Switchboard SDK adds (this session, soothsayer-router-program).
+- `signature_verified` is set to 1 by `post_relay_update` only when the
+  Verifier CPI succeeds. The instruction can fall back to
+  `signature_verified = 0` for development modes (off-chain validation
+  only); a config knob on `RelayConfig` controls policy. v0 ships
+  always-CPI on devnet (per O11 in §2 of the soothsayer methodology log).
+- Per-feed PDA size: 8 (disc) + 136 (struct) = 144 bytes; rent-exempt
+  cost is ~0.001 SOL per feed.
+
+**Effort.** ~1-2 weeks for a working devnet deploy with end-to-end
+Verifier CPI + multi-feed support + tests. Phase-able:
+- Phase 42a: program scaffold + `initialize` + `add_feed` + `post_relay_update`
+  with stubbed Verifier CPI (errors `VerifierCpiNotImplemented`).
+  Devnet deploy. ~2-3 days.
+- Phase 42b: real Verifier CPI implementation. Verify the Chainlink
+  SDK's `chainlink_solana_data_streams::cpi::verify` (or equivalent)
+  against anchor-lang 0.31. ~3-5 days.
+- Phase 42c: governance + writer-set rotation + integration test
+  against the relay daemon (item 43). ~2-3 days.
+
+---
+
+### 43. `chainlink_streams_relay_tape.v1` — relay daemon mirror tape  `[methodology-entry-needed]`
+
+**What.** Scryer-side daemon that:
+1. Polls Chainlink's Data Streams REST/WebSocket endpoint for fresh
+   signed reports on the configured equity feed set (SPY, QQQ, AAPL,
+   GOOGL, NVDA, TSLA, HOOD, MSTR plus any other underliers added per
+   methodology).
+2. For each new report, decodes the V8 RWA schema off-chain, projects
+   into `streams_relay_update.v1` field shape.
+3. Calls `soothsayer-streams-relay-program::post_relay_update` (item 42)
+   to persist the decoded result on-chain. The on-chain program does
+   the Verifier CPI; the daemon supplies the signed-report blob.
+4. Writes a parallel parquet tape at
+   `dataset/chainlink_streams_relay/tape/v1/...` for analysis-side
+   consumption — same shape soothsayer-side reads from
+   `streams_relay_update.v1` on-chain, plus the `_schema_version` /
+   `_fetched_at` / `_source` metadata columns.
+
+The dual write (on-chain PDA + scryer parquet) means: the router reads
+the on-chain PDA passively (the live integration), and paper 1 / paper 3
+read the scryer parquet for offline analysis (the historical record).
+
+**Schema** (proposed `chainlink_streams_relay_tape.v1`):
+
+Mirrors `streams_relay_update.v1` plus standard scryer metadata:
+```
+feed_id_hex                   string
+underlier_symbol              string
+schema_decoded_from           u8
+signature_verified            u8
+market_status_code            u8
+price                         i64
+confidence                    i64 nullable
+bid                           i64
+ask                           i64
+last_traded_price             i64
+exponent                      i8
+chainlink_observations_ts     i64
+chainlink_last_seen_ts_ns     i64
+relay_post_ts                 i64
+relay_post_slot               u64
+relay_post_signature          string  (Solana tx sig of the post)
+_schema_version               string  ('chainlink_streams_relay_tape.v1')
+_fetched_at                   i64
+_source                       string
+_dedup_key                    string  (= feed_id + chainlink_observations_ts)
+```
+
+**Source.** Chainlink Data Streams REST/WebSocket API (production
+mainnet endpoint; devnet endpoint for dev). Authentication: Chainlink
+issues API credentials per consumer; soothsayer needs to register.
+
+**CLI.** `scry chainlink streams-relay --once [--feeds ALL|SPY,QQQ,...] --signer-keypair <path> --rpc-url URL`
+
+**Operational notes.**
+- Daemon cadence: ~60s per feed (Chainlink reports are typically generated every few seconds; polling at 60s is sufficient for soothsayer's use case).
+- Signer-keypair: dedicated hot keypair held by soothsayer infra. Per O10 in soothsayer's methodology log §2, decentralisation of the relay layer is deferred.
+- Failure mode: if Chainlink endpoint is unavailable, the daemon retries with backoff. If the relay program's `post_relay_update` fails (Verifier CPI failure), the failure is logged and the daemon proceeds; consumers reading the on-chain PDA see staleness through the existing staleness filter.
+- launchd plist: lives alongside the existing scope/pyth/redstone tape daemons in the canonical scryer dataset root.
+
+**Effort.** ~1 week for working devnet daemon with multi-feed support
++ launchd integration. Gated on item 42 reaching at least Phase 42a
+(program scaffold + post_relay_update structurally callable).
+
+**Methodology log entry.** Required pre-flight per scryer's hard rule #1.
+Methodology entry covers: feed-allowlist policy, schema mapping from
+V8 RWA → relay format, signing-key rotation procedure, failure-mode
+disclosure.
+
+---
+
 ## Methodology log entries needed (running list)
 
 Per hard rule #1, every new schema needs a pre-flight entry in
@@ -1445,6 +1663,8 @@ Added 2026-04-28 (Priority 1.5 / 2.5 / 3-extension / 4):
 - `backed_nav_strikes.v1` (item 37)
 - `treasury_auction.v1` (item 38)
 - `mango_v4_market_tape.v1` (item 39; added 2026-04-28 for Layer 0 router)
+- `streams_relay_update.v1` (item 42; on-chain Anchor account; soothsayer-side schema lock recorded in `soothsayer/reports/methodology_history.md` 2026-04-29 (afternoon); cross-listed here for visibility)
+- `chainlink_streams_relay_tape.v1` (item 43; scryer-side mirror tape; methodology entry needed pre-implementation per scryer hard rule #1)
 - `raydium_pool_metadata.v1` (item 40; added 2026-04-28 with the LVR v0.7 cutover)
 - `geckoterminal_ohlcv.v1` (item 41; added 2026-04-28 with the LVR v0.7 cutover)
 

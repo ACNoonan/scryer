@@ -86,6 +86,12 @@ struct TxInner {
 struct MessageInner {
     #[serde(default)]
     instructions: Vec<RpcInstruction>,
+    /// Standard-RPC `accountKeys` is `Vec<String>` (legacy) or
+    /// `Vec<{pubkey, signer, writable, source}>` (jsonParsed). We
+    /// only need accountKeys[0] which is always the fee-payer.
+    /// Tolerantly deserialized.
+    #[serde(default, rename = "accountKeys")]
+    account_keys: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -94,6 +100,28 @@ struct MetaInner {
     err: Option<serde_json::Value>,
     #[serde(default, rename = "innerInstructions")]
     inner_instructions: Vec<InnerIxBlock>,
+    #[serde(default, rename = "preTokenBalances")]
+    pre_token_balances: Vec<RpcTokenBalance>,
+    #[serde(default, rename = "postTokenBalances")]
+    post_token_balances: Vec<RpcTokenBalance>,
+}
+
+#[derive(Deserialize, Clone)]
+struct RpcTokenBalance {
+    #[serde(default, rename = "accountIndex")]
+    account_index: u32,
+    #[serde(default)]
+    mint: String,
+    #[serde(default)]
+    owner: String,
+    #[serde(default, rename = "uiTokenAmount")]
+    ui_token_amount: Option<UiTokenAmount>,
+}
+
+#[derive(Deserialize, Clone)]
+struct UiTokenAmount {
+    #[serde(default)]
+    amount: String,
 }
 
 #[derive(Deserialize)]
@@ -219,19 +247,20 @@ async fn get_one(
 
 fn convert_to_parsed_tx(r: GetTxResult, signature: String) -> ParsedTx {
     let mut inner_by_parent: HashMap<u32, Vec<HeliusInstruction>> = HashMap::new();
-    let (transaction_error, raw_inner) = match r.meta {
-        Some(m) => (m.err, m.inner_instructions),
-        None => (None, Vec::new()),
+    let (transaction_error, raw_inner, pre_tb, post_tb) = match r.meta {
+        Some(m) => (m.err, m.inner_instructions, m.pre_token_balances, m.post_token_balances),
+        None => (None, Vec::new(), Vec::new(), Vec::new()),
     };
     for block in raw_inner {
         let ixs = block.instructions.into_iter().map(convert_ix).collect();
         inner_by_parent.insert(block.index, ixs);
     }
-    let instructions: Vec<HeliusInstruction> = r
-        .transaction
-        .and_then(|t| t.message)
-        .map(|m| m.instructions)
-        .unwrap_or_default()
+    let message = r.transaction.and_then(|t| t.message);
+    let (instructions_raw, account_keys) = match message {
+        Some(m) => (m.instructions, m.account_keys),
+        None => (Vec::new(), Vec::new()),
+    };
+    let instructions: Vec<HeliusInstruction> = instructions_raw
         .into_iter()
         .enumerate()
         .map(|(i, raw_ix)| {
@@ -243,14 +272,121 @@ fn convert_to_parsed_tx(r: GetTxResult, signature: String) -> ParsedTx {
         })
         .collect();
 
+    let account_data = synthesize_account_data(&pre_tb, &post_tb);
+
+    // accountKeys[0] is always the fee-payer / first signer.
+    // jsonParsed mode emits `{pubkey: ..., signer: true, ...}`;
+    // base58 mode emits `"pubkey_string"`. Handle both.
+    let fee_payer = match account_keys.first() {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Object(o)) => o
+            .get("pubkey")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        _ => String::new(),
+    };
+
     ParsedTx {
         signature,
         slot: r.slot,
         timestamp: r.block_time.unwrap_or(0),
         transaction_error,
-        account_data: Vec::new(),
+        fee_payer,
+        account_data,
         instructions,
     }
+}
+
+/// Synthesize a `Vec<AccountData>` (Helius parseTransactions shape)
+/// from standard-RPC `preTokenBalances` + `postTokenBalances`. Each
+/// non-zero delta becomes one `TokenBalanceChange` grouped under
+/// the owner's `AccountData` entry.
+fn synthesize_account_data(
+    pre: &[RpcTokenBalance],
+    post: &[RpcTokenBalance],
+) -> Vec<crate::types::AccountData> {
+    use crate::types::{AccountData, RawTokenAmount, TokenBalanceChange};
+
+    // Index pre by (account_index, mint) for delta computation.
+    let mut pre_idx: HashMap<(u32, String), &RpcTokenBalance> = HashMap::new();
+    for tb in pre {
+        pre_idx.insert((tb.account_index, tb.mint.clone()), tb);
+    }
+
+    // Group changes by owner (post takes precedence for ATA-create flows
+    // where pre.owner is empty).
+    let mut by_owner: HashMap<String, Vec<TokenBalanceChange>> = HashMap::new();
+    let mut seen_keys: std::collections::HashSet<(u32, String)> = std::collections::HashSet::new();
+    for post_tb in post {
+        let key = (post_tb.account_index, post_tb.mint.clone());
+        seen_keys.insert(key.clone());
+        let pre_tb = pre_idx.get(&key);
+        let pre_amt = pre_tb
+            .and_then(|t| t.ui_token_amount.as_ref())
+            .map(|u| u.amount.parse::<i128>().unwrap_or(0))
+            .unwrap_or(0);
+        let post_amt = post_tb
+            .ui_token_amount
+            .as_ref()
+            .map(|u| u.amount.parse::<i128>().unwrap_or(0))
+            .unwrap_or(0);
+        let delta = post_amt - pre_amt;
+        if delta == 0 {
+            continue;
+        }
+        // Owner from post if non-empty, else fall back to pre.
+        let owner = if !post_tb.owner.is_empty() {
+            post_tb.owner.clone()
+        } else {
+            pre_tb.map(|t| t.owner.clone()).unwrap_or_default()
+        };
+        by_owner.entry(owner.clone()).or_default().push(TokenBalanceChange {
+            user_account: owner,
+            token_account: format!("idx={}", post_tb.account_index),
+            mint: post_tb.mint.clone(),
+            raw_token_amount: Some(RawTokenAmount {
+                token_amount: delta.to_string(),
+                decimals: 0,
+            }),
+        });
+    }
+    // Catch pre-only entries (account closed in this tx → balance went to 0).
+    for pre_tb in pre {
+        let key = (pre_tb.account_index, pre_tb.mint.clone());
+        if seen_keys.contains(&key) {
+            continue;
+        }
+        let pre_amt = pre_tb
+            .ui_token_amount
+            .as_ref()
+            .map(|u| u.amount.parse::<i128>().unwrap_or(0))
+            .unwrap_or(0);
+        if pre_amt == 0 {
+            continue;
+        }
+        let owner = pre_tb.owner.clone();
+        by_owner
+            .entry(owner.clone())
+            .or_default()
+            .push(TokenBalanceChange {
+                user_account: owner,
+                token_account: format!("idx={}", pre_tb.account_index),
+                mint: pre_tb.mint.clone(),
+                raw_token_amount: Some(RawTokenAmount {
+                    token_amount: (-pre_amt).to_string(),
+                    decimals: 0,
+                }),
+            });
+    }
+
+    by_owner
+        .into_iter()
+        .map(|(account, changes)| AccountData {
+            account,
+            token_balance_changes: changes,
+        })
+        .collect()
 }
 
 fn convert_ix(raw: RpcInstruction) -> HeliusInstruction {

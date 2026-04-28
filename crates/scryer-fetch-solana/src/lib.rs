@@ -17,6 +17,7 @@
 //! (`scryer-store`) handles partition layout + dedup at write time.
 
 pub mod chainlink;
+pub mod dex_xstock_swaps;
 pub mod error;
 pub mod fluid_vault_configs;
 pub mod kamino_reserves;
