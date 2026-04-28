@@ -1263,6 +1263,133 @@ _dedup_key         string  (= cusip)
 
 ---
 
+## Priority 3 — quant-work consumer support (added 2026-04-28 with the LVR v0.7 cutover)
+
+These two items unblock quant-work consumers that lost their in-repo
+fetchers in the LVR v0.7 cutover. Neither is trilogy-blocking; both
+are small. The corresponding deleted scripts are listed in
+`quant-work/AGENTS.md` § "What was deleted" and
+`quant-work/docs/scryer_consumer_guide.md` § "Migration cheat-sheet".
+
+### 40. `raydium_pool_metadata.v1` — Raydium v3 API pool-metadata one-shot  `[methodology-entry-needed]`
+
+**What.** Replaces the deleted `quant-work/lvr/find_pool.py`. A one-shot
+snapshot of a Raydium pool's structural metadata (pool address, program
+id, mint pair, vault accounts, fee tier, snapshot reserves / TVL /
+price) pulled from `https://api-v3.raydium.io/`. Output is the same
+JSON shape as `quant-work/data/pool_metadata.json` (Adam's existing
+pinned snapshot for Raydium v4 SOL/USDC), so the existing consumers
+(`scry solana pool-snapshots --pool-metadata <PATH>`) keep working
+verbatim.
+
+**Source.** Raydium public API:
+- `https://api-v3.raydium.io/pools/info/mint?mint1=...&mint2=...&poolType=standard&...`
+- `https://api-v3.raydium.io/pools/key/ids?ids=<pool>` (vault keys)
+
+**Schema** — emit as parquet **and** JSON. Parquet for the time series
+(re-running on a cadence captures fee-tier / authority drift); JSON
+for downstream `scry solana pool-snapshots` consumption.
+```
+fetched_at         i64
+pool_address       string
+program_id         string
+pool_type          string  ('Standard' | 'CLMM' | 'CPMM')
+fee_rate           f64
+mint_a_address     string
+mint_a_symbol      string
+mint_a_decimals    i32
+mint_b_address     string
+mint_b_symbol      string
+mint_b_decimals    i32
+vault_a            string
+vault_b            string
+authority          string
+snapshot_price     f64
+snapshot_tvl_usd   f64
+snapshot_reserve_a f64
+snapshot_reserve_b f64
+_schema_version    string
+_fetched_at        i64
+_source            string
+_dedup_key         string  (= pool_address + ':' + fetched_at)
+```
+
+**CLI.**
+```
+scry solana raydium-pool-metadata \
+    --mint1 <SOL_MINT> --mint2 <USDC_MINT> \
+    --pool-type standard \
+    --json-out <PATH>            # writes pool_metadata.json
+    [--dataset DIR]              # also append-writes parquet partition
+```
+Default `--mint1 / --mint2` should be SOL / USDC; default
+`--pool-type` should be `standard`.
+
+**Effort.** ~1.5 hours (pure REST + JSON marshal + the existing JSON
+output shape is already locked by quant-work's consumer).
+
+**Consumer alignment.** The existing
+`quant-work/data/pool_metadata.json` is the contract — fields and
+naming must match it byte-for-byte. The Raydium-v4 program ID
+`675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8` and SOL/USDC pool
+`58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2` are pinned.
+
+### 41. `geckoterminal_ohlcv.v1` — GeckoTerminal historical daily OHLCV  `[methodology-entry-needed]`
+
+**What.** Replaces the deleted `quant-work/lst/fetch_gt_ohlcv.py`.
+Daily OHLCV bars for any Solana pool, fetched from GeckoTerminal's
+`/networks/{net}/pools/{pool}/ohlcv/{timeframe}` endpoint. Free-tier
+returns ~182 daily bars per pool per request; the `before_timestamp`
+cursor is paid-only (verified 2026-04-26), so the schema's job is to
+land the most-recent free-tier batch and rely on cron / launchd to
+forward-accumulate over time.
+
+**Source.** GeckoTerminal public REST:
+- `https://api.geckoterminal.com/api/v2/networks/solana/pools/{pool}/ohlcv/day`
+
+**Schema** (proposed `geckoterminal_ohlcv.v1`):
+```
+pool_address       string
+timeframe          string  ('day' for v1; later: 'hour', '15min')
+ts                 i64     (bar-open unix seconds, UTC midnight for daily)
+dt                 date    (UTC date — partition key)
+open               f64
+high               f64
+low                f64
+close              f64
+volume_usd         f64
+_schema_version    string
+_fetched_at        i64
+_source            string
+_dedup_key         string  (= pool_address + ':' + timeframe + ':' + ts)
+```
+
+**Partition.** Yearly, keyed by pool: `geckoterminal/ohlcv/v1/pool=<addr>/year=YYYY.parquet`.
+
+**CLI.**
+```
+scry dexagg gt-ohlcv --pool <addr> [--timeframe day]
+```
+Defaults: `--timeframe day`. Re-runs over an already-fetched window
+are no-ops via the `_dedup_key` (same as the existing GT trades
+fetcher).
+
+**Why not augment `geckoterminal.v1`** (which is per-trade, not OHLCV):
+the field sets are disjoint and the partition cadences are different
+(`geckoterminal.v1` is daily-keyed-by-pool, OHLCV bars are
+yearly-keyed-by-pool because the row count is small). Cleaner as a new
+schema.
+
+**Effort.** ~2 hours (pure REST + arrow schema + dedup).
+
+**Consumer alignment.** `quant-work/lst/` reads the LST/SOL daily
+bars (jitoSOL, mSOL, bSOL across Whirlpools) for the discount-episode
+project. Existing `quant-work/data/{lst}_sol_gt_daily.parquet` files
+are pinned pre-cutover snapshots; once `gt-ohlcv` ships, those are
+replaced by the scryer parquet read pattern.
+
+---
+
 ## Methodology log entries needed (running list)
 
 Per hard rule #1, every new schema needs a pre-flight entry in
@@ -1301,6 +1428,8 @@ Added 2026-04-28 (Priority 1.5 / 2.5 / 3-extension / 4):
 - `backed_nav_strikes.v1` (item 37)
 - `treasury_auction.v1` (item 38)
 - `mango_v4_market_tape.v1` (item 39; added 2026-04-28 for Layer 0 router)
+- `raydium_pool_metadata.v1` (item 40; added 2026-04-28 with the LVR v0.7 cutover)
+- `geckoterminal_ohlcv.v1` (item 41; added 2026-04-28 with the LVR v0.7 cutover)
 
 ---
 

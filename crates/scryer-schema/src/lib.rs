@@ -32,6 +32,8 @@ pub mod kamino_obligation_position;
 pub mod kamino_reserve;
 pub mod kamino_scope;
 pub mod kraken_funding;
+pub mod loopscale_loan;
+pub mod loopscale_loan_collateral;
 pub mod meta;
 pub mod nasdaq_halts;
 pub mod oracle_context;

@@ -24,8 +24,8 @@ use arrow_schema::ArrowError;
 use scryer_schema::{
     backed, earnings, fluid_vault_config, geckoterminal, jito_bundles, jupiter_lend_liquidation,
     kamino_liquidation, kamino_obligation, kamino_obligation_position, kamino_reserve,
-    kamino_scope, kraken_funding, nasdaq_halts, oracle_context, pool_snapshot, pyth, redstone,
-    swap, trade, v5_tape, yahoo, FromArrowError,
+    kamino_scope, kraken_funding, loopscale_loan, loopscale_loan_collateral, nasdaq_halts,
+    oracle_context, pool_snapshot, pyth, redstone, swap, trade, v5_tape, yahoo, FromArrowError,
 };
 
 /// Time granularity of a dataset's partitioning. Each schema picks
@@ -283,6 +283,44 @@ impl DatasetSchema for kamino_obligation::v1::Obligation {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         kamino_obligation::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for loopscale_loan::v1::Loan {
+    const DATA_TYPE: &'static str = "loans";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.meta.fetched_at
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        loopscale_loan::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        loopscale_loan::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for loopscale_loan_collateral::v1::Collateral {
+    const DATA_TYPE: &'static str = "loan_collaterals";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.meta.fetched_at
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        loopscale_loan_collateral::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        loopscale_loan_collateral::v1::from_record_batch(batch)
     }
 }
 

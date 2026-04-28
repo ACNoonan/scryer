@@ -19,6 +19,7 @@ mod import_cmd;
 mod jito_cmd;
 mod kamino_obligations_cmd;
 mod kamino_reserves_cmd;
+mod loopscale_loans_cmd;
 mod oracle_context_cmd;
 mod pool_snapshots_cmd;
 mod pyth_cmd;
@@ -178,6 +179,11 @@ enum SolanaTarget {
     /// schemas to dataset/kamino/obligations/v1 and
     /// dataset/kamino/obligation_positions/v1.
     KaminoObligations(kamino_obligations_cmd::ObligationsArgs),
+    /// Periodic snapshot of the Loopscale credit book — every Loan
+    /// account, with xStock-collateral flagging. Writes parent + child
+    /// schemas to dataset/loopscale/loans/v1 and
+    /// dataset/loopscale/loan_collaterals/v1.
+    LoopscaleLoans(loopscale_loans_cmd::LoopscaleLoansArgs),
     /// Jito Block Engine bundle-attachment enrichment over an existing
     /// liquidation panel. Reads `(signature, slot, block_time)` from
     /// kamino_liquidation.v1 / jupiter_lend_liquidation.v1 parquet,
@@ -229,6 +235,7 @@ async fn main() -> Result<()> {
             SolanaTarget::PoolSnapshots(a) => pool_snapshots_cmd::run_pool_snapshots(a).await,
             SolanaTarget::KaminoReserves(a) => kamino_reserves_cmd::run_reserves(a).await,
             SolanaTarget::KaminoObligations(a) => kamino_obligations_cmd::run_obligations(a).await,
+            SolanaTarget::LoopscaleLoans(a) => loopscale_loans_cmd::run_loopscale_loans(a).await,
             SolanaTarget::JitoBundles(a) => jito_cmd::run_jito_bundles(a).await,
             SolanaTarget::OracleContext(a) => oracle_context_cmd::run_oracle_context(a).await,
         },
