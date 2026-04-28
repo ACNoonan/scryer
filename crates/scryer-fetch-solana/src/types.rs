@@ -33,7 +33,7 @@ pub struct SignatureInfo {
 }
 
 /// One parsed transaction from Helius `POST /v0/transactions`. Only
-/// the fields the swap-extractor uses are typed; the rest is left
+/// the fields downstream extractors use are typed; the rest is left
 /// untouched in the upstream JSON.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ParsedTx {
@@ -46,6 +46,41 @@ pub struct ParsedTx {
     pub transaction_error: Option<serde_json::Value>,
     #[serde(default, rename = "accountData")]
     pub account_data: Vec<AccountData>,
+    /// Top-level instructions in execution order. Each may contain
+    /// `inner_instructions` for CPIs. Used by liquidation decoders
+    /// (Phase 17+) where the IX-level program ID + discriminator +
+    /// account-list are the unit of decode. Defaulted to empty for
+    /// callers that only need `account_data` (swap.v1 fetcher).
+    #[serde(default)]
+    pub instructions: Vec<HeliusInstruction>,
+}
+
+/// One Helius parsed-tx instruction. `data` is base58-encoded
+/// (Helius convention). Empty `accounts` is possible for instructions
+/// the upstream couldn't fully resolve.
+#[derive(Clone, Debug, Deserialize)]
+pub struct HeliusInstruction {
+    #[serde(default, rename = "programId")]
+    pub program_id: String,
+    #[serde(default)]
+    pub accounts: Vec<String>,
+    #[serde(default)]
+    pub data: String,
+    #[serde(default, rename = "innerInstructions")]
+    pub inner_instructions: Vec<HeliusInstruction>,
+}
+
+impl HeliusInstruction {
+    /// Recursively walk this instruction's inner-instruction tree,
+    /// invoking `visit` on every node (including self). Used by
+    /// decoders that need to find a target IX regardless of whether
+    /// it's top-level or CPI-nested.
+    pub fn walk<F: FnMut(&HeliusInstruction)>(&self, visit: &mut F) {
+        visit(self);
+        for inner in &self.inner_instructions {
+            inner.walk(visit);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]

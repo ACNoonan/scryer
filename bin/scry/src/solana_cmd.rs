@@ -2,8 +2,11 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use scryer_fetch_solana::{mints, PoolMetadata, SwapsFetcher, SwapsFetcherConfig};
-use scryer_schema::swap;
+use scryer_fetch_solana::{
+    mints, LiquidationsFetcher, LiquidationsFetcherConfig, PoolMetadata, ReserveSymbolMap,
+    SwapsFetcher, SwapsFetcherConfig,
+};
+use scryer_schema::{kamino_liquidation, swap};
 use scryer_store::Dataset;
 use serde::Deserialize;
 
@@ -93,6 +96,98 @@ pub async fn run_swaps(args: SwapsArgs) -> Result<()> {
         .context("Dataset::write")?;
     println!(
         "swaps fetched: rows_added={} rows_deduped={} partitions_written={}",
+        stats.rows_added, stats.rows_deduped, stats.partitions_written
+    );
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+pub struct KaminoLiquidationsArgs {
+    /// Lending market PDA. Defaults to the xStocks market on Klend.
+    #[arg(long, default_value = "5wJeMrUYECGq41fxRESKALVcHnNX26TAWy4W98yULsua")]
+    lending_market: String,
+    /// Disables the post-decode market filter — useful for
+    /// cross-Kamino-market scans (Paper 2 §C4 expansion). Sigs still
+    /// come from `--lending-market`'s signature stream.
+    #[arg(long, default_value_t = false)]
+    all_markets: bool,
+    /// Window start (`YYYY-MM-DD`, RFC 3339, or unix seconds).
+    #[arg(long)]
+    start: String,
+    /// Window end. Same formats as `--start`.
+    #[arg(long)]
+    end: String,
+    #[arg(long, default_value = "http://127.0.0.1:8899/rpc")]
+    proxy_url: String,
+    #[arg(long, env = "HELIUS_API_KEY")]
+    helius_api_key: String,
+    /// Optional JSON map for `(reserve_pda) -> (symbol, decimals)`
+    /// resolution. Shape: `{"<pda>": {"symbol": "USDC",
+    /// "decimals": 6}, ...}`. Reserves not in the map decode to
+    /// `("?", 0)` per the Phase-17 methodology lock.
+    #[arg(long)]
+    symbol_map: Option<PathBuf>,
+    #[arg(long, default_value = "./dataset")]
+    dataset: PathBuf,
+    #[arg(long, default_value = scryer_store::venue::KAMINO)]
+    venue: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SymbolMapEntry {
+    symbol: String,
+    decimals: u8,
+}
+
+pub async fn run_kamino_liquidations(args: KaminoLiquidationsArgs) -> Result<()> {
+    let start_ts = crate::parse_unix_seconds(&args.start).context("parsing --start")?;
+    let end_ts = crate::parse_unix_seconds(&args.end).context("parsing --end")?;
+    if end_ts <= start_ts {
+        anyhow::bail!("--end ({end_ts}) must be > --start ({start_ts})");
+    }
+
+    let mut symbol_map = ReserveSymbolMap::new();
+    if let Some(path) = &args.symbol_map {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("reading symbol map {}", path.display()))?;
+        let parsed: std::collections::HashMap<String, SymbolMapEntry> =
+            serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing symbol map {}", path.display()))?;
+        for (pda, entry) in parsed {
+            symbol_map.insert(pda, entry.symbol, entry.decimals);
+        }
+    }
+
+    let helius_url = format!(
+        "https://api.helius.xyz/v0/transactions/?api-key={}",
+        args.helius_api_key
+    );
+    let mut cfg = LiquidationsFetcherConfig::new(
+        args.proxy_url.clone(),
+        helius_url,
+        args.lending_market.clone(),
+    );
+    if args.all_markets {
+        cfg = cfg.all_markets();
+    }
+    let fetcher = LiquidationsFetcher::new(cfg, symbol_map).context("building LiquidationsFetcher")?;
+
+    tracing::info!(
+        market = args.lending_market,
+        start_ts,
+        end_ts,
+        all_markets = args.all_markets,
+        "fetching kamino liquidations"
+    );
+    let rows = fetcher.fetch(start_ts, end_ts).await.context("fetcher.fetch")?;
+    tracing::info!(rows = rows.len(), "fetched; writing");
+
+    let ds = Dataset::new(&args.dataset);
+    let stats = ds
+        .write::<kamino_liquidation::v1::Liquidation>(&args.venue, None, &rows)
+        .context("Dataset::write")?;
+    println!(
+        "kamino_liquidations fetched: rows_added={} rows_deduped={} partitions_written={}",
         stats.rows_added, stats.rows_deduped, stats.partitions_written
     );
     Ok(())

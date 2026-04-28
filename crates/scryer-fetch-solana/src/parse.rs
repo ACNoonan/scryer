@@ -109,6 +109,7 @@ mod tests {
             account_data: vec![AccountData {
                 token_balance_changes: changes,
             }],
+            instructions: vec![],
         }
     }
 

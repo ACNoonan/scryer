@@ -17,19 +17,25 @@
 //! (`scryer-store`) handles partition layout + dedup at write time.
 
 pub mod error;
+pub mod kamino_liquidations;
 pub mod parse;
 pub mod parse_transactions;
 pub mod sig_paginate;
 pub mod types;
 
 pub use error::FetchError;
+pub use kamino_liquidations::{
+    extract_liquidations, MarketFilter, ReserveSymbolMap, KLEND_PROGRAM, LIQUIDATE_V1_DISC,
+    LIQUIDATE_V2_DISC,
+};
 pub use parse::parse_swap;
 pub use parse_transactions::{parse_all, parse_transactions_with_retry, ParseTxsConfig, BATCH_SIZE};
 pub use sig_paginate::{get_signatures_in_window, SigPaginateConfig};
-pub use types::{mints, PoolMetadata, SignatureInfo};
+pub use types::{mints, HeliusInstruction, ParsedTx, PoolMetadata, SignatureInfo};
 
 use std::time::Duration;
 
+use scryer_schema::kamino_liquidation::v1::Liquidation;
 use scryer_schema::swap::v1::Swap;
 use scryer_schema::Meta;
 
@@ -78,6 +84,8 @@ impl SwapsFetcher {
         Ok(Self { cfg, client })
     }
 
+    /// Fetch swaps in `[start_ts, end_ts]` for the pool described by
+    /// `pool`. Returns `swap.v1::Swap` rows ready for the store.
     /// Fetch swaps in `[start_ts, end_ts]` for the pool described by
     /// `pool`. Returns `swap.v1::Swap` rows ready for the store.
     pub async fn fetch(
@@ -147,5 +155,150 @@ impl SwapsFetcher {
             "fetch complete"
         );
         Ok(swaps)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LiquidationsFetcherConfig {
+    pub proxy_rpc_url: String,
+    pub helius_parse_url: String,
+    /// `_source` label for emitted rows.
+    pub source_label: String,
+    /// Lending market PDA to scan signatures against — typically the
+    /// xStocks market on Klend. Routes through
+    /// `getSignaturesForAddress(market_pda)` so every IX touching
+    /// the market (liquidations + non-liquidations) is in the stream;
+    /// the IX-level discriminator filter drops the non-liquidations.
+    pub market_pda: String,
+    /// `MarketFilter::Only(market_pda)` for single-market scans
+    /// (xStocks-only) or `MarketFilter::Any` for `--all-markets`.
+    pub market_filter: MarketFilter,
+    pub paginate: SigPaginateConfig,
+    pub parse_txs: ParseTxsConfig,
+    pub request_timeout: Duration,
+}
+
+impl LiquidationsFetcherConfig {
+    pub fn new(
+        proxy_rpc_url: impl Into<String>,
+        helius_parse_url: impl Into<String>,
+        market_pda: impl Into<String>,
+    ) -> Self {
+        let market_pda = market_pda.into();
+        Self {
+            proxy_rpc_url: proxy_rpc_url.into(),
+            helius_parse_url: helius_parse_url.into(),
+            source_label: "helius:parseTransactions".into(),
+            market_filter: MarketFilter::Only(market_pda.clone()),
+            market_pda,
+            paginate: SigPaginateConfig::default(),
+            parse_txs: ParseTxsConfig::default(),
+            request_timeout: Duration::from_secs(30),
+        }
+    }
+
+    /// Switch to all-markets mode: signatures still come from the
+    /// configured `market_pda` (the wishlist's `--all-markets` mode
+    /// scans the same xStocks-market signature stream and accepts
+    /// liquidations on any market that happens to appear via CPI),
+    /// but post-decode filtering is disabled.
+    pub fn all_markets(mut self) -> Self {
+        self.market_filter = MarketFilter::Any;
+        self
+    }
+}
+
+pub struct LiquidationsFetcher {
+    cfg: LiquidationsFetcherConfig,
+    client: reqwest::Client,
+    symbol_map: ReserveSymbolMap,
+}
+
+impl LiquidationsFetcher {
+    pub fn new(
+        cfg: LiquidationsFetcherConfig,
+        symbol_map: ReserveSymbolMap,
+    ) -> Result<Self, FetchError> {
+        let client = reqwest::Client::builder()
+            .timeout(cfg.request_timeout)
+            .user_agent(concat!("scryer-fetch-solana/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .map_err(FetchError::Transport)?;
+        Ok(Self {
+            cfg,
+            client,
+            symbol_map,
+        })
+    }
+
+    /// Fetch Klend liquidations in `[start_ts, end_ts]`. Returns
+    /// `kamino_liquidation.v1::Liquidation` rows ready for the store.
+    pub async fn fetch(
+        &self,
+        start_ts: i64,
+        end_ts: i64,
+    ) -> Result<Vec<Liquidation>, FetchError> {
+        let fetched_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let meta = Meta::new(
+            scryer_schema::kamino_liquidation::v1::SCHEMA_VERSION,
+            fetched_at,
+            self.cfg.source_label.clone(),
+        );
+
+        tracing::info!(
+            market_pda = self.cfg.market_pda,
+            start_ts,
+            end_ts,
+            "stage 1: paginating signatures"
+        );
+        let sigs = get_signatures_in_window(
+            &self.client,
+            &self.cfg.proxy_rpc_url,
+            &self.cfg.market_pda,
+            start_ts,
+            end_ts,
+            &self.cfg.paginate,
+        )
+        .await?;
+        tracing::info!(count = sigs.len(), "sig pagination complete");
+
+        if sigs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sig_strs: Vec<String> = sigs.iter().map(|s| s.signature.clone()).collect();
+        tracing::info!(
+            sigs = sig_strs.len(),
+            batch_size = self.cfg.parse_txs.batch_size,
+            "stage 2: parseTransactions batches"
+        );
+        let txs = parse_all(
+            &self.client,
+            &self.cfg.helius_parse_url,
+            &sig_strs,
+            &self.cfg.parse_txs,
+        )
+        .await?;
+        tracing::info!(parsed = txs.len(), "parseTransactions complete");
+
+        let mut out = Vec::new();
+        let mut n_ignored = 0u64;
+        for tx in &txs {
+            let rows = extract_liquidations(tx, &self.cfg.market_filter, &self.symbol_map, &meta);
+            if rows.is_empty() {
+                n_ignored += 1;
+            } else {
+                out.extend(rows);
+            }
+        }
+        tracing::info!(
+            liquidations = out.len(),
+            txs_without_liquidation = n_ignored,
+            missing = sig_strs.len() - txs.len(),
+            "decode complete"
+        );
+        Ok(out)
     }
 }

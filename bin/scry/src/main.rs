@@ -75,6 +75,8 @@ struct SolanaCmd {
 enum SolanaTarget {
     /// Fetch Raydium-v4 swaps from a window and write through scryer-store.
     Swaps(solana_cmd::SwapsArgs),
+    /// Fetch Kamino Klend liquidation events from a window.
+    KaminoLiquidations(solana_cmd::KaminoLiquidationsArgs),
 }
 
 #[tokio::main]
@@ -103,6 +105,7 @@ async fn main() -> Result<()> {
         },
         Command::Solana(c) => match c.target {
             SolanaTarget::Swaps(a) => solana_cmd::run_swaps(a).await,
+            SolanaTarget::KaminoLiquidations(a) => solana_cmd::run_kamino_liquidations(a).await,
         },
     }
 }
