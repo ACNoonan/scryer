@@ -6,14 +6,24 @@ a Rust binary `scry` running under launchd. Tapes:
 
 | Tape | Plist label | Cadence | Dataset path |
 |------|-------------|--------:|--------------|
-| Kamino-Scope | `com.adamnoonan.scryer.kamino-scope-tape` | 60s | `/Users/adamnoonan/Documents/scryer/dataset/kamino_scope/oracle_tape/v1/` |
-| RedStone     | `com.adamnoonan.scryer.redstone-tape`     | 600s | `/Users/adamnoonan/Documents/scryer/dataset/redstone/oracle_tape/v1/` |
-| Pyth         | `com.adamnoonan.scryer.pyth-tape`         | 60s  | `/Users/adamnoonan/Documents/scryer/dataset/pyth/oracle_tape/v1/` |
+| Kamino-Scope | `com.adamnoonan.scryer.kamino-scope-tape` | 60s | `/Users/adamnoonan/Library/Application Support/scryer/dataset/kamino_scope/oracle_tape/v1/` |
+| RedStone     | `com.adamnoonan.scryer.redstone-tape`     | 600s | `/Users/adamnoonan/Library/Application Support/scryer/dataset/redstone/oracle_tape/v1/` |
+| Pyth         | `com.adamnoonan.scryer.pyth-tape`         | 60s  | `/Users/adamnoonan/Library/Application Support/scryer/dataset/pyth/oracle_tape/v1/` |
 
 The proxy daemon `com.adamnoonan.scryer.proxy` must be up for
 Kamino-Scope to work (Kamino-Scope polls Solana via the proxy at
 `http://127.0.0.1:8899/rpc`). RedStone and Pyth are direct REST and
 have no proxy dependency.
+
+**Runtime layout note.** The repo lives at
+`/Users/adamnoonan/Documents/scryer/`, but launchd-installed binaries
++ config + live datasets are under
+`/Users/adamnoonan/Library/Application Support/scryer/` to dodge
+macOS 26.x TCC restrictions on launchd reading user Documents. Live
+parquet partitions you're checking are under Application Support, not
+under the repo. Repo's `dataset/` is for ad-hoc Terminal `cargo run`
+output and is unrelated to launchd. See
+`~/Documents/scryer/ops/launchd/README.md` for the full picture.
 
 ## Your job
 
@@ -38,7 +48,7 @@ For each of the three tapes, run all of:
 2. **Find the most-recent partition file** (today's UTC date):
 
    ```bash
-   find /Users/adamnoonan/Documents/scryer/dataset/<venue>/oracle_tape/v1 \
+   find /Users/adamnoonan/Library/Application Support/scryer/dataset/<venue>/oracle_tape/v1 \
      -name '*.parquet' -mtime -1 | sort | tail -1
    ```
 
@@ -94,7 +104,7 @@ For each of the three tapes, run all of:
 ## Proxy check
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8899/health
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8899/healthz
 ```
 
 Should print `200`. Also peek at the proxy log:

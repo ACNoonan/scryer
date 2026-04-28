@@ -6,28 +6,50 @@ under `KeepAlive`.
 
 ## What's here
 
-| Plist | Cadence | Depends on | Output partition |
-|-------|---------|------------|------------------|
-| `com.adamnoonan.scryer.proxy.plist` | KeepAlive (always-on) | `.env` (provider keys), `providers.json` | n/a (HTTP server :8899) |
-| `com.adamnoonan.scryer.kamino-scope-tape.plist` | every 60s | proxy must be running | `dataset/kamino_scope/oracle_tape/v1/year=Y/month=M/day=D.parquet` |
-| `com.adamnoonan.scryer.redstone-tape.plist` | every 600s (10m) | nothing (REST direct) | `dataset/redstone/oracle_tape/v1/year=Y/month=M/day=D.parquet` |
-| `com.adamnoonan.scryer.pyth-tape.plist` | every 60s | nothing (REST direct) | `dataset/pyth/oracle_tape/v1/year=Y/month=M/day=D.parquet` |
+| Plist | Cadence | Depends on |
+|-------|---------|------------|
+| `com.adamnoonan.scryer.proxy.plist` | KeepAlive (always-on) | `.env` (provider keys), `providers.json` |
+| `com.adamnoonan.scryer.kamino-scope-tape.plist` | every 60s | proxy must be running |
+| `com.adamnoonan.scryer.redstone-tape.plist` | every 600s (10m) | nothing (REST direct) |
+| `com.adamnoonan.scryer.pyth-tape.plist` | every 60s | nothing (REST direct) |
 
-All four assume the release binary at
-`/Users/adamnoonan/Documents/scryer/target/release/scry` (and
-`scryer-proxy` for the proxy plist) — rebuild with
-`cargo build --release` after any code change before reloading.
+## Runtime layout
 
-## Pre-flight
+To dodge macOS 26.x TCC restrictions on launchd reading user-document
+directories, the plists install binaries + config + data **outside**
+`~/Documents/`:
+
+| | Path |
+|---|---|
+| Binaries | `~/Library/Application Support/scryer/bin/scry` and `scryer-proxy` |
+| Config | `~/Library/Application Support/scryer/{providers.json,.env}` |
+| Live datasets | `~/Library/Application Support/scryer/dataset/{venue}/oracle_tape/v1/year=Y/month=M/day=D.parquet` |
+| Logs | `~/Library/Logs/scryer/<label>.{out,err}.log` |
+
+Manual `cargo run` from the repo writes to `~/Documents/scryer/dataset/`
+(useful for ad-hoc validation / one-off backfills); launchd writes to
+the Application Support tree. Two contexts, two paths — by design,
+because launchd has TCC access to Application Support but not to
+Documents on macOS 26+.
+
+## Pre-flight (first time)
 
 ```bash
 mkdir -p ~/Library/Logs/scryer
+mkdir -p ~/Library/Application\ Support/scryer/bin
+mkdir -p ~/Library/Application\ Support/scryer/dataset
+
+# Build release binaries from the repo:
+cd ~/Documents/scryer
+cargo build --release -p scry-bin -p scryer-proxy-bin
+
+# Copy binaries + config to Application Support:
+cp target/release/scry             ~/Library/Application\ Support/scryer/bin/
+cp target/release/scryer-proxy     ~/Library/Application\ Support/scryer/bin/
+cp providers.json .env             ~/Library/Application\ Support/scryer/
 ```
 
-Each plist writes its stdout / stderr to `~/Library/Logs/scryer/<label>.{out,err}.log`.
-launchd will refuse to load with no such directory.
-
-## Install
+## Install plists
 
 ```bash
 cp ops/launchd/*.plist ~/Library/LaunchAgents/
@@ -42,7 +64,7 @@ cp ops/launchd/*.plist ~/Library/LaunchAgents/
 
    ```bash
    launchctl load ~/Library/LaunchAgents/com.adamnoonan.scryer.proxy.plist
-   curl -s http://127.0.0.1:8899/health   # 200 OK once it's up
+   curl -s http://127.0.0.1:8899/healthz   # 200 OK once it's up
    ```
 
 2. **Tapes** (any order):
@@ -69,10 +91,10 @@ tape plists (one-shot), and a stable PID for the proxy.
 
 The Python collectors for Pyth (PID 44934) and Kamino-Scope (PID 26273)
 are still running when these plists land. That's intentional — both
-write to `soothsayer/data/raw/`, scryer writes to `scryer/dataset/`, no
-collision. After ≥ a soak period under launchd you can confirm scryer
-output looks healthy (use `agent_verification_prompt.md`), then kill
-the Python:
+write to `~/Documents/soothsayer/data/raw/`, scryer writes to the
+Application Support `dataset/` tree, no collision. After ≥ a soak
+period under launchd you can confirm scryer output looks healthy
+(use `agent_verification_prompt.md`), then kill the Python:
 
 ```bash
 kill 44934 26273
@@ -81,7 +103,18 @@ kill 44934 26273
 The RedStone Python is already stopped (the gap that triggered Phase 22),
 so the scryer plist is the sole collector immediately on load.
 
-## Unload / reload / rotate
+## After a code change
+
+```bash
+cargo build --release -p scry-bin -p scryer-proxy-bin
+cp target/release/scry target/release/scryer-proxy ~/Library/Application\ Support/scryer/bin/
+launchctl unload ~/Library/LaunchAgents/com.adamnoonan.scryer.proxy.plist
+launchctl load   ~/Library/LaunchAgents/com.adamnoonan.scryer.proxy.plist
+# Tape plists re-pick the new binary on their next StartInterval fire,
+# no reload needed (each fire is a fresh exec).
+```
+
+## Unload / reload / kickstart
 
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.adamnoonan.scryer.<label>.plist

@@ -7,11 +7,11 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/adamnoonan/Documents/scryer/target/release/scryer-proxy</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin/scryer-proxy</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/adamnoonan/Documents/scryer</string>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
 
     <key>RunAtLoad</key>
     <true/>

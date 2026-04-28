@@ -7,17 +7,19 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/adamnoonan/Documents/scryer/target/release/scry</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin/scry</string>
         <string>redstone</string>
         <string>tape</string>
         <string>--label</string>
         <string>cron-10m</string>
         <string>--source</string>
         <string>redstone:gateway:launchd</string>
+        <string>--dataset</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/dataset</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/adamnoonan/Documents/scryer</string>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
 
     <key>RunAtLoad</key>
     <true/>
