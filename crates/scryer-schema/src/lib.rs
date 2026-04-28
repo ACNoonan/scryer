@@ -32,6 +32,7 @@ pub mod kamino_scope;
 pub mod kraken_funding;
 pub mod meta;
 pub mod nasdaq_halts;
+pub mod oracle_context;
 pub mod pool_snapshot;
 pub mod pyth;
 pub mod redstone;

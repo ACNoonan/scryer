@@ -65,6 +65,10 @@ pub mod venue {
     pub const JUPITER_LEND: &str = "jupiter_lend";
     pub const GECKOTERMINAL: &str = "geckoterminal";
     pub const JITO: &str = "jito";
+    /// Cross-source oracle context derived from joining the
+    /// kamino_scope / pyth / v5_tape / redstone tapes against the
+    /// liquidation panels.
+    pub const ORACLE_CONTEXT: &str = "oracle_context";
     /// Soothsayer experiment v5 (Chainlink + Jupiter joined tape).
     /// Per the methodology log "Soothsayer venue versioning" section,
     /// each soothsayer experiment iteration gets its own venue
@@ -434,6 +438,114 @@ pub fn read_signature_slot_block_time(
             };
             for i in 0..batch.num_rows() {
                 out.push((sig.value(i).to_string(), slot.value(i) as u64, bt.value(i)));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// One liquidation event, with the relevant symbols on both sides.
+/// Source-of-truth for the oracle_context join — handles both
+/// kamino_liquidation.v1 and jupiter_lend_liquidation.v1 files
+/// transparently (column-set sniffing).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LiquidationEvent {
+    pub signature: String,
+    pub slot: u64,
+    pub block_time: i64,
+    /// Symbols quoted by the oracles in this event. For Kamino:
+    /// `[repay_symbol, withdraw_symbol]`. For Jupiter Lend:
+    /// `[supply_symbol, borrow_symbol]`. `"?"` symbols are filtered
+    /// out (the upstream symbol-map didn't recognize the reserve).
+    pub symbols: Vec<String>,
+}
+
+/// Read `LiquidationEvent`s from one parquet file or every
+/// `*.parquet` file under a directory tree. Sniffs which liquidation
+/// schema produced the file via column presence
+/// (`repay_symbol`/`withdraw_symbol` for Kamino,
+/// `supply_symbol`/`borrow_symbol` for Jupiter Lend).
+pub fn read_liquidation_events(path: &Path) -> Result<Vec<LiquidationEvent>, StoreError> {
+    use arrow_array::{Int64Array, LargeStringArray};
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    if path.is_dir() {
+        collect_parquet_files(path, &mut files)?;
+    } else if path.exists() {
+        files.push(path.to_path_buf());
+    } else {
+        return Err(StoreError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "path does not exist"),
+        });
+    }
+
+    let mut out: Vec<LiquidationEvent> = Vec::new();
+    for file in &files {
+        let Some(reader) = open_parquet_reader(file)? else {
+            continue;
+        };
+        for batch in reader {
+            let batch = batch.map_err(parquet::errors::ParquetError::from)?;
+            let schema = batch.schema();
+            let (Some(_), Some(_), Some(_)) = (
+                schema.index_of("signature").ok(),
+                schema.index_of("slot").ok(),
+                schema.index_of("block_time").ok(),
+            ) else {
+                continue;
+            };
+            let sig = batch
+                .column(schema.index_of("signature").unwrap())
+                .as_any()
+                .downcast_ref::<LargeStringArray>();
+            let slot = batch
+                .column(schema.index_of("slot").unwrap())
+                .as_any()
+                .downcast_ref::<Int64Array>();
+            let bt = batch
+                .column(schema.index_of("block_time").unwrap())
+                .as_any()
+                .downcast_ref::<Int64Array>();
+            let (Some(sig), Some(slot), Some(bt)) = (sig, slot, bt) else {
+                continue;
+            };
+            // Sniff symbol columns: kamino uses repay/withdraw,
+            // jupiter_lend uses supply/borrow.
+            let sym_a = schema
+                .index_of("repay_symbol")
+                .ok()
+                .or_else(|| schema.index_of("supply_symbol").ok())
+                .and_then(|i| {
+                    batch.column(i).as_any().downcast_ref::<LargeStringArray>()
+                });
+            let sym_b = schema
+                .index_of("withdraw_symbol")
+                .ok()
+                .or_else(|| schema.index_of("borrow_symbol").ok())
+                .and_then(|i| {
+                    batch.column(i).as_any().downcast_ref::<LargeStringArray>()
+                });
+            for i in 0..batch.num_rows() {
+                let mut symbols: Vec<String> = Vec::new();
+                if let Some(a) = sym_a {
+                    let s = a.value(i);
+                    if !s.is_empty() && s != "?" {
+                        symbols.push(s.to_string());
+                    }
+                }
+                if let Some(b) = sym_b {
+                    let s = b.value(i);
+                    if !s.is_empty() && s != "?" && !symbols.iter().any(|x| x == s) {
+                        symbols.push(s.to_string());
+                    }
+                }
+                out.push(LiquidationEvent {
+                    signature: sig.value(i).to_string(),
+                    slot: slot.value(i) as u64,
+                    block_time: bt.value(i),
+                    symbols,
+                });
             }
         }
     }

@@ -349,16 +349,28 @@ cross-Kamino-market scan (10x bigger panel), batch by slot to amortize.
 
 ---
 
-## Priority 1.5 — paper-1 incumbent-benchmark forward tapes (TIME-GATED — start now)
+## Priority 1.5 — paper-1 incumbent-benchmark forward tapes + Layer 0 router infrastructure (TIME-GATED — start now)
 
-These five items close paper 1 §9.8's "no numerical incumbent benchmark"
-disclosure. Every item is forward-tape-only — there is no historical
-buy-the-data path, so calendar time is the binding constraint on the
-panel. Starting all five today gives ~5 months of matched-window
-coverage by Q3 2026, which is the gating constraint for converting
-paper 1's currently-qualitative "incumbents publish no calibration
-claim" critique into a numerical "incumbents fail their implicit
-coverage claim by X bps on Y% of weekends" empirical result.
+These items close paper 1 §9.8's "no numerical incumbent benchmark"
+disclosure AND supply the data spine for the Layer 0 multi-upstream
+aggregator (the open-hours half of the unified-feed router product
+locked 2026-04-28). Every item is forward-tape-only — there is no
+historical buy-the-data path, so calendar time is the binding
+constraint on the panel. Starting all of them today gives ~5 months
+of matched-window coverage by Q3 2026, which is the gating constraint
+for both:
+
+- converting paper 1's currently-qualitative "incumbents publish no
+  calibration claim" critique into a numerical "incumbents fail their
+  implicit coverage claim by X bps on Y% of weekends" result, and
+- fitting the calibration-weighted aggregator (Layer 1 of the router
+  product) so each upstream's contribution weight is justified by its
+  historical realised-error distribution against ground truth.
+
+Items 21-23 were originally scoped as paper-1 benchmark data; the
+2026-04-28 unified-feed router design upgrades them to product-
+critical infrastructure for the open-hours aggregator. Same calendar
+urgency, two compounding reasons.
 
 ### 21. `chainlink_streams_tape.v1` — Chainlink Data Streams continuous forward tape  `[methodology-entry-needed]`
 
@@ -590,6 +602,69 @@ _dedup_key       string  (= symbol + ts)
   measurement at band-edge events.
 
 **Effort.** ~2 hours (yfinance 1m wrapper + import path).
+
+### 39. `mango_v4_market_tape.v1` — Mango v4 post-deviation-guard market price tape  `[methodology-entry-needed]`
+
+**What.** Forward tape (≤60s cadence) of Mango v4's per-market post-
+deviation-guard prices for crypto markets (BTC-PERP, ETH-PERP,
+SOL-PERP, plus spot-bank prices for BTC, ETH, SOL where listed).
+Mango v4's deviation-guard logic is the closest production analog to
+soothsayer's Layer 0 outlier-rejection filter; consuming Mango's
+post-guard price directly gives the router a fifth upstream for crypto-
+correlated assets (MSTR via BTC; future ETH-correlated tokens).
+Companion to item 28's snapshot/event capture — that gives static
+config + events; this gives the live price stream that Layer 0
+actually consumes.
+
+Important scope note: Mango v4 does NOT price equities (no SPY, QQQ,
+AAPL etc. feeds). For paper 1's primary asset set this tape is
+inapplicable; Mango's contribution there is methodology-only
+(deviation-guard logic adopted as a Layer 0 filter, cited in the
+methodology entry). For BTC-correlated tokens — currently only MSTR
+in scope, more if scope expands — Mango's post-guard price is a
+literal upstream.
+
+**Source.** On-chain Solana mainnet. Mango v4 program
+`4MangoMjqJ2firMokCjjGgoK8d4MXcrgL7XJaL3w6fVg`. The relevant accounts
+are PerpMarket and Bank PDAs; both carry an `oracle_price` field that
+reflects the post-deviation-guard read. Layout in Mango v4 IDL.
+
+**Schema** (proposed `mango_v4_market_tape.v1`):
+```
+market_pda            string
+market_kind           string  ('perp' | 'bank')
+market_symbol         string  ('BTC-PERP', 'BTC-BANK', ...)
+oracle_price          f64                 (post-deviation-guard)
+oracle_confidence     f64 nullable
+oracle_pda            string              (the upstream Mango is reading)
+deviation_guard_hit   bool                (true if the guard clamped this read)
+last_update_slot      u64
+slot                  u64                 (slot the snapshot was taken)
+_schema_version       string ('mango_v4_market_tape.v1')
+_fetched_at           i64
+_source               string
+_dedup_key            string  (= market_pda + slot)
+```
+
+**CLI.** `scry solana mango-v4-market-tape --once [--markets ALL|BTC-PERP,...] --proxy-url URL`
+
+**Notes.**
+- This is the tape companion to item 28's `mango_v4_oracle_config.v1`
+  static snapshot. Item 28's config tells you the deviation thresholds
+  Mango is applying; this tape tells you the prices that survive the
+  guard.
+- The `deviation_guard_hit` boolean is load-bearing for the empirical
+  comparison "Mango's deviation-guard logic clamped X% of upstream
+  reads in regime Y" — a number useful for soothsayer's Layer 0
+  parameter-tuning entry and for paper 2 mechanism-design framing.
+- Cadence-match this with item 21 (Chainlink streams) and item 22
+  (Switchboard On-Demand) so cross-source residuals can be computed
+  by the soothsayer-derived alignment dataset (soothsayer-side, not
+  scryer; lives at `soothsayer_v{N}/multi_oracle_alignment/v1/...`
+  per CLAUDE.md hard rule #5).
+
+**Effort.** ~3 hours (Mango v4 has a published IDL; `oracle_price`
+extraction is a known-offset read).
 
 ---
 
@@ -1225,6 +1300,7 @@ Added 2026-04-28 (Priority 1.5 / 2.5 / 3-extension / 4):
 - `dex_treasury_swaps.v1` (item 36)
 - `backed_nav_strikes.v1` (item 37)
 - `treasury_auction.v1` (item 38)
+- `mango_v4_market_tape.v1` (item 39; added 2026-04-28 for Layer 0 router)
 
 ---
 
