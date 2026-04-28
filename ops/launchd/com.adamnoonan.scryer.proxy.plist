@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.proxy</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/Documents/scryer/target/release/scryer-proxy</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Documents/scryer</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/proxy.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/proxy.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SCRY_LOG</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>

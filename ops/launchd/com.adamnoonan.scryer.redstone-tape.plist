@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.redstone-tape</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/Documents/scryer/target/release/scry</string>
+        <string>redstone</string>
+        <string>tape</string>
+        <string>--label</string>
+        <string>cron-10m</string>
+        <string>--source</string>
+        <string>redstone:gateway:launchd</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Documents/scryer</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>600</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/redstone-tape.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/redstone-tape.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SCRY_LOG</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>
