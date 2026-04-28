@@ -890,6 +890,88 @@ with sub-modules.
 
 **Effort.** ~2 hours combined.
 
+**Caveat — soothsayer note 2026-04-28.** The existing soothsayer
+`backed_corp_actions.parquet` is mis-labeled: it tracks Backed.fi
+GitHub-repo commit metadata (`action_type ∈ {list, metadata_update}`),
+not equity-side corporate actions on the underlying tickers. Useful
+for protocol-side audit but does NOT cover the splits/dividends/
+mergers needed for soothsayer's Paper 1 §10.2 OOS-panel filter test.
+That gap is covered by item 15a below.
+
+### 15a. `yahoo.corp_actions` — yfinance equity corp-actions venue  `[methodology-entry-needed; soothsayer-paper-1-blocker]`
+
+**What.** Per-(symbol, date) row of equity corporate actions —
+splits, dividends, special distributions — for the ten Paper 1
+underliers (SPY, QQQ, AAPL, GOOGL, NVDA, TSLA, HOOD, GLD, TLT, MSTR)
+plus an open-ended whitelist for v2 universe expansion. yfinance
+exposes this via `Ticker.actions` (combined splits + dividends),
+`Ticker.splits`, and `Ticker.dividends`; coverage extends decades
+back for all listed names.
+
+**Why.** Soothsayer Paper 1 §6.4.1 reports a per-symbol DQ
+reject-count of 5 / 10 at τ = 0.99 that does not vanish under the
+median-p sensitivity. The §10.2 follow-up filter — drop OOS
+weekends with corp-action confounders and rerun DQ — needs a
+historical corp-action panel that the existing forward-only
+mis-labeled `backed.v1` venue does not provide.
+
+**Migration target.** Third yahoo data_type alongside `bars` and
+`earnings`. Column set: `symbol`, `event_date`, `event_type`
+(`split` | `cash_dividend` | `special_dividend`),
+`split_ratio_num` / `split_ratio_den` for splits,
+`dividend_amount` / `dividend_currency` for dividends,
+`announce_date` (best-effort), plus the standard scryer
+`_schema_version` / `_fetched_at` / `_source` triplet. Schema
+`yahoo_corp_actions.v1`.
+
+**CLI.** `scry yahoo corp-actions --symbols SPY,QQQ,... --start
+DATE --end DATE` (one-shot batch).
+
+**Soothsayer consumer.** New loader
+`soothsayer.sources.scryer.load_yahoo_corp_actions(symbols, start,
+end)`; consumed by §10.2 follow-up script to flag the OOS panel.
+
+**Effort.** ~3-4 hours: schema design (matches the simplicity of
+`yahoo.bars`), fetcher (mostly a `yfinance` `Ticker.actions` loop
+with split-into-three normalisation), test harness.
+
+### 15b. `nasdaq_halts.v1` historical backfill  `[methodology-entry-needed; soothsayer-paper-1-blocker; partial-coverage-only]`
+
+**What.** Backfill the existing `nasdaq_halts.v1` schema to
+2023-01-01 → present rather than the current forward-only window
+(scryer's live RSS poller from 2026-04-24 onward, item 15).
+
+**Why.** Same §10.2 follow-up as item 15a — soothsayer Paper 1
+needs to drop halt-confounded weekends from the OOS panel
+(2023-01 → 2026-04) and rerun DQ. The forward-only live feed
+covers <1% of that window.
+
+**Source coverage gradient.**
+- NASDAQ free public archive (`nasdaqtrader.com/dynamic/symdir/
+  tradehalts.txt` and adjacent endpoints): roughly the last 18
+  months back from current date. Covers ~2024-10-01 → present
+  with weekly archive snapshots; older data is gappy.
+- Paid SIP feed or commercial vendor (Polygon.io halts endpoint,
+  IEX historical halts, Alpaca halts feed): full 2023-01 → present
+  coverage. Cost gradient: free (gappy ~18 months) → ~$50-100/mo
+  vendor (full coverage). Recommend free/public archive for v1
+  and document the per-month coverage gap; revisit if the §10.2
+  filter materially changes the τ = 0.99 reject-count attribution.
+
+**Migration target.** Same fetcher crate as item 15 (`scryer-fetch-
+rss` or co-located in `scryer-fetch-dexagg`); add a `--backfill
+START_DATE` flag to the existing CLI.
+
+**CLI.** `scry rss nasdaq-halts --backfill 2023-01-01`.
+
+**Soothsayer consumer.** New loader
+`soothsayer.sources.scryer.load_nasdaq_halts(start, end, symbols)`;
+consumed by §10.2 follow-up script alongside 15a.
+
+**Effort.** ~4-6 hours: archive-format reverse-engineering (the
+public archive returns plain-text snapshots with dated filenames),
+backfill driver, gap-disclosure metadata column on each row.
+
 ### 16. FRED macro calendar  `[migration]`
 
 **What.** Soothsayer source: `soothsayer/scripts/build_fred_macro_calendar.py`.
