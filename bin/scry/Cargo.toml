@@ -19,6 +19,7 @@ scryer-fetch-dexagg = { path = "../../crates/scryer-fetch-dexagg" }
 scryer-fetch-jito = { path = "../../crates/scryer-fetch-jito" }
 scryer-fetch-equities = { path = "../../crates/scryer-fetch-equities" }
 scryer-fetch-rss = { path = "../../crates/scryer-fetch-rss" }
+scryer-fetch-fred = { path = "../../crates/scryer-fetch-fred" }
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { workspace = true }
 tracing = { workspace = true }

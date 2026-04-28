@@ -20,6 +20,7 @@ mod jito_cmd;
 mod kamino_obligations_cmd;
 mod kamino_reserves_cmd;
 mod equities_cmd;
+mod fred_cmd;
 mod loopscale_loans_cmd;
 mod oracle_context_cmd;
 mod rss_cmd;
@@ -61,6 +62,10 @@ enum Command {
     /// Trader's trade-halts RSS. Single-tick; cadence wrapped by
     /// launchd / cron.
     Rss(RssCmd),
+    /// FRED macro release calendar (CPI / NFP / GDP / PCE / PPI /
+    /// RetailSales by default). REST against api.stlouisfed.org;
+    /// requires a free FRED_API_KEY.
+    Fred(FredCmd),
 }
 
 #[derive(Parser, Debug)]
@@ -136,6 +141,20 @@ struct EquitiesCmd {
 struct RssCmd {
     #[command(subcommand)]
     target: RssTarget,
+}
+
+#[derive(Parser, Debug)]
+struct FredCmd {
+    #[command(subcommand)]
+    target: FredTarget,
+}
+
+#[derive(Subcommand, Debug)]
+enum FredTarget {
+    /// Pull scheduled + historical release dates for the configured
+    /// FRED release set in `[start, end]`. Writes
+    /// dataset/fred/macro_calendar/v1/year=YYYY.parquet.
+    MacroCalendar(fred_cmd::MacroCalendarArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -302,6 +321,9 @@ async fn main() -> Result<()> {
         Command::Rss(c) => match c.target {
             RssTarget::Backed(a) => rss_cmd::run_backed(a).await,
             RssTarget::NasdaqHalts(a) => rss_cmd::run_nasdaq_halts(a).await,
+        },
+        Command::Fred(c) => match c.target {
+            FredTarget::MacroCalendar(a) => fred_cmd::run_macro_calendar(a).await,
         },
     }
 }

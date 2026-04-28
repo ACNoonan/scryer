@@ -66,6 +66,7 @@ pub mod venue {
     pub const GECKOTERMINAL: &str = "geckoterminal";
     pub const JITO: &str = "jito";
     pub const LOOPSCALE: &str = "loopscale";
+    pub const FRED: &str = "fred";
     /// Cross-source oracle context derived from joining the
     /// kamino_scope / pyth / v5_tape / redstone tapes against the
     /// liquidation panels.

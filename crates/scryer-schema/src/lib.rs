@@ -23,6 +23,7 @@ pub mod backed;
 pub mod earnings;
 pub mod error;
 pub mod fluid_vault_config;
+pub mod fred_macro;
 pub mod geckoterminal;
 pub mod jito_bundles;
 pub mod jupiter_lend_liquidation;
