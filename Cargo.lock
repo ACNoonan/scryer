@@ -1634,6 +1634,7 @@ dependencies = [
  "clap",
  "dotenvy",
  "reqwest",
+ "scryer-fetch-dexagg",
  "scryer-fetch-pyth",
  "scryer-fetch-redstone",
  "scryer-fetch-solana",
@@ -1657,6 +1658,16 @@ version = "0.1.0"
 [[package]]
 name = "scryer-fetch-dexagg"
 version = "0.1.0"
+dependencies = [
+ "chrono",
+ "reqwest",
+ "scryer-schema",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "scryer-fetch-evm"

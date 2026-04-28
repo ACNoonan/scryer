@@ -12,6 +12,7 @@ under `KeepAlive`.
 | `com.adamnoonan.scryer.kamino-scope-tape.plist` | every 60s | proxy must be running |
 | `com.adamnoonan.scryer.redstone-tape.plist` | every 600s (10m) | nothing (REST direct) |
 | `com.adamnoonan.scryer.pyth-tape.plist` | every 60s | nothing (REST direct) |
+| `com.adamnoonan.scryer.geckoterminal-trades.plist` | every 900s (15m) | nothing (REST direct) |
 
 ## Runtime layout
 
@@ -73,6 +74,7 @@ cp ops/launchd/*.plist ~/Library/LaunchAgents/
    launchctl load ~/Library/LaunchAgents/com.adamnoonan.scryer.kamino-scope-tape.plist
    launchctl load ~/Library/LaunchAgents/com.adamnoonan.scryer.redstone-tape.plist
    launchctl load ~/Library/LaunchAgents/com.adamnoonan.scryer.pyth-tape.plist
+   launchctl load ~/Library/LaunchAgents/com.adamnoonan.scryer.geckoterminal-trades.plist
    ```
 
 `RunAtLoad=true` on every plist, so each tape fires immediately on load

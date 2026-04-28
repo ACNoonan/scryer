@@ -14,6 +14,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 
+mod dexagg_cmd;
 mod import_cmd;
 mod pyth_cmd;
 mod redstone_cmd;
@@ -36,6 +37,8 @@ enum Command {
     Redstone(RedstoneCmd),
     /// Pyth Hermes oracle-tape fetchers (REST, no proxy).
     Pyth(PythCmd),
+    /// DEX aggregator clients (GeckoTerminal). REST per-venue; no proxy.
+    Dexagg(DexaggCmd),
 }
 
 #[derive(Parser, Debug)]
@@ -89,6 +92,12 @@ struct PythCmd {
     target: PythTarget,
 }
 
+#[derive(Parser, Debug)]
+struct DexaggCmd {
+    #[command(subcommand)]
+    target: DexaggTarget,
+}
+
 #[derive(Subcommand, Debug)]
 enum RedstoneTarget {
     /// One-tick poll of api.redstone.finance/prices for the
@@ -104,6 +113,15 @@ enum PythTarget {
     /// Schedule via launchd / cron at the desired cadence
     /// (typical: 60s).
     Tape(pyth_cmd::TapeArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum DexaggTarget {
+    /// GeckoTerminal pool-trades poll (free-tier returns latest ~300
+    /// trades). Schedule via launchd / cron (typical: 15m). Idempotent
+    /// — re-runs within the trade-coverage window dedup cleanly on
+    /// `tx_hash`.
+    GtTrades(dexagg_cmd::GtTradesArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -162,6 +180,9 @@ async fn main() -> Result<()> {
         },
         Command::Pyth(c) => match c.target {
             PythTarget::Tape(a) => pyth_cmd::run_tape(a).await,
+        },
+        Command::Dexagg(c) => match c.target {
+            DexaggTarget::GtTrades(a) => dexagg_cmd::run_gt_trades(a).await,
         },
     }
 }

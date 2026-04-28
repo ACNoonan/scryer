@@ -9,6 +9,7 @@ a Rust binary `scry` running under launchd. Tapes:
 | Kamino-Scope | `com.adamnoonan.scryer.kamino-scope-tape` | 60s | `/Users/adamnoonan/Library/Application Support/scryer/dataset/kamino_scope/oracle_tape/v1/` |
 | RedStone     | `com.adamnoonan.scryer.redstone-tape`     | 600s | `/Users/adamnoonan/Library/Application Support/scryer/dataset/redstone/oracle_tape/v1/` |
 | Pyth         | `com.adamnoonan.scryer.pyth-tape`         | 60s  | `/Users/adamnoonan/Library/Application Support/scryer/dataset/pyth/oracle_tape/v1/` |
+| GeckoTerminal | `com.adamnoonan.scryer.geckoterminal-trades` | 900s | `/Users/adamnoonan/Library/Application Support/scryer/dataset/geckoterminal/trades/v1/pool=<addr>/` |
 
 The proxy daemon `com.adamnoonan.scryer.proxy` must be up for
 Kamino-Scope to work (Kamino-Scope polls Solana via the proxy at

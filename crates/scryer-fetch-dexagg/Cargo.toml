@@ -3,7 +3,20 @@ name = "scryer-fetch-dexagg"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "DEX aggregator clients — GeckoTerminal, Birdeye. v0.2+ scope. Per-venue retry; no proxy."
+description = "DEX-aggregator clients — GeckoTerminal (v1, real-time-only free tier). REST per-venue; no proxy."
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+scryer-schema = { path = "../scryer-schema" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
