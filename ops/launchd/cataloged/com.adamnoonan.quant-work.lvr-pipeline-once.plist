@@ -23,9 +23,13 @@
 
     <!--
       Fire immediately on load, then every 30 min. Avoids the local-time
-      vs UTC ambiguity of StartCalendarInterval. The runner gates on the
-      backfill PIDs and self-unloads via `launchctl bootout` after a
-      successful pipeline run, so subsequent fires are no-ops.
+      vs UTC ambiguity of StartCalendarInterval. Post-LVR-v0.7-cutover
+      (April 2026) the runner is a pure consumer of scryer parquet: it
+      pre-flights the required scryer datasets, runs lvr_calc ->
+      coverage -> plot_calibration, writes a sentinel, and self-unloads
+      via `launchctl bootout`. If scryer parquet is missing the runner
+      logs the populate command and exits non-zero so a later fire (or
+      a manual run after the populate) can retry.
     -->
     <key>RunAtLoad</key>
     <true/>
