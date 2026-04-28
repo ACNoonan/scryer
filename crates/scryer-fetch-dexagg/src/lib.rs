@@ -22,6 +22,8 @@
 //! single-DEX-per-chain fetcher (`scryer-fetch-solana`'s Raydium-v4
 //! parser).
 
+pub mod jupiter;
+
 use std::time::Duration;
 
 use scryer_schema::geckoterminal::v1::Trade;
