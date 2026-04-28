@@ -34,6 +34,12 @@ pub const FLUID_VAULTS_PROGRAM: &str = "jupr81YtYssSyPt8jbnGuiWon5f6x9TcDEFxYe3B
 /// only reads the first 219 bytes and ignores the rest.
 const VAULT_CONFIG_BYTES: usize = 219;
 
+/// Anchor discriminator for the `VaultConfig` account type:
+/// `sha256("account:VaultConfig")[..8]`. The size heuristic alone
+/// admits ~209k other Fluid-program account types whose body
+/// happens to be ≥219 bytes; the disc filter cuts those.
+pub const VAULT_CONFIG_DISC: [u8; 8] = [0x63, 0x56, 0x2b, 0xd8, 0xb8, 0x66, 0x77, 0x4d];
+
 /// Filter the snapshot to a specific supply-token-mint set, or accept
 /// all VaultConfigs returned.
 #[derive(Clone, Debug)]
@@ -85,6 +91,9 @@ pub fn decode_vault_config_bytes(
     borrow_symbol: String,
 ) -> Option<Config> {
     if raw.len() < VAULT_CONFIG_BYTES {
+        return None;
+    }
+    if raw[..8] != VAULT_CONFIG_DISC {
         return None;
     }
     // Skip the 8-byte anchor discriminator.
@@ -224,27 +233,26 @@ impl FluidVaultConfigsFetcher {
 
         let mut out = Vec::new();
         let mut n_too_short = 0u64;
+        let mut n_wrong_disc = 0u64;
         let mut n_filtered = 0u64;
         for item in items {
             let raw = match B64.decode(&item.account.data.0) {
                 Ok(b) => b,
                 Err(_) => continue,
             };
-            // Resolve symbols *after* decoding the supply/borrow mints
-            // — symbol_map is keyed by mint pubkey.
-            let (supply_token, borrow_token) =
-                match (raw.len() >= VAULT_CONFIG_BYTES).then(|| {
-                    let body = &raw[8..];
-                    let st = bs58::encode(&body[146..178]).into_string();
-                    let bt = bs58::encode(&body[178..210]).into_string();
-                    (st, bt)
-                }) {
-                    Some(p) => p,
-                    None => {
-                        n_too_short += 1;
-                        continue;
-                    }
-                };
+            if raw.len() < VAULT_CONFIG_BYTES {
+                n_too_short += 1;
+                continue;
+            }
+            if raw[..8] != VAULT_CONFIG_DISC {
+                n_wrong_disc += 1;
+                continue;
+            }
+            // Pre-resolve supply/borrow tokens for the filter pass —
+            // symbol_map is keyed by mint pubkey.
+            let body = &raw[8..];
+            let supply_token = bs58::encode(&body[146..178]).into_string();
+            let borrow_token = bs58::encode(&body[178..210]).into_string();
             if !self.cfg.supply_filter.matches(&supply_token) {
                 n_filtered += 1;
                 continue;
@@ -254,17 +262,15 @@ impl FluidVaultConfigsFetcher {
             if let Some(cfg) =
                 decode_vault_config_bytes(&item.pubkey, &raw, &meta, supply_symbol, borrow_symbol)
             {
-                // sanity: re-verify the supply/borrow tokens match
                 debug_assert_eq!(cfg.supply_token, supply_token);
                 debug_assert_eq!(cfg.borrow_token, borrow_token);
                 out.push(cfg);
-            } else {
-                n_too_short += 1;
             }
         }
         tracing::info!(
             decoded = out.len(),
             too_short = n_too_short,
+            wrong_disc = n_wrong_disc,
             filtered_out = n_filtered,
             "decode complete"
         );
@@ -288,7 +294,9 @@ mod tests {
     /// values at every field position.
     fn synthetic_account_bytes() -> (Vec<u8>, &'static [&'static str; 6]) {
         let mut buf = vec![0u8; VAULT_CONFIG_BYTES];
-        // disc bytes 0..8: leave zeros.
+        // Anchor discriminator for VaultConfig — required by the
+        // decoder's disc filter.
+        buf[..8].copy_from_slice(&VAULT_CONFIG_DISC);
         buf[8..10].copy_from_slice(&7u16.to_le_bytes()); // vault_id
         buf[10..12].copy_from_slice(&(-100i16).to_le_bytes()); // supply_rate_magnifier
         buf[12..14].copy_from_slice(&50i16.to_le_bytes()); // borrow_rate_magnifier
@@ -370,6 +378,21 @@ mod tests {
         assert_eq!(unique.len(), 6);
         assert_eq!(cfg.supply_symbol, "SPYx");
         assert_eq!(cfg.borrow_symbol, "USDC");
+    }
+
+    #[test]
+    fn rejects_wrong_anchor_discriminator() {
+        let (mut bytes, _) = synthetic_account_bytes();
+        // Flip the first byte of the disc — should now reject.
+        bytes[0] ^= 0xff;
+        let cfg = decode_vault_config_bytes(
+            "PDA",
+            &bytes,
+            &meta(),
+            String::new(),
+            String::new(),
+        );
+        assert!(cfg.is_none());
     }
 
     #[test]
