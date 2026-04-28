@@ -31,6 +31,7 @@ mod oracle_context_cmd;
 mod pyth_publisher_cmd;
 mod rss_cmd;
 mod pool_snapshots_cmd;
+mod priority_fees_cmd;
 mod pyth_cmd;
 mod redstone_cmd;
 mod solana_cmd;
@@ -318,6 +319,13 @@ enum SolanaTarget {
     /// queries `bundles/transaction/{sig}`, and writes one
     /// `jito_bundles.v1` row per signature.
     JitoBundles(jito_cmd::JitoBundlesArgs),
+    /// Per-slot block-walk priority-fee + Jito-tip percentile panel.
+    /// On-demand window walker: emits one
+    /// `solana_priority_fees.v1::Stats` row per non-skipped slot in
+    /// `[start, end]` (or `[around-window, around+window]`, or
+    /// `latest-N`). Writes to dataset/solana/priority_fees/v1/year=Y/
+    /// month=M/day=D.parquet.
+    PriorityFees(priority_fees_cmd::PriorityFeesArgs),
     /// Single-tick poll of `bundles.jito.wtf/api/v1/bundles/tip_floor`
     /// — the Jito chain-wide rolling tip-percentile distribution.
     /// Writes one `jito_tip_floor.v1::Tick` row to
@@ -376,6 +384,7 @@ async fn main() -> Result<()> {
             SolanaTarget::PythPublisher(a) => pyth_publisher_cmd::run_pyth_publisher(a).await,
             SolanaTarget::JitoBundles(a) => jito_cmd::run_jito_bundles(a).await,
             SolanaTarget::JitoTipFloor(a) => jito_tip_floor_cmd::run_jito_tip_floor(a).await,
+            SolanaTarget::PriorityFees(a) => priority_fees_cmd::run_priority_fees(a).await,
             SolanaTarget::OracleContext(a) => oracle_context_cmd::run_oracle_context(a).await,
         },
         Command::Redstone(c) => match c.target {

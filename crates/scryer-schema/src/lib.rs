@@ -47,6 +47,7 @@ pub mod pool_snapshot;
 pub mod pyth;
 pub mod pyth_publisher;
 pub mod redstone;
+pub mod solana_priority_fees;
 pub mod swap;
 pub mod trade;
 pub mod v5_tape;

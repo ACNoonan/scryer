@@ -982,7 +982,7 @@ _dedup_key           string  (= signature + ix_index)
 
 **Effort.** ~3-4 hours.
 
-### 27. block-level priority-fee + Jito-tip distribution  `[split into two schemas — phase 42 done; phase 43 pending]`
+### 27. block-level priority-fee + Jito-tip distribution  `[split into two schemas — phase 42 + 43 done]`
 
 **Status (2026-04-28).** Wishlist research found the original
 single-schema proposal can't be implemented faithfully:
@@ -1005,7 +1005,7 @@ partition: `dataset/jito/tip_floor/v1/year=Y/month=M/day=D.parquet`.
 Dedup on `time`; over-polling produces zero redundant rows. Live-
 validated against `bundles.jito.wtf`. CLI: `scry solana jito-tip-floor`.
 
-#### 27b. `solana_priority_fees.v1` — per-slot block-walk percentiles  `[pending — phase 43]`
+#### 27b. `solana_priority_fees.v1` — per-slot block-walk percentiles  `[done — phase 43]`
 
 **What.** One row per slot with full priority-fee + Jito-tip
 percentile decomposition computed by walking `getBlock(slot, full)`,

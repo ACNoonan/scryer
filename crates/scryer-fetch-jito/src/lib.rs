@@ -91,6 +91,85 @@ impl Default for PollConfig {
     }
 }
 
+/// Fetch the 8 canonical Jito tip-payment pubkeys via the Block
+/// Engine's `getTipAccounts` JSON-RPC method. Per CLAUDE.md hard rule
+/// #8, identifiers are pulled live rather than retyped from a
+/// truncated display.
+///
+/// Endpoint: `POST {base_url}/api/v1/bundles` with body
+/// `{"jsonrpc":"2.0","id":1,"method":"getTipAccounts","params":[]}`.
+pub async fn get_tip_accounts(
+    client: &reqwest::Client,
+    base_url: &str,
+    cfg: &PollConfig,
+) -> Result<Vec<String>, FetchError> {
+    let url = format!("{}/api/v1/bundles", base_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTipAccounts",
+        "params": [],
+    });
+    let mut last_err: Option<FetchError> = None;
+    for _attempt in 0..cfg.retry_max.max(1) {
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .timeout(cfg.request_timeout)
+            .send()
+            .await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = Some(FetchError::Transport(e));
+                tokio::time::sleep(cfg.retry_delay).await;
+                continue;
+            }
+        };
+        let status = resp.status().as_u16();
+        let text = resp.text().await.map_err(FetchError::Transport)?;
+        if status == 429 || status >= 500 {
+            tracing::warn!(status, "jito getTipAccounts transient error; backing off");
+            last_err = Some(FetchError::UpstreamStatus { status, body: text });
+            tokio::time::sleep(cfg.retry_delay).await;
+            continue;
+        }
+        if status >= 400 {
+            return Err(FetchError::UpstreamStatus { status, body: text });
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| FetchError::MalformedBody(format!("non-json: {e}")))?;
+        if let Some(err) = v.get("error") {
+            return Err(FetchError::MalformedBody(format!(
+                "jito getTipAccounts rpc-error: {err}"
+            )));
+        }
+        let arr = v
+            .get("result")
+            .and_then(|r| r.as_array())
+            .ok_or_else(|| {
+                FetchError::MalformedBody("missing or non-array `result`".to_string())
+            })?;
+        let mut out = Vec::with_capacity(arr.len());
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                out.push(s.to_string());
+            }
+        }
+        if out.is_empty() {
+            return Err(FetchError::MalformedBody(
+                "jito getTipAccounts returned empty result array".to_string(),
+            ));
+        }
+        return Ok(out);
+    }
+    Err(last_err.unwrap_or_else(|| FetchError::RetriesExhausted {
+        attempts: cfg.retry_max.max(1),
+        last: "no error captured".to_string(),
+    }))
+}
+
 /// Enrich one signature with Block Engine bundle metadata. Always
 /// returns a `Bundle` row — `landed_via_bundle = false` for
 /// transactions the Block Engine has no record of.

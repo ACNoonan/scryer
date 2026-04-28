@@ -64,6 +64,7 @@ pub mod venue {
     pub const KAMINO: &str = "kamino";
     pub const JUPITER_LEND: &str = "jupiter_lend";
     pub const DRIFT: &str = "drift";
+    pub const SOLANA: &str = "solana";
     pub const CEX_PERP_FUNDING: &str = "cex_perp_funding";
     pub const GECKOTERMINAL: &str = "geckoterminal";
     pub const JITO: &str = "jito";

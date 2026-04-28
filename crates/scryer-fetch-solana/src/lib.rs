@@ -32,6 +32,7 @@ pub mod loopscale_loans;
 pub mod parse;
 pub mod parse_transactions;
 pub mod pool_snapshots;
+pub mod priority_fees;
 pub mod sig_paginate;
 pub mod types;
 
