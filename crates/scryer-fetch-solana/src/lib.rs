@@ -25,6 +25,7 @@ pub mod kamino_liquidations;
 pub mod kamino_scope_tape;
 pub mod parse;
 pub mod parse_transactions;
+pub mod pool_snapshots;
 pub mod sig_paginate;
 pub mod types;
 

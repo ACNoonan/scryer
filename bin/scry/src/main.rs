@@ -16,6 +16,7 @@ use clap::{Parser, Subcommand};
 
 mod dexagg_cmd;
 mod import_cmd;
+mod pool_snapshots_cmd;
 mod pyth_cmd;
 mod redstone_cmd;
 mod solana_cmd;
@@ -156,6 +157,13 @@ enum SolanaTarget {
     /// 8 xStock symbols sliced locally). Schedule via launchd / cron
     /// at 60s cadence.
     KaminoScopeTape(solana_cmd::KaminoScopeTapeArgs),
+    /// Hourly pool-vault balance snapshots derived from existing
+    /// `swap.v1` parquet partitions. One-shot backfill — reads swap
+    /// rows from `dataset/{venue}/swaps/v1/pool=ADDR/year=Y/month=M/
+    /// day=D.parquet`, picks the first signature per hour, and
+    /// fetches each tx's `preTokenBalances` via proxy-routed
+    /// `getTransaction(jsonParsed)`.
+    PoolSnapshots(pool_snapshots_cmd::PoolSnapshotsArgs),
 }
 
 #[tokio::main]
@@ -192,6 +200,7 @@ async fn main() -> Result<()> {
             SolanaTarget::JupiterLendLiquidations(a) => solana_cmd::run_jupiter_lend_liquidations(a).await,
             SolanaTarget::FluidVaultConfigs(a) => solana_cmd::run_fluid_vault_configs(a).await,
             SolanaTarget::KaminoScopeTape(a) => solana_cmd::run_kamino_scope_tape(a).await,
+            SolanaTarget::PoolSnapshots(a) => pool_snapshots_cmd::run_pool_snapshots(a).await,
         },
         Command::Redstone(c) => match c.target {
             RedstoneTarget::Tape(a) => redstone_cmd::run_tape(a).await,

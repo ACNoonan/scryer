@@ -23,8 +23,8 @@ use arrow_array::RecordBatch;
 use arrow_schema::ArrowError;
 use scryer_schema::{
     backed, earnings, fluid_vault_config, geckoterminal, jupiter_lend_liquidation,
-    kamino_liquidation, kamino_scope, kraken_funding, nasdaq_halts, pyth, redstone, swap, trade,
-    v5_tape, yahoo, FromArrowError,
+    kamino_liquidation, kamino_scope, kraken_funding, nasdaq_halts, pool_snapshot, pyth, redstone,
+    swap, trade, v5_tape, yahoo, FromArrowError,
 };
 
 /// Time granularity of a dataset's partitioning. Each schema picks
@@ -369,6 +369,25 @@ impl DatasetSchema for geckoterminal::v1::Trade {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         geckoterminal::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for pool_snapshot::v1::Snapshot {
+    const DATA_TYPE: &'static str = "pool_snapshots";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("pool");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.hour
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        pool_snapshot::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        pool_snapshot::v1::from_record_batch(batch)
     }
 }
 
