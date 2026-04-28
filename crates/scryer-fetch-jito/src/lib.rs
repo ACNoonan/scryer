@@ -1,5 +1,14 @@
-//! `scryer-fetch-jito` — REST client for the public Jito Block Engine
-//! `bundles/transaction/{sig}` endpoint.
+//! `scryer-fetch-jito` — REST clients for Jito's public services.
+//!
+//! Two modules, two distinct services:
+//!
+//! - top-level: per-signature bundle-attachment lookup against the
+//!   Block Engine (`mainnet.block-engine.jito.wtf/api/v1/bundles/
+//!   transaction/{sig}`). Enrichment side, joined to liquidation
+//!   panels.
+//! - [`tip_floor`]: chain-wide rolling tip-percentile distribution
+//!   from `bundles.jito.wtf/api/v1/bundles/tip_floor` — a separate
+//!   public host. Continuous-tape side, polled at ~10s cadence.
 //!
 //! Enriches existing liquidation panels (kamino_liquidation.v1,
 //! jupiter_lend_liquidation.v1) with Jito bundle context. For each
@@ -33,6 +42,8 @@ use std::time::Duration;
 use scryer_schema::jito_bundles::v1::Bundle;
 use scryer_schema::Meta;
 use thiserror::Error;
+
+pub mod tip_floor;
 
 pub const DEFAULT_BASE_URL: &str = "https://mainnet.block-engine.jito.wtf";
 pub const DEFAULT_SOURCE_LABEL: &str = "jito:block-engine";

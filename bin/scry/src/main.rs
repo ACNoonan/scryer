@@ -17,6 +17,7 @@ use clap::{Parser, Subcommand};
 mod dexagg_cmd;
 mod import_cmd;
 mod jito_cmd;
+mod jito_tip_floor_cmd;
 mod kamino_obligations_cmd;
 mod kamino_reserves_cmd;
 mod cex_funding_cmd;
@@ -317,6 +318,13 @@ enum SolanaTarget {
     /// queries `bundles/transaction/{sig}`, and writes one
     /// `jito_bundles.v1` row per signature.
     JitoBundles(jito_cmd::JitoBundlesArgs),
+    /// Single-tick poll of `bundles.jito.wtf/api/v1/bundles/tip_floor`
+    /// — the Jito chain-wide rolling tip-percentile distribution.
+    /// Writes one `jito_tip_floor.v1::Tick` row to
+    /// dataset/jito/tip_floor/v1/year=Y/month=M/day=D.parquet.
+    /// Schedule via launchd / cron at the desired cadence (typical:
+    /// 10s). Dedups naturally on the upstream `time` field.
+    JitoTipFloor(jito_tip_floor_cmd::JitoTipFloorArgs),
     /// Cross-source oracle observation enrichment. Pure offline join
     /// of liquidation events against the four continuously-collected
     /// oracle/price tapes (kamino_scope, pyth, v5_tape's chainlink +
@@ -367,6 +375,7 @@ async fn main() -> Result<()> {
             SolanaTarget::DexXstockSwaps(a) => dex_xstock_swaps_cmd::run_dex_xstock_swaps(a).await,
             SolanaTarget::PythPublisher(a) => pyth_publisher_cmd::run_pyth_publisher(a).await,
             SolanaTarget::JitoBundles(a) => jito_cmd::run_jito_bundles(a).await,
+            SolanaTarget::JitoTipFloor(a) => jito_tip_floor_cmd::run_jito_tip_floor(a).await,
             SolanaTarget::OracleContext(a) => oracle_context_cmd::run_oracle_context(a).await,
         },
         Command::Redstone(c) => match c.target {

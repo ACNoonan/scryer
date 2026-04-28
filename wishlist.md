@@ -982,41 +982,86 @@ _dedup_key           string  (= signature + ix_index)
 
 **Effort.** ~3-4 hours.
 
-### 27. `solana_priority_fees.v1` — block-level priority-fee + Jito-tip distribution  `[methodology-entry-needed]`
+### 27. block-level priority-fee + Jito-tip distribution  `[split into two schemas — phase 42 done; phase 43 pending]`
 
-**What.** Per-block aggregates of priority-fee distribution (median /
-p90 / p99 / max) and Jito-tip distribution (same percentiles). The
-"OEV-intensity" signal for paper 2: when did searcher competition
-spike, around what events. Companion to item 7 (`jito_bundles.v1`):
-that gives bundle-level metadata; this gives the system-wide intensity
-context against which bundle activity is benchmarked.
+**Status (2026-04-28).** Wishlist research found the original
+single-schema proposal can't be implemented faithfully:
+`getRecentPrioritizationFees` returns the per-slot **floor**
+(minimum landed fee), not a percentile vector;
+`bundles.jito.wtf/api/v1/bundles/tip_floor` returns a chain-wide
+**rolling** percentile distribution updated every ~5–15s, not
+per-slot; the only truthful per-slot percentile path is block-walk
+via `getBlock(slot, transactionDetails:"full")` at multi-TB/day
+RPC ingress. The two grains (chain-wide-rolling vs per-slot-truthful)
+don't fold into one schema honestly.
 
-**Source.** Solana RPC `getRecentPrioritizationFees` + Jito's
-`getTipDistribution` endpoint. Daemon polls every block (or every N
-blocks if rate-limited).
+**Decision: split into two schemas.**
 
-**Schema** (proposed `solana_priority_fees.v1`):
+#### 27a. `jito_tip_floor.v1` — chain-wide rolling tip percentiles  `[done — phase 42]`
+
+Continuous tape. Polled at ~10s cadence via launchd. 7 logical fields
+(time, p25/p50/p75/p95/p99 in lamports, ema_p50). Daily + no-key
+partition: `dataset/jito/tip_floor/v1/year=Y/month=M/day=D.parquet`.
+Dedup on `time`; over-polling produces zero redundant rows. Live-
+validated against `bundles.jito.wtf`. CLI: `scry solana jito-tip-floor`.
+
+#### 27b. `solana_priority_fees.v1` — per-slot block-walk percentiles  `[pending — phase 43]`
+
+**What.** One row per slot with full priority-fee + Jito-tip
+percentile decomposition computed by walking `getBlock(slot, full)`,
+filtering out vote txs (~65% of tx count, pay zero priority fee),
+percentile-aggregating the remainder, and scanning each tx's
+`accountKeys` + `loadedAddresses` for SOL transfers to the 8
+canonical Jito tip accounts. **Architectural note**: not a
+continuous daemon — runs on demand for specific event windows
+(joined to liquidation panels, oracle-update events, etc.) where
+the per-slot truth matters. Continuous daemon use stays on
+`jito_tip_floor.v1` (cheaper, still useful for ambient OEV intensity).
+
+**Schema (proposed v1):**
 ```
-slot                 u64
-block_time           i64
-prio_fee_median      u64
-prio_fee_p90         u64
-prio_fee_p99         u64
-prio_fee_max         u64
-jito_tip_median      u64 nullable
-jito_tip_p90         u64 nullable
-jito_tip_p99         u64 nullable
-jito_tip_max         u64 nullable
-n_txs                u32
-_schema_version      string
-_fetched_at          i64
-_source              string
-_dedup_key           string  (= slot)
+slot                          u64
+block_time                    i64
+n_txs                         u32  (total in block)
+n_vote_txs                    u32
+n_priority_txs                u32  (non-vote, priority_fee > 0)
+prio_fee_p50_microlamports    i64
+prio_fee_p90_microlamports    i64
+prio_fee_p99_microlamports    i64
+prio_fee_max_microlamports    i64
+prio_total_fee_p50_lamports   i64  (total priority fee paid, not per-CU)
+prio_total_fee_p90_lamports   i64
+prio_total_fee_p99_lamports   i64
+prio_total_fee_max_lamports   i64
+n_jito_tip_txs                u32
+jito_tip_p50_lamports         i64 nullable
+jito_tip_p90_lamports         i64 nullable
+jito_tip_p99_lamports         i64 nullable
+jito_tip_max_lamports         i64 nullable
+_dedup_key                    string  (= "solana_priority_fees:{slot}")
 ```
 
-**CLI.** `scry solana priority-fees --once --proxy-url URL`
+**Source.** `getBlock(slot, transactionDetails:"full",
+maxSupportedTransactionVersion:0, rewards:false)` via scryer-proxy.
+Block-walks accept skipped slots (RPC error -32007) as no-row.
+Tip accounts pulled live (never retyped) from
+`getTipAccounts` JSON-RPC at `mainnet.block-engine.jito.wtf`.
 
-**Effort.** ~3 hours.
+**Computation.**
+- Vote filter: skip txs with `Vote111111111111111111111111111111111111111`
+  in `accountKeys`
+- Per non-vote tx with `meta.computeUnitsConsumed > 0`:
+  - `priority_fee_lamports = meta.fee - 5000 * len(signatures)` (clamp ≥0)
+  - `cu_price_microlamports = priority_fee_lamports * 1_000_000 / cu`
+- Per any tx: scan accountKeys + loadedAddresses for the 8 tip
+  pubkeys; tip = `postBalances[i] - preBalances[i]` if positive.
+
+**CLI.** `scry solana priority-fees --start DATE --end DATE
+--proxy-url URL` (window of slots, not continuous).
+
+**Effort.** ~5h. Larger than the original ~3h estimate because
+block-walking + per-tx percentile + tip-account scan is materially
+more work than a single REST endpoint.
 
 ### 28. `mango_v4_liquidation.v1` + `mango_v4_oracle_config.v1` — Mango Markets v4  `[methodology-entry-needed]`
 
@@ -1740,17 +1785,64 @@ The `@pythnetwork/pyth-solana-receiver` TypeScript SDK provides the
 canonical receiver-CPI pattern; for Rust, `pyth-solana-receiver-sdk`
 (already a soothsayer-router dep this session) exposes the same.
 
-**Daemon shape.**
-1. Boot: load configured feed_id set (config file).
-2. Loop per feed (~60s cadence, configurable):
-   a. Fetch latest update from Hermes for the feed_id.
-   b. Build a Solana tx that calls Pyth receiver's `post_update` (or
-      `post_update_atomic` for the encoded-VAA shorter path).
-   c. Submit + confirm. Log tx signature + posting latency.
+**Daemon shape (cost-controlled defaults — locked 2026-04-29).**
+The naive 60s × 24/7 × 10-feed configuration costs ~$10/day on mainnet.
+For where soothsayer is today (pre-design-partner, pre-mainnet, devnet
+integration only), that's wasteful — most of the cost is bandwidth burned
+during closed-market hours when prices barely move and the soothsayer-band
+primitive serves the same regime authoritatively. The cost-controlled
+defaults below target **~$1/day mainnet at full feed coverage** and
+**$0/day during devnet integration** (devnet airdrops are free).
+
+1. Boot: load configured feed-id set + per-feed cadence policy from
+   `~/Library/Application Support/scryer/config/pyth_poster_feeds.toml`.
+   Default config:
+   - **Initial pilot feed set: SPY only** (one feed). Add other underliers
+     (QQQ, AAPL, NVDA, TSLA, MSTR, GLD, TLT, HOOD, GOOGL) on explicit
+     design-partner request, NOT by default.
+   - **Tiered cadence per feed** (cost-control core):
+     - `open_hours_cadence_secs: 60` — during NYSE regular hours
+       (Mon-Fri 14:30-21:00 UTC EST / 13:30-20:00 UTC EDT), post at 60s.
+     - `closed_hours_cadence_secs: 900` — outside regular weekday hours,
+       post at 15min (or set to `null` to skip entirely; soothsayer-band
+       handles closed regime authoritatively, so off-hours Pyth posts
+       are headroom only).
+     - `weekend_cadence_secs: null` — skip weekends entirely by default.
+   - **Optional skip-if-similar threshold (`skip_if_similar_bps`):** read
+     the existing `PriceUpdateV2` PDA before posting; if the fresh Hermes
+     value is within N bps of what's already on-chain AND the on-chain
+     publish_time is within `staleness_skip_threshold_secs` (default
+     300s), skip the post. Cuts cost during quiet periods (typical
+     equity weekend hours: 80%+ of posts skip). Default
+     `skip_if_similar_bps: 5`.
+2. Loop per feed (cadence determined by tier × current wall-clock):
+   a. Fetch latest update from Hermes for the feed_id (free; no auth).
+   b. Optionally: read existing `PriceUpdateV2` PDA. If skip-if-similar
+      passes, log + skip the post.
+   c. Otherwise: build a Solana tx that calls Pyth receiver's
+      `post_update` (or `post_update_atomic` for the encoded-VAA path
+      with smaller tx size). Submit + confirm. Log tx signature +
+      posting latency.
    d. On failure (rate-limit, congestion, etc.): exponential backoff,
       alert if cadence falls below SLA threshold.
 3. Mirror tape (parallel write to scryer parquet at
-   `dataset/pyth_poster/posts/v1/...` for audit-trail purposes).
+   `dataset/pyth_poster/posts/v1/...` for audit-trail purposes — also
+   logs *skipped* posts with `posting_signature: null` so the operator
+   can verify the skip-if-similar logic isn't dropping legitimate
+   price moves).
+
+**Cost projections (revised under tiered-cadence defaults).** Per the
+target config above, mainnet cost ranges:
+
+| Feed set | Open-hours posts/day | Closed-hours posts/day | Total/day | Cost @ SOL=$140 |
+|---|---|---|---|---|
+| SPY only (pilot) | ~390 | ~129 (M-F off-hours) + 0 (weekends) | ~519 | **~$0.36/day** |
+| SPY + QQQ + AAPL | ~1,170 | ~387 | ~1,557 | **~$1.09/day** |
+| All 10 underliers | ~3,900 | ~1,290 | ~5,190 | **~$3.63/day** |
+
+Numbers vs. the original $10/day naive ceiling: ~28× reduction at SPY-only
+pilot scale, ~3× at full coverage. Skip-if-similar at default 5bps further
+reduces during low-vol regimes; estimated 30-60% additional cut in practice.
 
 **Schema** (proposed `pyth_poster_post.v1` for the mirror tape):
 ```

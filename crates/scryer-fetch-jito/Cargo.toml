@@ -3,7 +3,7 @@ name = "scryer-fetch-jito"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Jito Block Engine bundle-attachment fetcher — REST client for mainnet.block-engine.jito.wtf. Per-call retry; no proxy (HTTP-only, single endpoint)."
+description = "Jito public-service REST clients — per-signature bundle-attachment lookups against mainnet.block-engine.jito.wtf and chain-wide tip-floor publications from bundles.jito.wtf. Per-call retry; no proxy."
 
 [lib]
 path = "src/lib.rs"
