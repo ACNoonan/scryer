@@ -17,6 +17,7 @@ use clap::{Parser, Subcommand};
 mod dexagg_cmd;
 mod import_cmd;
 mod jito_cmd;
+mod kamino_obligations_cmd;
 mod kamino_reserves_cmd;
 mod oracle_context_cmd;
 mod pool_snapshots_cmd;
@@ -171,6 +172,12 @@ enum SolanaTarget {
     /// configs (LTV / liquidation threshold / heuristic band /
     /// scope feed wiring + raw account bytes for forensic re-decode).
     KaminoReserves(kamino_reserves_cmd::ReservesArgs),
+    /// Weekly snapshot of the Klend borrower book — every Obligation
+    /// account in the configured lending market. Writes parent
+    /// (per-obligation summary) + child (per-deposit/per-borrow)
+    /// schemas to dataset/kamino/obligations/v1 and
+    /// dataset/kamino/obligation_positions/v1.
+    KaminoObligations(kamino_obligations_cmd::ObligationsArgs),
     /// Jito Block Engine bundle-attachment enrichment over an existing
     /// liquidation panel. Reads `(signature, slot, block_time)` from
     /// kamino_liquidation.v1 / jupiter_lend_liquidation.v1 parquet,
@@ -221,6 +228,7 @@ async fn main() -> Result<()> {
             SolanaTarget::KaminoScopeTape(a) => solana_cmd::run_kamino_scope_tape(a).await,
             SolanaTarget::PoolSnapshots(a) => pool_snapshots_cmd::run_pool_snapshots(a).await,
             SolanaTarget::KaminoReserves(a) => kamino_reserves_cmd::run_reserves(a).await,
+            SolanaTarget::KaminoObligations(a) => kamino_obligations_cmd::run_obligations(a).await,
             SolanaTarget::JitoBundles(a) => jito_cmd::run_jito_bundles(a).await,
             SolanaTarget::OracleContext(a) => oracle_context_cmd::run_oracle_context(a).await,
         },

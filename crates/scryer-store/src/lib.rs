@@ -552,6 +552,70 @@ pub fn read_liquidation_events(path: &Path) -> Result<Vec<LiquidationEvent>, Sto
     Ok(out)
 }
 
+/// Read `(reserve_pda, symbol, decimals)` triples from a
+/// `kamino_reserve.v1` parquet file (or directory tree). Used by the
+/// kamino-obligations CLI to build the `(reserve_pda → symbol+decimals)`
+/// resolution map for per-position rows.
+pub fn read_kamino_reserve_symbol_map(
+    path: &Path,
+) -> Result<Vec<(String, String, u8)>, StoreError> {
+    use arrow_array::{Int64Array, LargeStringArray};
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    if path.is_dir() {
+        collect_parquet_files(path, &mut files)?;
+    } else if path.exists() {
+        files.push(path.to_path_buf());
+    } else {
+        return Err(StoreError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "path does not exist"),
+        });
+    }
+
+    let mut out: Vec<(String, String, u8)> = Vec::new();
+    for file in &files {
+        let Some(reader) = open_parquet_reader(file)? else {
+            continue;
+        };
+        for batch in reader {
+            let batch = batch.map_err(parquet::errors::ParquetError::from)?;
+            let schema = batch.schema();
+            let (Some(_), Some(_), Some(_)) = (
+                schema.index_of("reserve_pda").ok(),
+                schema.index_of("symbol").ok(),
+                schema.index_of("liquidity_mint_decimals").ok(),
+            ) else {
+                continue;
+            };
+            let pda = batch
+                .column(schema.index_of("reserve_pda").unwrap())
+                .as_any()
+                .downcast_ref::<LargeStringArray>();
+            let sym = batch
+                .column(schema.index_of("symbol").unwrap())
+                .as_any()
+                .downcast_ref::<LargeStringArray>();
+            let dec = batch
+                .column(schema.index_of("liquidity_mint_decimals").unwrap())
+                .as_any()
+                .downcast_ref::<Int64Array>();
+            let (Some(pda), Some(sym), Some(dec)) = (pda, sym, dec) else {
+                continue;
+            };
+            for i in 0..batch.num_rows() {
+                let decimals = dec.value(i).clamp(0, u8::MAX as i64) as u8;
+                out.push((
+                    pda.value(i).to_string(),
+                    sym.value(i).to_string(),
+                    decimals,
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn collect_parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), StoreError> {
     let entries = std::fs::read_dir(dir).map_err(|e| StoreError::Io {
         path: dir.to_path_buf(),

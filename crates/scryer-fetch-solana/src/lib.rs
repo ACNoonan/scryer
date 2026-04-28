@@ -23,6 +23,7 @@ pub mod kamino_reserves;
 pub mod get_transactions;
 pub mod jupiter_lend_liquidations;
 pub mod kamino_liquidations;
+pub mod kamino_obligations;
 pub mod kamino_scope_tape;
 pub mod parse;
 pub mod parse_transactions;

@@ -27,6 +27,8 @@ pub mod geckoterminal;
 pub mod jito_bundles;
 pub mod jupiter_lend_liquidation;
 pub mod kamino_liquidation;
+pub mod kamino_obligation;
+pub mod kamino_obligation_position;
 pub mod kamino_reserve;
 pub mod kamino_scope;
 pub mod kraken_funding;
