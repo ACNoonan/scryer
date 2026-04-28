@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.quant-work.lvr-pipeline-once</string>
+
+    <!--
+      Python entrypoint, not bash: macOS launchd's TCC sandbox blocks
+      /bin/bash from reading scripts under ~/Documents (verified
+      2026-04-26 — exit 126 "Operation not permitted"). Python under the
+      same path works fine, mirroring the GeckoTerminal fetcher pattern.
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/Documents/quant-work/.venv/bin/python</string>
+        <string>-m</string>
+        <string>lvr.run_pipeline</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Documents/quant-work</string>
+
+    <!--
+      Fire immediately on load, then every 30 min. Avoids the local-time
+      vs UTC ambiguity of StartCalendarInterval. The runner gates on the
+      backfill PIDs and self-unloads via `launchctl bootout` after a
+      successful pipeline run, so subsequent fires are no-ops.
+    -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>1800</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/quant-work/lvr-pipeline-launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/quant-work/lvr-pipeline-launchd.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>

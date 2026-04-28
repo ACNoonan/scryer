@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soothsayer.kamino-weekly-rollup</string>
+
+    <!--
+        Run the rollup wrapper with a clean PATH so launchd's minimal
+        environment can find uv (~/.local/bin), git (/usr/bin), and any
+        homebrew-installed tools the wrapper or its children need.
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-l</string>
+        <string>/Users/adamnoonan/Documents/soothsayer/scripts/run_kamino_weekly_rollup.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Documents/soothsayer</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/adamnoonan/.local/bin:/Users/adamnoonan/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/adamnoonan</string>
+    </dict>
+
+    <!--
+        Monday at 10:30 local time. macOS launchd weekday integers:
+        0 = Sun, 1 = Mon, ..., 6 = Sat.
+        If the Mac is asleep at the scheduled time, launchd auto-runs the job
+        the next time the system wakes — exactly the recovery behavior we want.
+    -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>10</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <!-- Don't run on launchctl load. Only fire on the schedule above. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!--
+        launchd captures process stdout / stderr separately. The wrapper
+        also tee's everything to /tmp/kamino_rollup.log for a single
+        chronological record. Three logs is intentional: the .log file
+        is the canonical run history; the .stdout/.stderr files are the
+        raw process output if anything escaped tee's pipe.
+    -->
+    <key>StandardOutPath</key>
+    <string>/tmp/kamino_rollup.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/kamino_rollup.stderr.log</string>
+
+    <!--
+        If the rollup ever crashes, we don't want launchd to immediately
+        re-spawn it (default behavior for some plist shapes). One try per
+        scheduled fire is enough; the next Monday will pick it up again.
+    -->
+    <key>KeepAlive</key>
+    <false/>
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+</dict>
+</plist>

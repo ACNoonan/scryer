@@ -1,8 +1,23 @@
 # scryer launchd plists
 
-Four plists for the scryer runtime. Three are one-shot tape collectors
-re-fired on a `StartInterval`; one is the long-running JSON-RPC proxy
-under `KeepAlive`.
+This directory is the unified **runtime configuration source-of-truth**
+for everything scheduled on the data-pipeline Mac. It has three
+sub-categories:
+
+- **Top level** — scryer-fetch jobs (proxy + tape collectors). Code
+  lives in this repo.
+- **`cataloged/`** — non-fetch jobs (derivation pipelines, reports,
+  one-off cleanup) whose code lives in other repos but whose schedule
+  belongs in scryer's view of the machine. See
+  `cataloged/README.md`.
+- **`retired/`** — superseded plists, kept for migration audit.
+  See `retired/README.md`.
+
+## What's at the top level (scryer-fetch)
+
+Five plists for scryer's fetch + serve runtime. Four are one-shot
+collectors re-fired on a `StartInterval`; one is the long-running
+JSON-RPC proxy under `KeepAlive`.
 
 ## What's here
 
