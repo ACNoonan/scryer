@@ -19,6 +19,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 bs58 = "0.5"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+snap = "1"
 
 [dev-dependencies]
 wiremock = "0.6"

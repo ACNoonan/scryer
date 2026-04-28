@@ -16,6 +16,7 @@
 //! `_source = "helius:parseTransactions"`. The store layer
 //! (`scryer-store`) handles partition layout + dedup at write time.
 
+pub mod chainlink;
 pub mod error;
 pub mod fluid_vault_configs;
 pub mod get_transactions;

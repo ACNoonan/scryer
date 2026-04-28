@@ -22,4 +22,7 @@ pub enum FetchError {
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("decode error: {0}")]
+    Decode(String),
 }
