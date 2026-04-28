@@ -28,6 +28,7 @@ JSON-RPC proxy under `KeepAlive`.
 | `com.adamnoonan.scryer.redstone-tape.plist` | every 600s (10m) | nothing (REST direct) |
 | `com.adamnoonan.scryer.pyth-tape.plist` | every 60s | nothing (REST direct) |
 | `com.adamnoonan.scryer.geckoterminal-trades.plist` | every 900s (15m) | nothing (REST direct) |
+| `com.adamnoonan.scryer.v5-tape.plist` | every 60s | proxy + Helius (parseTransactions) |
 
 ## Runtime layout
 
@@ -90,7 +91,18 @@ cp ops/launchd/*.plist ~/Library/LaunchAgents/
    launchctl load ~/Library/LaunchAgents/com.adamnoonan.scryer.redstone-tape.plist
    launchctl load ~/Library/LaunchAgents/com.adamnoonan.scryer.pyth-tape.plist
    launchctl load ~/Library/LaunchAgents/com.adamnoonan.scryer.geckoterminal-trades.plist
+   launchctl load ~/Library/LaunchAgents/com.adamnoonan.scryer.v5-tape.plist
    ```
+
+   **V5 tape note**: defaults to Helius `parseTransactions` for the
+   Chainlink stage (~50s for a 15-min lookback ≈ 5000 sigs, batched).
+   When Helius's daily quota is exhausted, the tape writes 8 rows
+   per tick with `cl_err` set and Jupiter side complete. To switch
+   the V5 tape into emergency-mode proxy-routed `getTransaction`
+   (slow but quota-resilient via the other 4 providers), edit the
+   plist to add `--use-get-transaction` to ProgramArguments and
+   `unload && load`. Pair with a smaller `--lookback-secs 120` so
+   the tick fits inside the cadence.
 
 `RunAtLoad=true` on every plist, so each tape fires immediately on load
 and then every `StartInterval` seconds thereafter.

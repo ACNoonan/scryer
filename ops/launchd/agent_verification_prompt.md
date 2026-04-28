@@ -10,11 +10,18 @@ a Rust binary `scry` running under launchd. Tapes:
 | RedStone     | `com.adamnoonan.scryer.redstone-tape`     | 600s | `/Users/adamnoonan/Library/Application Support/scryer/dataset/redstone/oracle_tape/v1/` |
 | Pyth         | `com.adamnoonan.scryer.pyth-tape`         | 60s  | `/Users/adamnoonan/Library/Application Support/scryer/dataset/pyth/oracle_tape/v1/` |
 | GeckoTerminal | `com.adamnoonan.scryer.geckoterminal-trades` | 900s | `/Users/adamnoonan/Library/Application Support/scryer/dataset/geckoterminal/trades/v1/pool=<addr>/` |
+| V5 (Chainlink+Jupiter joined) | `com.adamnoonan.scryer.v5-tape` | 60s | `/Users/adamnoonan/Library/Application Support/scryer/dataset/soothsayer_v5/tape/v1/` |
 
 The proxy daemon `com.adamnoonan.scryer.proxy` must be up for
-Kamino-Scope to work (Kamino-Scope polls Solana via the proxy at
-`http://127.0.0.1:8899/rpc`). RedStone and Pyth are direct REST and
-have no proxy dependency.
+Kamino-Scope and V5 to work (both poll Solana via the proxy at
+`http://127.0.0.1:8899/rpc`). RedStone, Pyth, and GeckoTerminal are
+direct REST and have no proxy dependency.
+
+V5 also depends on Helius's `parseTransactions` (separate from the
+proxy — Helius free tier has a daily quota). If Helius is exhausted,
+V5 rows will show `cl_err` populated; this is expected behavior and
+not a regression vs the Python it replaced. The Jupiter side
+continues to work normally.
 
 **Runtime layout note.** The repo lives at
 `/Users/adamnoonan/Documents/scryer/`, but launchd-installed binaries

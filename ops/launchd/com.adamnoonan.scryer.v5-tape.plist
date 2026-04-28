@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.v5-tape</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin/scry</string>
+        <string>v5tape</string>
+        <string>tape</string>
+        <string>--source</string>
+        <string>soothsayer_v5:joined:launchd</string>
+        <string>--dataset</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/dataset</string>
+        <!--
+            Stage 2 routing: use proxy-routed getTransaction across the
+            healthy non-Helius providers (Alchemy / QuickNode / RPCFast
+            / Solana Foundation). Slower than Helius parseTransactions
+            (sequential per-sig vs batched 50-at-a-time) but
+            quota-resilient — the proxy auto-routes around exhausted
+            providers. Pair with smaller --lookback-secs so the tick
+            fits inside the 60s cadence (~120s lookback ≈ a few
+            hundred Verifier sigs, fetchable in ~20-30s).
+
+            When Helius's daily quota is healthy, you can swap back to
+            the faster parseTransactions path: drop these two flags and
+            reload the plist. The chainlink fetcher's default config
+            (use_get_transaction: false) goes through Helius.
+        -->
+        <string>--use-get-transaction</string>
+        <string>--lookback-secs</string>
+        <string>120</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/v5-tape.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/v5-tape.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SCRY_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>
