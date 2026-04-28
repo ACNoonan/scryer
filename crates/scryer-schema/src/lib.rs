@@ -41,6 +41,7 @@ pub mod nasdaq_halts;
 pub mod oracle_context;
 pub mod pool_snapshot;
 pub mod pyth;
+pub mod pyth_publisher;
 pub mod redstone;
 pub mod swap;
 pub mod trade;

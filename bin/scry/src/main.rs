@@ -24,6 +24,7 @@ mod equities_cmd;
 mod fred_cmd;
 mod loopscale_loans_cmd;
 mod oracle_context_cmd;
+mod pyth_publisher_cmd;
 mod rss_cmd;
 mod pool_snapshots_cmd;
 mod pyth_cmd;
@@ -253,6 +254,11 @@ enum SolanaTarget {
     /// variants/aggregator-routed). Writes to dataset/dex_xstock/
     /// swaps/v1/symbol={X}/year=Y/month=M/day=D.parquet.
     DexXstockSwaps(dex_xstock_swaps_cmd::DexXstockSwapsArgs),
+    /// Pyth per-publisher tape — polls Pythnet RPC's
+    /// `getMultipleAccounts` for the 32 xStock equity-feed
+    /// PriceAccounts and decodes each comp[] into one row per
+    /// (feed, publisher) tuple per poll.
+    PythPublisher(pyth_publisher_cmd::PythPublisherArgs),
     /// Jito Block Engine bundle-attachment enrichment over an existing
     /// liquidation panel. Reads `(signature, slot, block_time)` from
     /// kamino_liquidation.v1 / jupiter_lend_liquidation.v1 parquet,
@@ -306,6 +312,7 @@ async fn main() -> Result<()> {
             SolanaTarget::KaminoObligations(a) => kamino_obligations_cmd::run_obligations(a).await,
             SolanaTarget::LoopscaleLoans(a) => loopscale_loans_cmd::run_loopscale_loans(a).await,
             SolanaTarget::DexXstockSwaps(a) => dex_xstock_swaps_cmd::run_dex_xstock_swaps(a).await,
+            SolanaTarget::PythPublisher(a) => pyth_publisher_cmd::run_pyth_publisher(a).await,
             SolanaTarget::JitoBundles(a) => jito_cmd::run_jito_bundles(a).await,
             SolanaTarget::OracleContext(a) => oracle_context_cmd::run_oracle_context(a).await,
         },

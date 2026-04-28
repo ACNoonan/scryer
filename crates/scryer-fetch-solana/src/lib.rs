@@ -26,6 +26,7 @@ pub mod jupiter_lend_liquidations;
 pub mod kamino_liquidations;
 pub mod kamino_obligations;
 pub mod kamino_scope_tape;
+pub mod pyth_publisher;
 pub mod loopscale_loans;
 pub mod parse;
 pub mod parse_transactions;

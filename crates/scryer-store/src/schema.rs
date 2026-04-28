@@ -25,8 +25,8 @@ use scryer_schema::{
     backed, dex_xstock_swaps, earnings, fluid_vault_config, fred_macro, geckoterminal,
     jito_bundles, jupiter_lend_liquidation, kamino_liquidation, kamino_obligation,
     kamino_obligation_position, kamino_reserve, kamino_scope, kraken_funding, loopscale_loan,
-    loopscale_loan_collateral, nasdaq_halts, oracle_context, pool_snapshot, pyth, redstone, swap,
-    trade, v5_tape, yahoo, FromArrowError,
+    loopscale_loan_collateral, nasdaq_halts, oracle_context, pool_snapshot, pyth, pyth_publisher,
+    redstone, swap, trade, v5_tape, yahoo, FromArrowError,
 };
 
 /// Time granularity of a dataset's partitioning. Each schema picks
@@ -147,6 +147,31 @@ impl DatasetSchema for kamino_scope::v1::Reading {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         kamino_scope::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for pyth_publisher::v1::Submission {
+    const DATA_TYPE: &'static str = "publisher_tape";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("symbol");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        // Use observation_unix_ts when set; else fall back to
+        // _fetched_at (early Pythnet snapshots may emit 0 here).
+        if self.observation_unix_ts > 0 {
+            self.observation_unix_ts
+        } else {
+            self.meta.fetched_at
+        }
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        pyth_publisher::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        pyth_publisher::v1::from_record_batch(batch)
     }
 }
 
