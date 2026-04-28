@@ -22,6 +22,7 @@
 pub mod backed;
 pub mod cme_intraday_1m;
 pub mod dex_xstock_swaps;
+pub mod drift_liquidation;
 pub mod earnings;
 pub mod error;
 pub mod fluid_vault_config;

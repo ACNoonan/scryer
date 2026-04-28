@@ -21,6 +21,7 @@ mod kamino_obligations_cmd;
 mod kamino_reserves_cmd;
 mod databento_cmd;
 mod dex_xstock_swaps_cmd;
+mod drift_liquidations_cmd;
 mod equities_cmd;
 mod fred_cmd;
 mod loopscale_loans_cmd;
@@ -273,6 +274,11 @@ enum SolanaTarget {
     /// schemas to dataset/loopscale/loans/v1 and
     /// dataset/loopscale/loan_collaterals/v1.
     LoopscaleLoans(loopscale_loans_cmd::LoopscaleLoansArgs),
+    /// Drift Protocol liquidation events panel — perp / spot /
+    /// perp_with_fill / perp_bankruptcy / spot_bankruptcy IXes
+    /// decoded into one row per matching IX. Writes to
+    /// dataset/drift/liquidations/v1/year=Y/month=M/day=D.parquet.
+    DriftLiquidations(drift_liquidations_cmd::DriftLiquidationsArgs),
     /// Cross-DEX xStock swap prints. Vault-delta extraction across
     /// every DEX touching xStock mints (Orca/Meteora/Phoenix/Raydium
     /// variants/aggregator-routed). Writes to dataset/dex_xstock/
@@ -335,6 +341,7 @@ async fn main() -> Result<()> {
             SolanaTarget::KaminoReserves(a) => kamino_reserves_cmd::run_reserves(a).await,
             SolanaTarget::KaminoObligations(a) => kamino_obligations_cmd::run_obligations(a).await,
             SolanaTarget::LoopscaleLoans(a) => loopscale_loans_cmd::run_loopscale_loans(a).await,
+            SolanaTarget::DriftLiquidations(a) => drift_liquidations_cmd::run_drift_liquidations(a).await,
             SolanaTarget::DexXstockSwaps(a) => dex_xstock_swaps_cmd::run_dex_xstock_swaps(a).await,
             SolanaTarget::PythPublisher(a) => pyth_publisher_cmd::run_pyth_publisher(a).await,
             SolanaTarget::JitoBundles(a) => jito_cmd::run_jito_bundles(a).await,

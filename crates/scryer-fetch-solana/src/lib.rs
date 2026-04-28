@@ -18,6 +18,7 @@
 
 pub mod chainlink;
 pub mod dex_xstock_swaps;
+pub mod drift_liquidations;
 pub mod error;
 pub mod fluid_vault_configs;
 pub mod kamino_reserves;

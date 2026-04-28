@@ -63,6 +63,7 @@ pub mod venue {
     pub const NASDAQ: &str = "nasdaq";
     pub const KAMINO: &str = "kamino";
     pub const JUPITER_LEND: &str = "jupiter_lend";
+    pub const DRIFT: &str = "drift";
     pub const GECKOTERMINAL: &str = "geckoterminal";
     pub const JITO: &str = "jito";
     pub const LOOPSCALE: &str = "loopscale";
