@@ -28,6 +28,7 @@ pub struct Metrics {
     pub provider_height: IntGaugeVec,
 
     pub probes_total: IntCounter,
+    pub probes_skipped_quarantined_total: IntCounterVec,
     pub probe_duration_seconds: Histogram,
 }
 
@@ -104,6 +105,13 @@ impl Metrics {
             "scryer_proxy_probes_total",
             "Health probes issued.",
         ))?;
+        let probes_skipped_quarantined_total = IntCounterVec::new(
+            Opts::new(
+                "scryer_proxy_probes_skipped_quarantined_total",
+                "Health probes skipped because the provider is still in its quarantine window.",
+            ),
+            &["provider"],
+        )?;
         let probe_duration_seconds = Histogram::with_opts(HistogramOpts::new(
             "scryer_proxy_probe_duration_seconds",
             "Health probe latency.",
@@ -119,6 +127,7 @@ impl Metrics {
         registry.register(Box::new(provider_consecutive_failures.clone()))?;
         registry.register(Box::new(provider_height.clone()))?;
         registry.register(Box::new(probes_total.clone()))?;
+        registry.register(Box::new(probes_skipped_quarantined_total.clone()))?;
         registry.register(Box::new(probe_duration_seconds.clone()))?;
 
         Ok(Self {
@@ -133,6 +142,7 @@ impl Metrics {
             provider_consecutive_failures,
             provider_height,
             probes_total,
+            probes_skipped_quarantined_total,
             probe_duration_seconds,
         })
     }

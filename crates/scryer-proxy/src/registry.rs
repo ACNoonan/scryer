@@ -314,6 +314,57 @@ mod tests {
         assert!(matches!(err, InitError::MissingEnv(_)));
     }
 
+    fn make_provider(name: &str) -> ProviderState {
+        ProviderState::new(ProviderConfig {
+            name: name.into(),
+            url: "https://x.example".into(),
+            weight: 1,
+            headers: vec![],
+            tags: vec![],
+            ws_url: None,
+            quota: None,
+        })
+    }
+
+    #[test]
+    fn record_exhausted_quarantines_for_cooldown() {
+        let p = make_provider("Helius");
+        assert!(!p.is_quarantined());
+        p.record_exhausted(60);
+        assert!(p.is_quarantined());
+        assert_eq!(p.quota_state(), QuotaState::Exhausted);
+        assert!(!p.is_healthy());
+    }
+
+    #[test]
+    fn exhausted_provider_clears_after_cooldown() {
+        let p = make_provider("Helius");
+        // 0-second cooldown: quarantine_until is set to "now" so the
+        // window closes immediately and `is_quarantined()` flips back
+        // to false on the next clock-tick. Avoids needing tokio::time
+        // mock infrastructure for what is fundamentally a comparison
+        // against `unix_ms_now()`.
+        p.record_exhausted(0);
+        // sleep 5ms: well under any reasonable cooldown but past the
+        // moment "now" was captured inside record_exhausted.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(
+            !p.is_quarantined(),
+            "0-second cooldown should let is_quarantined() return false after the window passes"
+        );
+    }
+
+    #[test]
+    fn record_failure_quarantines_after_three_consecutive() {
+        let p = make_provider("a");
+        assert_eq!(p.record_failure(), 1);
+        assert!(!p.is_quarantined(), "1 failure should not quarantine yet");
+        assert_eq!(p.record_failure(), 2);
+        assert!(!p.is_quarantined(), "2 failures should not quarantine yet");
+        assert_eq!(p.record_failure(), 3);
+        assert!(p.is_quarantined(), "3 failures should quarantine");
+    }
+
     #[test]
     fn provider_score_inversely_weights_latency() {
         let a = ProviderConfig {

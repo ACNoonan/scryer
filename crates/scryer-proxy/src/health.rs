@@ -47,6 +47,21 @@ pub fn spawn_loop(
         loop {
             ticker.tick().await;
             for provider in &registry.providers {
+                // Skip probes for providers still inside their
+                // quarantine window. The quarantine_until time is what
+                // governs when we re-probe to test recovery — for
+                // exhausted providers that's the configured cooldown
+                // (typically 24h), for transient failures it's the
+                // exponential backoff schedule. Probing during the
+                // window just burns API calls + log lines without
+                // changing state.
+                if provider.is_quarantined() {
+                    metrics
+                        .probes_skipped_quarantined_total
+                        .with_label_values(&[provider.name()])
+                        .inc();
+                    continue;
+                }
                 let p = provider.clone();
                 let chain = chain.clone();
                 let client = client.clone();
@@ -67,6 +82,16 @@ pub async fn probe_one(
     metrics: &Metrics,
     quota_exhausted_cooldown: Duration,
 ) {
+    // Defensive: spawn_loop already filters quarantined providers, but
+    // direct callers (tests, future on-demand probes) hit the same
+    // wasted-probe path. Mirror the skip here.
+    if provider.is_quarantined() {
+        metrics
+            .probes_skipped_quarantined_total
+            .with_label_values(&[provider.name()])
+            .inc();
+        return;
+    }
     metrics.probes_total.inc();
     let payload = json!({
         "jsonrpc": "2.0",
