@@ -1,0 +1,312 @@
+//! `scry equities bars` + `scry equities earnings` — equity market-data
+//! fetchers. Stooq for OHLCV daily bars, Finnhub for earnings dates.
+//!
+//! Replaces soothsayer's `scripts/run_v1_scrape.py`. Forward-running
+//! cadence is wrapped externally by launchd (typical: daily after
+//! US market close).
+//!
+//! Bars: per-symbol OHLCV daily bars over an arbitrary window,
+//! written to `dataset/yahoo/equities_daily/v1/symbol={X}/year=YYYY.parquet`
+//! (Yearly + symbol-keyed, per the existing `yahoo.v1` schema; the
+//! schema name + venue path are historical from soothsayer's yfinance
+//! era).
+//!
+//! Earnings: per-symbol upcoming + recent earnings dates, written to
+//! `dataset/yahoo/earnings/v1/symbol={X}/year=YYYY.parquet`.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use chrono::Utc;
+use clap::Parser;
+use scryer_fetch_equities::{
+    finnhub, stooq, PollConfig, FetchError as EqFetchError,
+};
+use scryer_schema::{earnings, yahoo, Meta};
+use scryer_store::{venue, Dataset};
+
+#[derive(Parser, Debug)]
+pub struct BarsArgs {
+    /// Comma-separated tickers in soothsayer/yfinance convention; the
+    /// fetcher maps to Stooq syntax (`SPY` → `spy.us`, `ES=F` → `es.f`,
+    /// `^VIX` → `^vix`, `BTC-USD` → `btcusd`). For Paper-1 parity use
+    /// `SPY,QQQ,AAPL,GOOGL,NVDA,TSLA,HOOD,MSTR,GLD,TLT,ES=F,NQ=F,GC=F,ZN=F,^VIX,BTC-USD`.
+    /// (^GVZ and ^MOVE are not on Stooq — fetcher will surface them
+    /// as upstream errors; consumers can ignore.)
+    #[arg(long, value_delimiter = ',', required = true)]
+    symbols: Vec<String>,
+    /// Window start as `YYYY-MM-DD` UTC.
+    #[arg(long)]
+    start: String,
+    /// Window end as `YYYY-MM-DD` UTC.
+    #[arg(long)]
+    end: String,
+    /// Stooq API key. Free, captcha-acquired at
+    /// `https://stooq.com/q/d/?s=spy.us&get_apikey`. Defaults to the
+    /// `STOOQ_APIKEY` env var.
+    #[arg(long, env = "STOOQ_APIKEY")]
+    apikey: String,
+    /// `_source` stamped on every emitted row.
+    #[arg(long, default_value = "stooq:csv")]
+    source: String,
+    /// Stooq base URL.
+    #[arg(long, default_value = stooq::DEFAULT_BASE_URL)]
+    base_url: String,
+    #[arg(long, default_value_t = 30)]
+    request_timeout_secs: u64,
+    #[arg(long, default_value_t = 3)]
+    retry_max: u32,
+    #[arg(long, default_value_t = 2)]
+    retry_delay_secs: u64,
+    /// Delay between successive symbol calls in milliseconds. Stooq
+    /// has a daily-hits limit on free tier; the default is gentle.
+    #[arg(long, default_value_t = 500)]
+    rate_limit_ms: u64,
+    #[arg(long, default_value = "./dataset")]
+    dataset: PathBuf,
+    #[arg(long, default_value = venue::YAHOO)]
+    venue: String,
+}
+
+#[derive(Parser, Debug)]
+pub struct EarningsArgs {
+    /// Comma-separated tickers — typically only the equity underliers
+    /// (SPY/QQQ are ETFs and have no earnings; futures and crypto
+    /// also have none). Finnhub returns empty for non-equity symbols
+    /// without erroring.
+    #[arg(long, value_delimiter = ',', required = true)]
+    symbols: Vec<String>,
+    /// Window start as `YYYY-MM-DD` UTC. Defaults to 30 days ago.
+    #[arg(long, default_value = "")]
+    from: String,
+    /// Window end as `YYYY-MM-DD` UTC. Defaults to 90 days ahead
+    /// (free tier covers ~1y forward).
+    #[arg(long, default_value = "")]
+    to: String,
+    /// Finnhub API token. Defaults to the `FINNHUB_TOKEN` env var.
+    #[arg(long, env = "FINNHUB_TOKEN")]
+    token: String,
+    #[arg(long, default_value = "finnhub:earnings")]
+    source: String,
+    #[arg(long, default_value = finnhub::DEFAULT_BASE_URL)]
+    base_url: String,
+    #[arg(long, default_value_t = 30)]
+    request_timeout_secs: u64,
+    #[arg(long, default_value_t = 3)]
+    retry_max: u32,
+    #[arg(long, default_value_t = 2)]
+    retry_delay_secs: u64,
+    /// Delay between successive symbol calls. Finnhub free tier is
+    /// 60 calls/min — default 1100ms keeps us safely under.
+    #[arg(long, default_value_t = 1100)]
+    rate_limit_ms: u64,
+    #[arg(long, default_value = "./dataset")]
+    dataset: PathBuf,
+    #[arg(long, default_value = venue::YAHOO)]
+    venue: String,
+}
+
+pub async fn run_bars(args: BarsArgs) -> Result<()> {
+    if args.apikey.is_empty() {
+        anyhow::bail!(
+            "Stooq apikey required; pass --apikey or set STOOQ_APIKEY env var. Acquire one at https://stooq.com/q/d/?s=spy.us&get_apikey"
+        );
+    }
+    let cfg = PollConfig {
+        request_timeout: Duration::from_secs(args.request_timeout_secs),
+        retry_max: args.retry_max,
+        retry_delay: Duration::from_secs(args.retry_delay_secs),
+        source_label: args.source.clone(),
+        ..Default::default()
+    };
+    let client = reqwest::Client::builder()
+        .timeout(cfg.request_timeout)
+        .user_agent(cfg.user_agent.clone())
+        .build()
+        .context("building reqwest client")?;
+
+    let now = Utc::now();
+    let meta = Meta::new(yahoo::v1::SCHEMA_VERSION, now.timestamp(), &args.source);
+
+    tracing::info!(
+        symbols = args.symbols.len(),
+        start = args.start,
+        end = args.end,
+        "fetching Stooq bars"
+    );
+
+    let mut by_symbol: BTreeMap<String, Vec<yahoo::v1::Bar>> = BTreeMap::new();
+    let mut errors: Vec<(String, String)> = Vec::new();
+    for symbol in &args.symbols {
+        match stooq::fetch_bars(
+            &client,
+            &cfg,
+            &args.base_url,
+            &args.apikey,
+            symbol,
+            &args.start,
+            &args.end,
+            &meta,
+        )
+        .await
+        {
+            Ok(bars) => {
+                tracing::info!(symbol, rows = bars.len(), "decoded");
+                by_symbol.entry(symbol.clone()).or_default().extend(bars);
+            }
+            Err(e) => {
+                tracing::warn!(symbol, error = %e, "fetch failed; continuing");
+                errors.push((symbol.clone(), format_eq_error(&e)));
+            }
+        }
+        if args.rate_limit_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(args.rate_limit_ms)).await;
+        }
+    }
+
+    if by_symbol.values().all(|v| v.is_empty()) {
+        if !errors.is_empty() {
+            anyhow::bail!(
+                "all {} symbol(s) failed; first error: {}",
+                errors.len(),
+                errors.first().map(|(_, e)| e.as_str()).unwrap_or("?")
+            );
+        }
+        println!("equities bars: rows_added=0 rows_deduped=0 partitions_written=0 (empty)");
+        return Ok(());
+    }
+
+    let ds = Dataset::new(&args.dataset);
+    let mut total_added = 0usize;
+    let mut total_deduped = 0usize;
+    let mut total_partitions = 0usize;
+    for (symbol, bars) in &by_symbol {
+        if bars.is_empty() {
+            continue;
+        }
+        let stats = ds
+            .write::<yahoo::v1::Bar>(&args.venue, Some(symbol), bars)
+            .with_context(|| format!("Dataset::write yahoo bars for {symbol}"))?;
+        total_added += stats.rows_added;
+        total_deduped += stats.rows_deduped;
+        total_partitions += stats.partitions_written;
+    }
+    println!(
+        "equities bars: rows_added={} rows_deduped={} partitions_written={} symbols_failed={}",
+        total_added,
+        total_deduped,
+        total_partitions,
+        errors.len()
+    );
+    Ok(())
+}
+
+pub async fn run_earnings(args: EarningsArgs) -> Result<()> {
+    if args.token.is_empty() {
+        anyhow::bail!("Finnhub token required; pass --token or set FINNHUB_TOKEN env var");
+    }
+    let cfg = PollConfig {
+        request_timeout: Duration::from_secs(args.request_timeout_secs),
+        retry_max: args.retry_max,
+        retry_delay: Duration::from_secs(args.retry_delay_secs),
+        source_label: args.source.clone(),
+        ..Default::default()
+    };
+    let client = reqwest::Client::builder()
+        .timeout(cfg.request_timeout)
+        .user_agent(cfg.user_agent.clone())
+        .build()
+        .context("building reqwest client")?;
+
+    let now = Utc::now();
+    let from = if args.from.is_empty() {
+        (now - chrono::Duration::days(30)).format("%Y-%m-%d").to_string()
+    } else {
+        args.from.clone()
+    };
+    let to = if args.to.is_empty() {
+        (now + chrono::Duration::days(90)).format("%Y-%m-%d").to_string()
+    } else {
+        args.to.clone()
+    };
+    let meta = Meta::new(earnings::v1::SCHEMA_VERSION, now.timestamp(), &args.source);
+
+    tracing::info!(
+        symbols = args.symbols.len(),
+        from = from,
+        to = to,
+        "fetching Finnhub earnings"
+    );
+
+    let mut by_symbol: BTreeMap<String, Vec<earnings::v1::Event>> = BTreeMap::new();
+    let mut errors: Vec<(String, String)> = Vec::new();
+    let mut symbols_with_earnings: usize = 0;
+    for symbol in &args.symbols {
+        match finnhub::fetch_earnings(
+            &client,
+            &cfg,
+            &args.base_url,
+            &args.token,
+            symbol,
+            &from,
+            &to,
+            &meta,
+        )
+        .await
+        {
+            Ok(events) => {
+                if !events.is_empty() {
+                    symbols_with_earnings += 1;
+                }
+                tracing::info!(symbol, rows = events.len(), "decoded");
+                by_symbol.entry(symbol.clone()).or_default().extend(events);
+            }
+            Err(e) => {
+                tracing::warn!(symbol, error = %e, "fetch failed; continuing");
+                errors.push((symbol.clone(), format_eq_error(&e)));
+            }
+        }
+        if args.rate_limit_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(args.rate_limit_ms)).await;
+        }
+    }
+
+    if by_symbol.values().all(|v| v.is_empty()) {
+        println!(
+            "equities earnings: rows_added=0 partitions_written=0 symbols_with_earnings=0 symbols_failed={}",
+            errors.len()
+        );
+        return Ok(());
+    }
+
+    let ds = Dataset::new(&args.dataset);
+    let mut total_added = 0usize;
+    let mut total_deduped = 0usize;
+    let mut total_partitions = 0usize;
+    for (symbol, events) in &by_symbol {
+        if events.is_empty() {
+            continue;
+        }
+        let stats = ds
+            .write::<earnings::v1::Event>(&args.venue, Some(symbol), events)
+            .with_context(|| format!("Dataset::write yahoo earnings for {symbol}"))?;
+        total_added += stats.rows_added;
+        total_deduped += stats.rows_deduped;
+        total_partitions += stats.partitions_written;
+    }
+    println!(
+        "equities earnings: rows_added={} rows_deduped={} partitions_written={} symbols_with_earnings={} symbols_failed={}",
+        total_added,
+        total_deduped,
+        total_partitions,
+        symbols_with_earnings,
+        errors.len()
+    );
+    Ok(())
+}
+
+fn format_eq_error(e: &EqFetchError) -> String {
+    e.to_string()
+}

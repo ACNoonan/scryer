@@ -19,6 +19,7 @@ mod import_cmd;
 mod jito_cmd;
 mod kamino_obligations_cmd;
 mod kamino_reserves_cmd;
+mod equities_cmd;
 mod loopscale_loans_cmd;
 mod oracle_context_cmd;
 mod pool_snapshots_cmd;
@@ -49,6 +50,11 @@ enum Command {
     /// Soothsayer V5 tape — joined Chainlink + Jupiter observation
     /// per xStock per poll iteration. Soothsayer-experiment scope.
     V5tape(V5tapeCmd),
+    /// Equity market-data fetchers (REST, no proxy). Stooq for OHLCV
+    /// daily bars, Finnhub for the earnings calendar. Pivoted from
+    /// Yahoo Finance to escape its bot-detection treadmill; replaces
+    /// soothsayer's `run_v1_scrape.py`.
+    Equities(EquitiesCmd),
 }
 
 #[derive(Parser, Debug)]
@@ -112,6 +118,24 @@ struct DexaggCmd {
 struct V5tapeCmd {
     #[command(subcommand)]
     target: V5tapeTarget,
+}
+
+#[derive(Parser, Debug)]
+struct EquitiesCmd {
+    #[command(subcommand)]
+    target: EquitiesTarget,
+}
+
+#[derive(Subcommand, Debug)]
+enum EquitiesTarget {
+    /// Daily OHLCV bars from Stooq across the requested symbols +
+    /// window. Writes one yearly parquet per symbol under
+    /// dataset/yahoo/equities_daily/v1/ (the venue path retains the
+    /// historical `yahoo` name for parquet-layout backward compat).
+    Bars(equities_cmd::BarsArgs),
+    /// Earnings dates from Finnhub per symbol. Writes one yearly
+    /// parquet per symbol under dataset/yahoo/earnings/v1/.
+    Earnings(equities_cmd::EarningsArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -250,6 +274,10 @@ async fn main() -> Result<()> {
         },
         Command::V5tape(c) => match c.target {
             V5tapeTarget::Tape(a) => v5_cmd::run_tape(a).await,
+        },
+        Command::Equities(c) => match c.target {
+            EquitiesTarget::Bars(a) => equities_cmd::run_bars(a).await,
+            EquitiesTarget::Earnings(a) => equities_cmd::run_earnings(a).await,
         },
     }
 }
