@@ -23,8 +23,8 @@ use arrow_array::RecordBatch;
 use arrow_schema::ArrowError;
 use scryer_schema::{
     backed, earnings, fluid_vault_config, geckoterminal, jupiter_lend_liquidation,
-    kamino_liquidation, kamino_scope, kraken_funding, nasdaq_halts, pool_snapshot, pyth, redstone,
-    swap, trade, v5_tape, yahoo, FromArrowError,
+    kamino_liquidation, kamino_reserve, kamino_scope, kraken_funding, nasdaq_halts, pool_snapshot,
+    pyth, redstone, swap, trade, v5_tape, yahoo, FromArrowError,
 };
 
 /// Time granularity of a dataset's partitioning. Each schema picks
@@ -369,6 +369,31 @@ impl DatasetSchema for geckoterminal::v1::Trade {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         geckoterminal::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for kamino_reserve::v1::Reserve {
+    const DATA_TYPE: &'static str = "reserves";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    /// Reserve config rarely changes (Kamino governance is the only
+    /// mutator). Yearly partitioning gives 1-N snapshots / year /
+    /// reserve, comfortably small per-file.
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Yearly;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        // Snapshot data — partition by `_fetched_at` year (when we
+        // observed the on-chain state), same convention as
+        // `fluid_vault_config`.
+        self.meta.fetched_at
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        kamino_reserve::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        kamino_reserve::v1::from_record_batch(batch)
     }
 }
 

@@ -26,6 +26,7 @@ pub mod fluid_vault_config;
 pub mod geckoterminal;
 pub mod jupiter_lend_liquidation;
 pub mod kamino_liquidation;
+pub mod kamino_reserve;
 pub mod kamino_scope;
 pub mod kraken_funding;
 pub mod meta;

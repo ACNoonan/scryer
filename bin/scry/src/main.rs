@@ -16,6 +16,7 @@ use clap::{Parser, Subcommand};
 
 mod dexagg_cmd;
 mod import_cmd;
+mod kamino_reserves_cmd;
 mod pool_snapshots_cmd;
 mod pyth_cmd;
 mod redstone_cmd;
@@ -164,6 +165,10 @@ enum SolanaTarget {
     /// fetches each tx's `preTokenBalances` via proxy-routed
     /// `getTransaction(jsonParsed)`.
     PoolSnapshots(pool_snapshots_cmd::PoolSnapshotsArgs),
+    /// One-shot snapshot of Kamino Klend xStock Reserve account
+    /// configs (LTV / liquidation threshold / heuristic band /
+    /// scope feed wiring + raw account bytes for forensic re-decode).
+    KaminoReserves(kamino_reserves_cmd::ReservesArgs),
 }
 
 #[tokio::main]
@@ -201,6 +206,7 @@ async fn main() -> Result<()> {
             SolanaTarget::FluidVaultConfigs(a) => solana_cmd::run_fluid_vault_configs(a).await,
             SolanaTarget::KaminoScopeTape(a) => solana_cmd::run_kamino_scope_tape(a).await,
             SolanaTarget::PoolSnapshots(a) => pool_snapshots_cmd::run_pool_snapshots(a).await,
+            SolanaTarget::KaminoReserves(a) => kamino_reserves_cmd::run_reserves(a).await,
         },
         Command::Redstone(c) => match c.target {
             RedstoneTarget::Tape(a) => redstone_cmd::run_tape(a).await,
