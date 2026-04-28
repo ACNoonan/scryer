@@ -40,7 +40,7 @@ pub async fn fetch_earnings(
 ) -> Result<Vec<Event>, FetchError> {
     if token.is_empty() {
         return Err(FetchError::UpstreamError(
-            "finnhub token is empty; pass --token or set FINNHUB_TOKEN env var".to_string(),
+            "finnhub api key is empty; pass --token or set FINNHUB_API_KEY env var".to_string(),
         ));
     }
     let url = format!(

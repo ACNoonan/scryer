@@ -49,7 +49,7 @@ pub async fn fetch_bars(
 ) -> Result<Vec<Bar>, FetchError> {
     if apikey.is_empty() {
         return Err(FetchError::UpstreamError(
-            "stooq apikey is empty; pass --apikey or set STOOQ_APIKEY env var".to_string(),
+            "stooq apikey is empty; pass --apikey or set STOOQ_API_KEY env var".to_string(),
         ));
     }
     let stooq_symbol = symbol_to_stooq(symbol);

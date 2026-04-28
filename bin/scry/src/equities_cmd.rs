@@ -45,8 +45,8 @@ pub struct BarsArgs {
     end: String,
     /// Stooq API key. Free, captcha-acquired at
     /// `https://stooq.com/q/d/?s=spy.us&get_apikey`. Defaults to the
-    /// `STOOQ_APIKEY` env var.
-    #[arg(long, env = "STOOQ_APIKEY")]
+    /// `STOOQ_API_KEY` env var (loaded from `./.env` via dotenvy).
+    #[arg(long, env = "STOOQ_API_KEY")]
     apikey: String,
     /// `_source` stamped on every emitted row.
     #[arg(long, default_value = "stooq:csv")]
@@ -85,8 +85,9 @@ pub struct EarningsArgs {
     /// (free tier covers ~1y forward).
     #[arg(long, default_value = "")]
     to: String,
-    /// Finnhub API token. Defaults to the `FINNHUB_TOKEN` env var.
-    #[arg(long, env = "FINNHUB_TOKEN")]
+    /// Finnhub API key. Defaults to the `FINNHUB_API_KEY` env var
+    /// (loaded from `./.env` via dotenvy).
+    #[arg(long, env = "FINNHUB_API_KEY")]
     token: String,
     #[arg(long, default_value = "finnhub:earnings")]
     source: String,
@@ -111,7 +112,7 @@ pub struct EarningsArgs {
 pub async fn run_bars(args: BarsArgs) -> Result<()> {
     if args.apikey.is_empty() {
         anyhow::bail!(
-            "Stooq apikey required; pass --apikey or set STOOQ_APIKEY env var. Acquire one at https://stooq.com/q/d/?s=spy.us&get_apikey"
+            "Stooq apikey required; pass --apikey or set STOOQ_API_KEY env var. Acquire one at https://stooq.com/q/d/?s=spy.us&get_apikey"
         );
     }
     let cfg = PollConfig {
@@ -205,7 +206,7 @@ pub async fn run_bars(args: BarsArgs) -> Result<()> {
 
 pub async fn run_earnings(args: EarningsArgs) -> Result<()> {
     if args.token.is_empty() {
-        anyhow::bail!("Finnhub token required; pass --token or set FINNHUB_TOKEN env var");
+        anyhow::bail!("Finnhub api key required; pass --token or set FINNHUB_API_KEY env var");
     }
     let cfg = PollConfig {
         request_timeout: Duration::from_secs(args.request_timeout_secs),
