@@ -23,6 +23,7 @@ pub mod backed;
 pub mod earnings;
 pub mod error;
 pub mod kamino_scope;
+pub mod kraken_funding;
 pub mod meta;
 pub mod nasdaq_halts;
 pub mod pyth;

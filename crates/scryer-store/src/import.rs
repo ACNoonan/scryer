@@ -21,6 +21,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use scryer_schema::backed::v1 as backed_v1;
 use scryer_schema::earnings::v1 as earnings_v1;
 use scryer_schema::kamino_scope::v1 as kamino_scope_v1;
+use scryer_schema::kraken_funding::v1 as kraken_funding_v1;
 use scryer_schema::nasdaq_halts::v1 as nasdaq_halts_v1;
 use scryer_schema::pyth::v1 as pyth_v1;
 use scryer_schema::redstone::v1 as redstone_v1;
@@ -122,6 +123,17 @@ pub fn read_legacy_pyth_parquet(
     opts: &ImportOptions,
 ) -> Result<Vec<pyth_v1::Reading>, StoreError> {
     read_legacy_parquet(path, opts, extract_pyth)
+}
+
+/// Read Kraken Pro Futures funding-rate observations from one of
+/// the existing soothsayer `data/raw/kraken_funding_*.parquet`
+/// cache files. Required columns: `symbol`, `ts`
+/// (Timestamp[us, UTC]), `funding_rate`, `relative_funding_rate`.
+pub fn read_legacy_kraken_funding_parquet(
+    path: &Path,
+    opts: &ImportOptions,
+) -> Result<Vec<kraken_funding_v1::Rate>, StoreError> {
+    read_legacy_parquet(path, opts, extract_kraken_funding)
 }
 
 /// Read Nasdaq Trader RSS halt entries from the existing soothsayer
@@ -395,6 +407,32 @@ fn extract_pyth(
             pyth_err,
             meta: Meta::new(
                 pyth_v1::SCHEMA_VERSION,
+                opts.fetched_at,
+                opts.source_label.clone(),
+            ),
+        });
+    }
+    Ok(out)
+}
+
+fn extract_kraken_funding(
+    batch: &RecordBatch,
+    opts: &ImportOptions,
+) -> Result<Vec<kraken_funding_v1::Rate>, StoreError> {
+    let symbol = string_column(batch, "symbol")?;
+    let ts = downcast::<TimestampMicrosecondArray>(batch, "ts")?;
+    let funding_rate = downcast::<Float64Array>(batch, "funding_rate")?;
+    let relative_funding_rate = downcast::<Float64Array>(batch, "relative_funding_rate")?;
+
+    let mut out = Vec::with_capacity(batch.num_rows());
+    for i in 0..batch.num_rows() {
+        out.push(kraken_funding_v1::Rate {
+            symbol: symbol.value(i),
+            ts: ts.value(i),
+            funding_rate: funding_rate.value(i),
+            relative_funding_rate: relative_funding_rate.value(i),
+            meta: Meta::new(
+                kraken_funding_v1::SCHEMA_VERSION,
                 opts.fetched_at,
                 opts.source_label.clone(),
             ),

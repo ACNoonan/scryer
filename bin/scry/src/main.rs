@@ -61,6 +61,8 @@ enum ImportTarget {
     Backed(import_cmd::BackedArgs),
     /// Import nasdaq_halts.v1 RSS-halt parquet (soothsayer/data/processed/nasdaq_halts_live.parquet).
     NasdaqHalts(import_cmd::NasdaqHaltsArgs),
+    /// Import kraken_funding.v1 funding-rate parquet(s) (soothsayer/data/raw/kraken_funding_*.parquet).
+    KrakenFunding(import_cmd::KrakenFundingArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -97,6 +99,7 @@ async fn main() -> Result<()> {
             ImportTarget::Earnings(a) => import_cmd::run_earnings(a).await,
             ImportTarget::Backed(a) => import_cmd::run_backed(a).await,
             ImportTarget::NasdaqHalts(a) => import_cmd::run_nasdaq_halts(a).await,
+            ImportTarget::KrakenFunding(a) => import_cmd::run_kraken_funding(a).await,
         },
         Command::Solana(c) => match c.target {
             SolanaTarget::Swaps(a) => solana_cmd::run_swaps(a).await,

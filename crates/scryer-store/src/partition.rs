@@ -91,3 +91,42 @@ pub fn partition_path_keyed_yearly(
         .join(format!("{}={}", key_prefix, key_value))
         .join(format!("year={:04}.parquet", year))
 }
+
+/// Resolve the absolute partition file path for a monthly-keyed
+/// dataset (Phase 15+, e.g. Kraken Pro Futures funding rates).
+/// Layout matches the methodology log's "monthly-keyed periodic
+/// data" form:
+/// `{venue}/{data_type}/v{N}/{prefix}={value}/year=YYYY/month=MM.parquet`.
+pub fn partition_path_keyed_monthly(
+    root: &Path,
+    venue: &str,
+    data_type: &str,
+    schema_major: u32,
+    key_prefix: &str,
+    key_value: &str,
+    year: i32,
+    month: u32,
+) -> PathBuf {
+    root.join(venue)
+        .join(data_type)
+        .join(format!("v{}", schema_major))
+        .join(format!("{}={}", key_prefix, key_value))
+        .join(format!("year={:04}", year))
+        .join(format!("month={:02}.parquet", month))
+}
+
+/// No-key + Monthly. Reserved for future schemas; not yet used.
+pub fn partition_path_no_key_monthly(
+    root: &Path,
+    venue: &str,
+    data_type: &str,
+    schema_major: u32,
+    year: i32,
+    month: u32,
+) -> PathBuf {
+    root.join(venue)
+        .join(data_type)
+        .join(format!("v{}", schema_major))
+        .join(format!("year={:04}", year))
+        .join(format!("month={:02}.parquet", month))
+}

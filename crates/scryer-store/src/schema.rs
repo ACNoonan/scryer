@@ -22,8 +22,8 @@
 use arrow_array::RecordBatch;
 use arrow_schema::ArrowError;
 use scryer_schema::{
-    backed, earnings, kamino_scope, nasdaq_halts, pyth, redstone, swap, trade, v5_tape, yahoo,
-    FromArrowError,
+    backed, earnings, kamino_scope, kraken_funding, nasdaq_halts, pyth, redstone, swap, trade,
+    v5_tape, yahoo, FromArrowError,
 };
 
 /// Time granularity of a dataset's partitioning. Each schema picks
@@ -35,6 +35,10 @@ pub enum PartitionGranularity {
     /// `year=YYYY/month=MM/day=DD.parquet`. Used by event-stream data
     /// (swaps, trades, oracle tapes) where each day has 1k+ rows.
     Daily,
+    /// `year=YYYY/month=MM.parquet`. Used by monthly-keyed periodic
+    /// data (Kraken Pro Futures funding rates: one row per hour per
+    /// symbol → ~720 rows/month/symbol).
+    Monthly,
     /// `year=YYYY.parquet`. Used by daily-bar data (Yahoo OHLCV) and
     /// other low-frequency keyed datasets where ~250 rows/year would
     /// produce single-row files at daily granularity.
@@ -42,11 +46,11 @@ pub enum PartitionGranularity {
 }
 
 /// Concrete time partition that maps directly to a partition path
-/// segment. Daily for `year=Y/month=M/day=D.parquet` schemas; Yearly
-/// for `year=Y.parquet` schemas.
+/// segment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PartitionTime {
     Daily(crate::partition::UtcDay),
+    Monthly { year: i32, month: u32 },
     Yearly(i32),
 }
 
@@ -54,6 +58,7 @@ impl PartitionTime {
     pub fn granularity(&self) -> PartitionGranularity {
         match self {
             Self::Daily(_) => PartitionGranularity::Daily,
+            Self::Monthly { .. } => PartitionGranularity::Monthly,
             Self::Yearly(_) => PartitionGranularity::Yearly,
         }
     }
@@ -176,6 +181,26 @@ impl DatasetSchema for redstone::v1::Reading {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         redstone::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for kraken_funding::v1::Rate {
+    const DATA_TYPE: &'static str = "funding";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("symbol");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Monthly;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        // ts is microseconds since unix epoch.
+        self.ts / 1_000_000
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        kraken_funding::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        kraken_funding::v1::from_record_batch(batch)
     }
 }
 

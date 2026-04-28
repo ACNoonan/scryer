@@ -177,6 +177,18 @@ fn partition_path_for<S: DatasetSchema>(
             key,
             day,
         ),
+        (Some(prefix), Some(key), PartitionTime::Monthly { year, month }) => {
+            partition::partition_path_keyed_monthly(
+                root,
+                venue,
+                S::DATA_TYPE,
+                S::SCHEMA_MAJOR,
+                prefix,
+                key,
+                year,
+                month,
+            )
+        }
         (Some(prefix), Some(key), PartitionTime::Yearly(year)) => {
             partition::partition_path_keyed_yearly(
                 root,
@@ -190,6 +202,16 @@ fn partition_path_for<S: DatasetSchema>(
         }
         (None, _, PartitionTime::Daily(day)) => {
             partition::partition_path_no_key(root, venue, S::DATA_TYPE, S::SCHEMA_MAJOR, day)
+        }
+        (None, _, PartitionTime::Monthly { year, month }) => {
+            partition::partition_path_no_key_monthly(
+                root,
+                venue,
+                S::DATA_TYPE,
+                S::SCHEMA_MAJOR,
+                year,
+                month,
+            )
         }
         (None, _, PartitionTime::Yearly(year)) => {
             // No-key + Yearly: dataset/{venue}/{data_type}/v{N}/year=YYYY.parquet.
@@ -239,6 +261,18 @@ where
                     )))
                 })?;
                 PartitionTime::Daily(day)
+            }
+            PartitionGranularity::Monthly => {
+                let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0).ok_or_else(|| {
+                    StoreError::Arrow(arrow_schema::ArrowError::ComputeError(format!(
+                        "timestamp {ts} (unix seconds) out of representable range for month"
+                    )))
+                })?;
+                use chrono::Datelike;
+                PartitionTime::Monthly {
+                    year: dt.year(),
+                    month: dt.month(),
+                }
             }
             PartitionGranularity::Yearly => {
                 let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0).ok_or_else(|| {
