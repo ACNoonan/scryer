@@ -1634,6 +1634,7 @@ dependencies = [
  "clap",
  "dotenvy",
  "reqwest",
+ "scryer-fetch-pyth",
  "scryer-fetch-redstone",
  "scryer-fetch-solana",
  "scryer-schema",
@@ -1660,6 +1661,19 @@ version = "0.1.0"
 [[package]]
 name = "scryer-fetch-evm"
 version = "0.1.0"
+
+[[package]]
+name = "scryer-fetch-pyth"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "scryer-schema",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "scryer-fetch-redstone"

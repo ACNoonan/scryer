@@ -8,6 +8,7 @@ members = [
     "crates/scryer-fetch-cex-hyperliquid",
     "crates/scryer-fetch-dexagg",
     "crates/scryer-fetch-redstone",
+    "crates/scryer-fetch-pyth",
     "crates/scryer-schema",
     "crates/scryer-store",
     "bin/scryer-proxy",

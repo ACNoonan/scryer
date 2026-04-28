@@ -15,6 +15,7 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 
 mod import_cmd;
+mod pyth_cmd;
 mod redstone_cmd;
 mod solana_cmd;
 
@@ -33,6 +34,8 @@ enum Command {
     Solana(SolanaCmd),
     /// RedStone Live oracle-tape fetchers (REST, no proxy).
     Redstone(RedstoneCmd),
+    /// Pyth Hermes oracle-tape fetchers (REST, no proxy).
+    Pyth(PythCmd),
 }
 
 #[derive(Parser, Debug)]
@@ -80,12 +83,27 @@ struct RedstoneCmd {
     target: RedstoneTarget,
 }
 
+#[derive(Parser, Debug)]
+struct PythCmd {
+    #[command(subcommand)]
+    target: PythTarget,
+}
+
 #[derive(Subcommand, Debug)]
 enum RedstoneTarget {
     /// One-tick poll of api.redstone.finance/prices for the
     /// configured symbols. Schedule via launchd / cron at the
     /// desired cadence (typical: 10m).
     Tape(redstone_cmd::TapeArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum PythTarget {
+    /// One-tick poll of hermes.pyth.network/v2/updates/price/latest
+    /// across all 32 default xStock feeds (8 symbols × 4 sessions).
+    /// Schedule via launchd / cron at the desired cadence
+    /// (typical: 60s).
+    Tape(pyth_cmd::TapeArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -141,6 +159,9 @@ async fn main() -> Result<()> {
         },
         Command::Redstone(c) => match c.target {
             RedstoneTarget::Tape(a) => redstone_cmd::run_tape(a).await,
+        },
+        Command::Pyth(c) => match c.target {
+            PythTarget::Tape(a) => pyth_cmd::run_tape(a).await,
         },
     }
 }

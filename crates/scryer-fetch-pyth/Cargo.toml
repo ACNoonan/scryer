@@ -1,0 +1,21 @@
+[package]
+name = "scryer-fetch-pyth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pyth Hermes oracle-tape fetcher — REST client for hermes.pyth.network/v2/updates/price/latest. Single-batch poll across all configured feeds; no proxy."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+scryer-schema = { path = "../scryer-schema" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
