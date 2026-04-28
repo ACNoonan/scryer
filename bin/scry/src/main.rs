@@ -15,6 +15,7 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 
 mod import_cmd;
+mod redstone_cmd;
 mod solana_cmd;
 
 #[derive(Parser, Debug)]
@@ -30,6 +31,8 @@ enum Command {
     Import(ImportCmd),
     /// Solana fetchers — Raydium swaps via proxy + Helius parseTransactions.
     Solana(SolanaCmd),
+    /// RedStone Live oracle-tape fetchers (REST, no proxy).
+    Redstone(RedstoneCmd),
 }
 
 #[derive(Parser, Debug)]
@@ -69,6 +72,20 @@ enum ImportTarget {
 struct SolanaCmd {
     #[command(subcommand)]
     target: SolanaTarget,
+}
+
+#[derive(Parser, Debug)]
+struct RedstoneCmd {
+    #[command(subcommand)]
+    target: RedstoneTarget,
+}
+
+#[derive(Subcommand, Debug)]
+enum RedstoneTarget {
+    /// One-tick poll of api.redstone.finance/prices for the
+    /// configured symbols. Schedule via launchd / cron at the
+    /// desired cadence (typical: 10m).
+    Tape(redstone_cmd::TapeArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -121,6 +138,9 @@ async fn main() -> Result<()> {
             SolanaTarget::JupiterLendLiquidations(a) => solana_cmd::run_jupiter_lend_liquidations(a).await,
             SolanaTarget::FluidVaultConfigs(a) => solana_cmd::run_fluid_vault_configs(a).await,
             SolanaTarget::KaminoScopeTape(a) => solana_cmd::run_kamino_scope_tape(a).await,
+        },
+        Command::Redstone(c) => match c.target {
+            RedstoneTarget::Tape(a) => redstone_cmd::run_tape(a).await,
         },
     }
 }

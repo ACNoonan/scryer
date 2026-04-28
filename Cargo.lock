@@ -1633,6 +1633,8 @@ dependencies = [
  "chrono",
  "clap",
  "dotenvy",
+ "reqwest",
+ "scryer-fetch-redstone",
  "scryer-fetch-solana",
  "scryer-schema",
  "scryer-store",
@@ -1660,11 +1662,26 @@ name = "scryer-fetch-evm"
 version = "0.1.0"
 
 [[package]]
+name = "scryer-fetch-redstone"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "scryer-schema",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
 name = "scryer-fetch-solana"
 version = "0.1.0"
 dependencies = [
  "base64",
  "bs58",
+ "chrono",
  "reqwest",
  "scryer-schema",
  "serde",
