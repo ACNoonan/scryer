@@ -25,7 +25,8 @@ use scryer_schema::{
     backed, cex_perp_funding_multi, cme_intraday_1m, dex_xstock_swaps, drift_liquidation, earnings, fluid_vault_config, fred_macro, geckoterminal,
     jito_bundles, jito_tip_floor, jupiter_lend_liquidation, kamino_liquidation, kamino_obligation,
     kamino_obligation_position, kamino_reserve, kamino_scope, kraken_funding, loopscale_loan,
-    loopscale_loan_collateral, nasdaq_halts, oracle_context, pool_snapshot, pyth, pyth_publisher,
+    loopscale_loan_collateral, mango_v4_liquidation, mango_v4_oracle_config, nasdaq_halts,
+    oracle_context, pool_snapshot, pyth, pyth_publisher,
     redstone, solana_priority_fees, swap, trade, v5_tape, yahoo, FromArrowError,
 };
 
@@ -287,6 +288,44 @@ impl DatasetSchema for jito_bundles::v1::Bundle {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         jito_bundles::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for mango_v4_liquidation::v1::Liquidation {
+    const DATA_TYPE: &'static str = "liquidations";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.block_time
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        mango_v4_liquidation::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        mango_v4_liquidation::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for mango_v4_oracle_config::v1::OracleSnapshot {
+    const DATA_TYPE: &'static str = "oracle_configs";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.snapshot_unix_ts
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        mango_v4_oracle_config::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        mango_v4_oracle_config::v1::from_record_batch(batch)
     }
 }
 

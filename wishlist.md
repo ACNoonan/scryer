@@ -1145,31 +1145,62 @@ Tip accounts pulled live (never retyped) from
 block-walking + per-tx percentile + tip-account scan is materially
 more work than a single REST endpoint.
 
-### 28. `mango_v4_liquidation.v1` + `mango_v4_oracle_config.v1` — Mango Markets v4  `[methodology-entry-needed]`
+### 28. `mango_v4_liquidation.v1` + `mango_v4_oracle_config.v1` — Mango Markets v4  `[done — phase 44]`
 
-**What.** Mango v4 has a deviation-aware oracle methodology that's
-the closest production analog to soothsayer's calibration-aware
-approach: Mango actively clamps oracle deviations and publishes
-documentation on its methodology. For paper 3, including Mango's
-policy in the cross-protocol baseline table is materially stronger
-than "Kamino flat ±300 bps" — Mango is the production system that
-already does some of what soothsayer proposes, and we want to
-quantify the gap.
+**Status (2026-04-28).** Both schemas shipped. Mango v4's deviation-
+aware oracle methodology is the closest production analog to
+soothsayer's calibration-aware approach (paper 3's headline
+cross-protocol comparison panel: Kamino flat ±300 bps, Drift pure
+Pyth pass-through, Jupiter Lend Fluid oracle, Mango v4 stable-
+price-model + conf_filter clamp).
 
-Two related schemas:
-- `mango_v4_liquidation.v1` — liquidation event panel (similar shape
-  to Drift).
-- `mango_v4_oracle_config.v1` — per-market oracle config snapshot
-  (oracle PDA, max-staleness, max-confidence, deviation thresholds).
+**Schemas (locked).**
+- `mango_v4_liquidation.v1::Liquidation` — wide-but-flat with typed
+  asset/liab/perp index columns + an `ix_args_json` column for
+  variant-specific fields. Covers all 10 IXes from IDL v0.24.4
+  (token + perp + force-cancel-orders).
+- `mango_v4_oracle_config.v1::OracleSnapshot` — per-Bank +
+  per-PerpMarket snapshot with `conf_filter`, `max_staleness_slots`,
+  and (perp-only) `stable_price` / `delay_growth_limit` /
+  `stable_growth_limit`.
 
-**Source.** On-chain Solana mainnet. Mango v4 program
-`4MangoMjqJ2firMokCjjGgoK8d4MXcrgL7XJaL3w6fVg`. IDL published.
+**Storage.** `dataset/mango_v4/{liquidations,oracle_configs}/v1/
+year=Y/month=M/day=D.parquet` (both Daily + no-key).
+
+**Live-validated 2026-04-28** against canonical mainnet Group
+`78b8f4cGCwmZ9ysPFMWLaLTkkaYnUjwMJYStWe5RTSSX` (the `ts/client/
+ids.json` group is stale; the canonical one was found via
+`getTransaction` on a recent program tx). 76 oracle-config rows:
+71 Banks + 5 perp markets (BTC-PERP, ETH-PERP, SOL-PERP,
+RENDER-PERP, MNGO-PERP-OLD). All 5 perps share `(conf_filter=0.10,
+max_staleness=180, delay_growth_limit=0.06,
+stable_growth_limit=0.0003)` — Mango v4's policy is uniform
+across perp markets, the canonical comparison target for paper 3.
+
+**Mango v4 is dormant on mainnet** — 7-day window had 2 program
+txs total, 0 liquidations. Decoder verified via 11 synthetic-data
+unit tests covering all 10 IX variants. The schema is forensic-
+ready for historical liquidation backfills.
 
 **CLIs.**
-- `scry solana mango-v4-liquidations --start DATE --end DATE`
-- `scry solana mango-v4-oracle-configs`
+- `scry solana mango-v4-liquidations --start DATE --end DATE
+  --proxy-url URL [--use-get-transaction]`
+- `scry solana mango-v4-oracle-configs --proxy-url URL --group PUBKEY`
 
-**Effort.** ~5-6 hours combined.
+**Effort actual.** ~5h. 30 new tests.
+
+**Future-work caveats.**
+- (a) **Liquidation log-event decode deferred to v2.** The IDL has
+  ~12 `*Log` event structs emitted via `emit_stack` — captures
+  settled fees, exit prices, per-IX outcomes. v2 enrichment after
+  the v1 panel accumulates enough rows.
+- (b) **Bank/PerpMarket pubkey → index resolution deferred.** v1
+  leaves `perp_market_index` null on perp-IXes since resolving
+  needs an oracle_config map join; downstream consumers join on
+  `liquidatee` MangoAccount or PerpMarket pubkey instead.
+- (c) **`getProgramAccounts(MANGO_V4)` is throttle-prone.** One
+  retry usually resolves; documented limitation for snapshot
+  cadences.
 
 ### 29. `cex_perp_funding_multi.v1` — multi-venue perp funding rates  `[done — phase 41]`
 
