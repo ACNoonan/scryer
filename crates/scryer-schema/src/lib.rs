@@ -20,6 +20,7 @@
 //! dialect, and the choice is easier to keep stable when it's explicit.
 
 pub mod backed;
+pub mod backed_nav_strikes;
 pub mod cboe_indices;
 pub mod cex_perp_funding_multi;
 pub mod cex_stock_perp_ohlcv;
@@ -65,6 +66,7 @@ pub mod trade;
 pub mod v5_tape;
 pub mod xstock_holders;
 pub mod yahoo;
+pub mod yahoo_corp_actions;
 
 pub use error::FromArrowError;
 pub use meta::Meta;

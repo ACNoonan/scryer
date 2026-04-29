@@ -1,0 +1,21 @@
+[package]
+name = "scryer-fetch-xstocks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "xStocks public-API client for Backed Finance's per-token indicative-quote tape — REST against api.xstocks.fi/api/v2/public/*. No auth, 1000 req/min rate limit."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+scryer-schema = { path = "../scryer-schema" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

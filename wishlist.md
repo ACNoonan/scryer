@@ -55,6 +55,7 @@ entry is kept below in its priority section for historical context.
 | 45 | `cex_stock_perp_tape.v1` | phases 55 + 57 | Multi-venue 24/7 CEX-perp tape (11 of 11 venues; tape complete) |
 | 45 (companion) | `cex_stock_perp_ohlcv.v1` | phases 56 + 57 | 1-minute OHLCV per venue (10 of 11 venues; Phemex OHLCV US-IP-blocked, deferred) |
 | 45 (Kraken historical) | (existing schema) | phase 58 | `scry cex-stock-perp backfill` walks deep Kraken Futures history; live-validated 7d×2 = 20,162 rows |
+| 37 | `backed_nav_strikes.v1` | phase 59 | Backed Finance xStock indicative-quote forward tape; CEX-vs-Backed tracking-error data point unblocked (TSLA: $7 spread CEX-cluster-vs-Backed at smoke moment) |
 
 **Retracted (do not implement)** — premise-incorrect after live source verification:
 
@@ -1926,7 +1927,20 @@ version triple cleanly partitions queries by asset class.
 
 **Effort.** ~2 hours (mint allowlist + reuse of item 24 decoders).
 
-### 37. `backed_nav_strikes.v1` — Backed Finance NAV strike timestamps for xStocks  `[methodology-entry-needed]`
+### 37. `backed_nav_strikes.v1` — Backed Finance NAV strike timestamps for xStocks  `[done — phase 59]`
+
+**Status (2026-04-29).** Shipped via `api.xstocks.fi/api/v2/public/*`
+(public REST, no auth, 1000 req/min). The "NAV strikes" name is a
+slight misnomer — Backed publishes a **continuous indicative
+quote**, not discrete daily NAV strikes; schema docstring documents
+the term mismatch. CLI `scry backed nav-strikes [--symbols
+SPYx,...]`. Live-validated 2026-04-29: 8 symbols / 8 rows / 8
+partitions in one tick. **Headline finding**: TSLA Backed quote
+$371.06 vs CEX-perp cluster $377.46-$378.75 (Phase 55) → the
+**CEX cluster runs ~$6-7 above Backed's reference**, captured live
+in one tick — the exact paper-1 tracking-error data point. Three-
+call enrichment per symbol (price-data + multiplier + halt status)
+degrades gracefully on optional-call failure.
 
 **What.** Backed Finance publishes NAV references for its issued
 tokens (the on-chain xStock series) on a cadence. Capturing strike-
@@ -2431,7 +2445,7 @@ Added 2026-04-28 (Priority 1.5 / 2.5 / 3-extension / 4):
 - `edgar_8k.v1` (item 34)
 - `fred_macro_extended.v1` (item 35)
 - `dex_treasury_swaps.v1` (item 36)
-- `backed_nav_strikes.v1` (item 37)
+- `backed_nav_strikes.v1` (item 37; methodology locked 2026-04-29 in scryer's `methodology_log.md` "Backed NAV strike tape" section; flagged for priority correction — equity-side, mis-filed under Priority 4 treasury-scope)
 - `treasury_auction.v1` (item 38)
 - `mango_v4_market_tape.v1` (item 39; added 2026-04-28 for Layer 0 router)
 - `streams_relay_update.v1` (item 42; on-chain Anchor account; soothsayer-side schema lock recorded in `soothsayer/reports/methodology_history.md` 2026-04-29 (afternoon); cross-listed here for visibility)

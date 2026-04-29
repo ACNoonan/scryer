@@ -22,12 +22,12 @@
 use arrow_array::RecordBatch;
 use arrow_schema::ArrowError;
 use scryer_schema::{
-    backed, cboe_indices, cex_perp_funding_multi, cex_stock_perp_ohlcv, cex_stock_perp_tape, cme_intraday_1m, deribit_iv, dex_xstock_swaps, drift_liquidation, earnings, edgar_8k, evm_liquidation, fluid_vault_config, fred_macro, fred_macro_extended, geckoterminal, geckoterminal_ohlcv,
+    backed, backed_nav_strikes, cboe_indices, cex_perp_funding_multi, cex_stock_perp_ohlcv, cex_stock_perp_tape, cme_intraday_1m, deribit_iv, dex_xstock_swaps, drift_liquidation, earnings, edgar_8k, evm_liquidation, fluid_vault_config, fred_macro, fred_macro_extended, geckoterminal, geckoterminal_ohlcv,
     jito_bundles, jito_tip_floor, jupiter_lend_liquidation, kamino_liquidation, kamino_obligation,
     kamino_obligation_position, kamino_reserve, kamino_scope, kraken_funding, loopscale_loan,
     loopscale_loan_collateral, mango_v4_liquidation, mango_v4_oracle_config, nasdaq_halts,
     oracle_context, pool_snapshot, pyth, pyth_poster_post, pyth_publisher,
-    raydium_pool_metadata, redstone, solana_priority_fees, swap, trade, v5_tape, xstock_holders, yahoo, FromArrowError,
+    raydium_pool_metadata, redstone, solana_priority_fees, swap, trade, v5_tape, xstock_holders, yahoo, yahoo_corp_actions, FromArrowError,
 };
 
 /// Time granularity of a dataset's partitioning. Each schema picks
@@ -792,6 +792,25 @@ impl DatasetSchema for nasdaq_halts::v1::Halt {
     }
 }
 
+impl DatasetSchema for backed_nav_strikes::v1::Strike {
+    const DATA_TYPE: &'static str = "nav_strikes";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("symbol");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.nav_ts
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        backed_nav_strikes::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        backed_nav_strikes::v1::from_record_batch(batch)
+    }
+}
+
 impl DatasetSchema for backed::v1::Action {
     const DATA_TYPE: &'static str = "corp_actions";
     /// No partition key — `repo` strings contain `/` and the data
@@ -857,6 +876,27 @@ impl DatasetSchema for yahoo::v1::Bar {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         yahoo::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for yahoo_corp_actions::v1::Action {
+    const DATA_TYPE: &'static str = "corp_actions";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("symbol");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Yearly;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        // event_date is Date32 (days since unix epoch); year is what
+        // we partition by, so seconds at UTC midnight is sufficient.
+        (self.event_date as i64) * 86_400
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        yahoo_corp_actions::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        yahoo_corp_actions::v1::from_record_batch(batch)
     }
 }
 

@@ -1306,6 +1306,178 @@ threat model isolated by crate boundary). CLI lives in `bin/scry`.
 
 ---
 
+## Backed NAV strike tape — 2026-04-29 (locked)
+
+### Purpose
+
+Mirror tape of Backed Finance's NAV-strike publications for the
+on-chain xStock series. Backed publishes a NAV reference for every
+token they issue (SPYx, QQQx, NVDAx, …) on a cadence tied to the
+underlier's primary-market session; capturing each strike's timestamp
+and value lets soothsayer measure tracking error of the on-chain xStock
+secondary price against the issuer-published NAV directly. This
+number — for *equity-side* xStocks, not just treasury tokens — has
+not been published. It is empirical material for soothsayer's Paper 2
+revision (a calibration-transparent oracle has to be honest about
+which reference price the served band is bounding) and for design-
+partner conversations with Backed itself and with consumer protocols
+(Kamino, Jupiter Lend) holding xStock collateral.
+
+### Why this lands in scryer (not soothsayer)
+
+Per scryer hard rule #1 + soothsayer hard rule #2: all data fetching
+goes through scryer; new sources land in scryer first. NAV scraping
+is a fetcher; it belongs here. Soothsayer's role is to read
+`dataset/backed/nav_strikes/v1/…` parquet and compute the
+tracking-error series against `dataset/soothsayer_v5/tape/v1/…` (or
+the relevant on-chain xStock print source) downstream.
+
+### Wishlist priority correction
+
+Item 37 is currently filed under "Priority 4 — multi-class scope
+extensions (gated on a treasury-scope decision)" in `wishlist.md`.
+That categorization is wrong: items 36 and 38 cover treasury tokens
+(BUIDL / OUSG / USDY / USTB and US Treasury auction calendar
+respectively); item 37 is *equity-side* (the on-chain xStock series
+— SPYx, QQQx, NVDAx, …). It strengthens the existing equity-side
+trilogy claim rather than extending scope. Suggested wishlist move:
+out of Priority 4, into Priority 1.5 (paper-1 forward tapes) or
+Priority 2.5 (paper-2/3 cross-protocol expansion). The phase row
+should reflect the corrected priority when the implementation lands.
+
+### Source
+
+Backed Finance public reference (token-issuance disclosures + per-
+token NAV pages). The exact endpoint — structured JSON if Backed
+exposes one, HTML scrape otherwise — is identified in the
+implementation phase and pinned in that phase's decision-log row,
+not here. The dev phase should prefer JSON over HTML if both exist;
+HTML is acceptable but bumps the failure-mode surface (see
+"Failure modes" below).
+
+### Cadence verification (pre-launch gate)
+
+**Load-bearing:** Backed's NAV publication cadence determines what
+"tracking error" can mean for this dataset. Two known plausible
+shapes:
+
+- **Once-daily, at the underlier's primary-market close.** Tracking
+  error becomes a daily series; intra-day on-chain xStock prints
+  cannot be compared to NAV at higher frequencies.
+- **Multiple intra-day strikes** (open / mid / close, similar to
+  the way some ETF NAVs are computed via iNAV proxies). Tracking
+  error becomes a multi-strike-per-day series.
+
+The dev phase MUST verify the cadence against Backed's published
+schedule before the daemon goes live, and record the observed cadence
+in the implementation phase row. If the answer is once-daily, the
+paper framing has to be honest about that bound; this is not a reason
+to abandon the work, but it sets stakeholder expectations correctly.
+
+### Schema (`backed_nav_strikes.v1`)
+
+```
+token_symbol       string    // 'SPYx' | 'QQQx' | 'NVDAx' | …
+underlier_symbol   string    // 'SPY'  | 'QQQ'  | 'NVDA'  | …
+nav_ts             i64       // unix seconds, the strike's reference time
+nav_value          f64       // NAV per token, in nav_currency
+nav_currency       string    // 'USD' (today; left as a column for
+                             //  forward flexibility if Backed publishes
+                             //  EUR/CHF strikes for any future tokens)
+strike_label       string    // 'open' | 'close' | 'midday' | 'eod' | …
+                             //  populated if Backed labels the strike;
+                             //  empty string if not — NOT null, mirrors
+                             //  the backed.v1 corp_actions arrow Utf8
+                             //  (not Utf8?) precedent from Phase 13
+source_url         string    // canonical URL the strike was scraped from
+selector_version   string    // 'css.v1' | 'json.v1' | …
+                             //  identifier of the parser used; bumping
+                             //  this string is how a parser change is
+                             //  surfaced downstream
+```
+
+Plus standard `_schema_version` / `_fetched_at` / `_source` /
+`_dedup_key`. `_dedup_key = token_symbol + ":" + nav_ts` (one
+canonical strike per token per timestamp; if Backed publishes
+multiple strike labels at the same `nav_ts` for the same token, bump
+to v2 with `(token_symbol, nav_ts, strike_label)` as the key — but
+the v1 wager is that this collision doesn't happen in practice).
+
+### Storage
+
+`dataset/backed/nav_strikes/v1/year=YYYY.parquet`. Yearly, no-key —
+matches the partitioning of `dataset/backed/corp_actions/v1/…`
+(Yearly, no-key, set in Phase 13). Volume is small (~25–50 underliers
+× 1–N strikes/day × 365 days = O(10⁴–10⁵) rows/year); yearly is
+right-sized.
+
+venue = `"backed"` (NOT `"backed_nav_strikes"` — multiple data_types
+per venue is the correct factoring, mirroring how `yahoo` hosts both
+`bars` and `earnings`). data_type = `"nav_strikes"`. The schema name
+`backed_nav_strikes.v1` keeps the `{venue}_{data_type}.v{N}`
+disambiguation convention in the schema crate when a venue has more
+than one data type.
+
+### Fetcher
+
+If the source is RSS/Atom/JSON: new module
+`crates/scryer-fetch-rss/src/backed_nav_strikes.rs` (the same crate
+that already hosts `backed_corp_actions` and `nasdaq_halts` —
+Phase 34 precedent).
+
+If the source requires HTML scraping with a CSS-selector-style
+parser: new module `crates/scryer-fetch-html/src/backed_nav_strikes.rs`
+(would be the first HTML-scrape crate in the workspace; if this path
+is chosen, lock the crate name + scraping policy in the
+implementation phase row).
+
+Single-tick mode by default; cadence wrapped externally by launchd.
+
+### CLI
+
+```
+scry backed nav-strikes [--once] [--token SYMBOL] [--feed-url URL]
+```
+
+`--once` per scryer convention; cadence externally driven.
+`--token` for spot-checking one symbol; `--feed-url` for parser-
+development overrides against captured fixtures.
+
+### Failure modes
+
+- **Selector / endpoint drift.** If the upstream changes structure,
+  the scraper silently emits stale or empty rows. Mitigation: write
+  the parser identifier to `selector_version`, and have the daemon
+  emit a structured warning (and exit non-zero in `--once` mode)
+  when zero rows are extracted from a non-empty page. Launchd
+  catches the non-zero exit and surfaces the failure to the user's
+  existing `scry-*` plist failure pipeline.
+- **NAV-currency drift.** Ship as a column; don't infer from
+  `token_symbol`.
+- **Cadence drift.** If Backed switches from daily to intra-day
+  strikes or vice-versa, the row volume changes; consumers must not
+  assume one row per token per day. Soothsayer's tracking-error
+  computation joins on actual `nav_ts`, not a date-only key.
+- **Vendor anti-scrape.** If Backed adds rate limits or
+  authentication, the daemon switches to whatever auth is published;
+  if no public auth exists, escalate to a Backed contact (a
+  conversation that may itself be the design-partner pitch).
+
+### Effort
+
+~5–8 hours (3 estimated in the wishlist entry plus a buffer for
+selector versioning, cadence verification, and parser unit tests
+against captured HTML/JSON fixtures).
+
+### Decision-log row
+
+Will land with the implementation phase (separate from this
+methodology lock). The phase row should record the chosen source
+shape (JSON vs HTML), the observed cadence, and the launchd plist
+filename added under scryer's `ops/launchd/`.
+
+---
+
 ## Decision log
 
 Append every architectural decision with its date and reason. The honest
@@ -1336,6 +1508,7 @@ without losing the rationale.
 | v0.1-phase-25 | 2026-04-28 | GeckoTerminal trades migration. New schema `scryer-schema::geckoterminal::v1::Trade` (11 logical fields: tx_hash, ts, block_number, side, price, sol_amount, usdc_amount, volume_in_usd, price_sol_in_usd, tx_from_address, kind + 4 metadata) — distinct from `swap.v1::Swap` because GT preserves richer per-trade fields (`volume_in_usd`, `price_sol_in_usd`, `tx_from_address`) that Helius parseTransactions doesn't expose. Schema rationale: keep `swap.v1` minimal-and-stable for the Helius-sourced collector (Phase 4) while letting GT-sourced consumers query the richer fields. Filled the previously-stub `scryer-fetch-dexagg` crate with `poll_pool_trades(client, cfg, pool, meta)` + tolerant deserializer (handles GT's mixed string/number `from_token_amount` representations + missing `tx_hash` skipping + unknown-leg-mints rejection). CLI `scry dexagg gt-trades [--pool ADDR]` defaults to Raydium-v4 SOL/USDC. Daily/keyed partition: `dataset/geckoterminal/trades/v1/pool={addr}/year=Y/month=M/day=D.parquet`. Live-validated against the public free-tier endpoint: 300 rows decoded in 1 partition (the free-tier batch size); SOL price range $83.51–$84.10 across a 45-minute window matches market close. Replaces `com.adamnoonan.quant-work.geckoterminal-fetcher` Python launchd job; new plist `com.adamnoonan.scryer.geckoterminal-trades` at 900s cadence. 4 schema unit tests + 6 fetcher unit tests pass. | Closes the GeckoTerminal entry in the launchd-data-ops inventory — the only non-V5 launchd-managed Python data pull. New schema rather than augmenting `swap.v1` because additive nullable fields would require import-side tolerance for older parquet files that lack the columns; cheaper to keep schemas distinct and let downstream consumers know whether they're reading Helius-sourced or GT-sourced data via the venue path. The previously-empty `scryer-fetch-dexagg` crate (described as "v0.2+ scope" at scaffold time) now lands in v0.1 alongside the rest of the migration. |
 | v0.1-portal-1 | 2026-04-28 | Methodology section "Portal" locked. New crates land: `scryer-portal` (axum HTTP backend, native DuckDB, `JobBackend` trait with `LaunchdBackend` impl + `SystemdBackend` stub) and `scryer-portal-shell` (Tauri desktop app + Vite/React UI under `ui/`). The same `scryer-portal-server` binary deploys standalone to a future Linux box; Tauri shell stays on the operator's Mac and toggles its backend URL. Read-only on plist contents; control via `launchctl` shell-out (Run / Load / Unload). Data engine = DuckDB native (not WASM); exports via `COPY ... TO` + `rust_xlsxwriter`. | Workspace-shape change requiring pre-flight per CLAUDE.md hard rule #1. Portal is a separate product track from the data-fetcher phases — uses its own `v0.1-portal-N` versioning so v0.1 fetcher phase counters don't get reordered. The "axum-as-the-deploy-unit" choice forecloses Tauri-IPC for data flow, which would have created an architectural bifurcation between local and remote modes; chose the constraint up front to avoid retrofitting. |
 | v0.1-phase-24 | 2026-04-28 | Proxy health-probe respects quarantine windows. Before this fix, the 5s probe ticker fired against every provider regardless of quarantine state — Helius (24h quota cooldown) and RPCFast (auth failure) were re-probed every 5s, re-classified as exhausted, re-quarantined, and re-logged at WARN. ~17 lines/min of `provider exhausted; quarantining` × 2 quarantined providers, plus real API calls hammering an already-exhausted Helius daily quota. Fix: in `health::spawn_loop`, skip providers where `is_quarantined()` returns true. The provider's `quarantined_until_ms` already governs when re-probing should resume (24h cooldown for `record_exhausted`; exponential 15→30→60→120→240s for `record_failure` after 3 consecutive failures); the loop just needed to consult it. New `scryer_proxy_probes_skipped_quarantined_total{provider}` metric so quarantine duration is observable. Defensive mirror in `probe_one` so direct callers see the same skip semantics. 3 new unit tests pin contract: `record_exhausted_quarantines_for_cooldown`, `exhausted_provider_clears_after_cooldown` (uses 0-second cooldown to avoid mocking time), `record_failure_quarantines_after_three_consecutive`. Live-verified after redeploy: pre-fix log fired the exhausted-warn line every ~5s; post-fix log fires it once on the first probe after restart, then silence. Skip metric increments correctly (Helius=8, RPCFast=5 within ~30s). | Operational-quality fix flagged during launchd verification. Doesn't change quarantine semantics — only suppresses the wasted re-probe + re-log loop while the existing cooldown timer counts down. Indirect benefit: stops burning API calls against an exhausted Helius daily quota (each pre-fix probe was a real billable request that returned 429 instantly; eliminated). Sets up Phase 26 V5 tape which will lean heavily on the proxy under Helius-quota pressure. |
+| v0.1-phase-59 | 2026-04-29 | Wishlist item 37 — `backed_nav_strikes.v1` Backed Finance xStock indicative-quote forward tape. **Closes the standalone "tracking error of xStock secondary on-chain price vs Backed-published reference" measurement** that nobody has published. Research found a public unauthenticated REST API at `api.xstocks.fi/api/v2/public/*` (1000 req/min rate-limit, no auth, sub-second-updating "indicative quote" per asset — Backed's continuously-published "fair value"; the term "NAV strikes" in the wishlist is a slight misnomer because Backed publishes a continuous quote, not discrete daily NAV strikes; documented in schema docstring). New crate `scryer-fetch-xstocks` with three endpoints: `/assets/{symbol}/price-data` (returns `{"quote": <number>}` — load-bearing), `/assets/{symbol}/multiplier?network=Solana` (returns `currentMultiplier` — captures cumulative split/dividend adjustments), `/system/status/{symbol}` (returns `isMarketTradingHalted` + `isAtomicTradingHalted`). New schema `backed_nav_strikes.v1::Strike` (6 logical fields: token_symbol, nav_ts, nav_value f64, current_multiplier f64 nullable, is_market_halted bool nullable, is_atomic_halted bool nullable). Daily + symbol-keyed partition: `dataset/backed/nav_strikes/v1/symbol={SYMx}/year=Y/month=M/day=D.parquet`. Dedup_key minute-floored: `backed_nav_strikes:{symbol}:{nav_ts/60*60}` so launchd over-polling within the same wall-clock minute folds to one row. Tolerant per-call enrichment: a multiplier or system-status failure leaves those fields null without losing the price-data row. CLI `scry backed nav-strikes [--symbols SPYx,QQQx,...]` defaults to the canonical 8-symbol set. 5 schema tests + 6 fetcher tests = 11 new. **Live-validated 2026-04-29** against `api.xstocks.fi`: 8 rows / 8 partitions in one tick, all symbols returned valid quotes (`SPYx $710.06, QQQx $658.80, TSLAx $371.06, AAPLx $268.79, GOOGLx $349.94, NVDAx $210.20, HOODx $70.70, MSTRx $159.07`); multipliers populated (SPYx 1.00256, GOOGLx 1.00151, TSLAx 1.0); halts all false. Idempotent re-run within the same wall-clock minute: 0 added, 1 deduped. **Headline tracking-error data point at the smoke moment**: TSLA Backed quote = $371.06; cross-venue CEX-perp cluster from Phase 55 smoke = $377.46-$378.75 — the **CEX cluster runs ~$6-7 above Backed's published reference for TSLA**, the exact "is the tokenization premium real?" measurement, captured live in one tick. | Item 37 of Priority 4. Choose-your-naming: research recommended `xstocks_nav.v1` to match upstream terminology ("indicative quote", not NAV strike); kept the wishlist's `backed_nav_strikes.v1` name to honor the contract reference and documented the term mismatch in the schema docstring. The minute-floored dedup is the load-bearing operational decision: upstream drifts sub-second but minute granularity is the right grain for tracking-error analysis (sub-minute is noise; matches typical launchd cadence). The 3-call enrichment shape (price-data + multiplier + halt status) degrades gracefully — optional enrichment failures don't lose the headline measurement. Items 36 + 38 (treasury-token side of the original Priority 4 trio) stashed per the user's "stash commodities for now". |
 | v0.1-phase-58 | 2026-04-29 | Wishlist item 45 (Kraken Futures historical backfill) — adds `scry cex-stock-perp backfill --venue kraken_futures --underliers ... --start DATE --end DATE` subcommand. Walks `[start, end]` in chunks (Kraken's `/api/charts/v1/trade/{SYM}/1m` caps at **2000 bars per call ≈ 1.39 days at 1m**); cursor advances on each chunk's last `bar_open_ts + 60s` until the response is empty or cursor crosses `end_ts`. Writes to the same `dataset/cex_stock_perp/ohlcv/v1/...` partition tree as the forward-tape (Phase 56) — re-runs dedup cleanly via the existing `cex_stock_perp_ohlcv:{exchange}:{exchange_symbol}:{bar_open_ts}` dedup_key. Only Kraken Futures supported in v1 because **Kraken's chart API exposes deep history per `PF_*XUSD` listing date**; other venues cap at ~30-90 days and rely on the forward tape rolling forward to accumulate paper-1 retrospective. **Live-validated 2026-04-29**: 7-day backfill (2026-04-22..2026-04-28) over TSLA + SPY returned 20,162 rows (10,081/symbol = 7 × 1440 minutes + 1 inclusive boundary bar), 16 daily partitions. Idempotent re-run: 0 added, 10,081 deduped. **Headline paper-1 §1.2 finding from this 7-day window**: only **228/10,081 minutes (2.3%) of TSLAX trading on Kraken Futures had non-zero volume**; mark price kept updating across the full 10K minutes (close ranged $388.35 → $377.59) but actual trade flow concentrated in 2.3% of minutes — exactly the trust-gap signature paper-1's volume DiD argument predicts: 11 venues publishing 24/7 marks for the same xStock, but actual trading concentrates in cash-market-hours minutes. **Phemex OHLCV ruled out** as deferred (was: auth-required, now confirmed: US-IP geo-block at the CDN level, won't unblock without VPN — same blocker class as Binance + Bybit). | Item 45's Kraken historical-backfill caveat closes. The chunk-walking algorithm (advance cursor by last_ts+60s, break on empty response) handles the asymmetry that Kraken's response returns the OLDEST bars in the window, not the latest — confirmed live during probe. The 2.3%-of-minutes-with-volume finding is a 60-second-data-collection paper-1 figure of its own: it doesn't even need the Friday→Monday cash-closed gap to be statistically interesting; weekday US cash hours alone show the mark/volume mismatch. The Phemex US-IP geo-block confirmation upgrades the wishlist's Phemex-OHLCV row from "auth-required, deferred" to "geo-blocked from operator IP, won't unblock without VPN" — same reasoning class as Binance + Bybit. Saved to memory (`project_us_ip_geoblocks.md`) so future agents don't re-probe. |
 | v0.1-phase-57 | 2026-04-29 | Wishlist item 45 (follow-up venues) — adds **7 new venue modules** to scryer-fetch-cex-perps, completing the 11-venue panel from the spec: **HTX** (`/linear-swap-ex/market/detail/merged` for tickers, `/market/history/kline` for 1m candles; both X-suffix `TSLAX-USDT` xstock_backed and plain `META-USDT` synthetic), **BingX** (`/openApi/swap/v2/quote/ticker` + `/quote/premiumIndex` merged for tickers, `/openApi/swap/v3/quote/klines` for candles; X-suffix `AAPLX-USDT` xstock_backed and NCSK-prefix `NCSKTSLA2USD-USDT` synthetic), **Bitget** (one-call `/api/v2/mix/market/tickers?productType=USDT-FUTURES` for ALL tickers + `/market/candles?granularity=1m`; synthetic `{U}USDT`), **MEXC** (`/api/v1/contract/ticker?symbol={U}STOCK_USDT` + `/api/v1/contract/kline/{symbol}` parallel-arrays shape), **KuCoin Futures** (one-call `/api/v1/contracts/active` for ALL tickers with markPrice+indexPrice + `/api/v1/kline/query` for candles; synthetic `{U}USDTM`), **Phemex** (`/md/v3/ticker/24hr` for tickers — both `SPYXUSDT` xstock_backed and `{U}USDT` synthetic; **OHLCV deferred** because all public kline endpoints return `Full authentication required` as of 2026-04-29), **Crypto.com Exchange** (`/exchange/v1/public/get-tickers?instrument_name={U}USD-PERP` + `/get-candlestick`; only QQQ + SPY listed; no separate mark/index — uses `last` as mark proxy, documented). 17 fetcher tests across the 7 modules = 79 total cex-perps tests (was 62). Updated `scry cex-stock-perp tape` and `... ohlcv` to dispatch to all 11 venues with `--no-{venue}` toggles per venue. Tolerant per-symbol error handling: 400/404/listing-gap errors per try-pair (X-suffix vs plain, or X-suffix vs NCSK) silently skip. **Live-validated 2026-04-29 across all 11 venues**: tape returned 52 rows / 6 partitions for 6 underliers (SPY/QQQ/TSLA/AAPL/NVDA/TLT), OHLCV returned 615 rows / 3 partitions for 3 underliers × 30min lookback. **TSLA cross-venue dispersion at the smoke moment now spans 9 venues** (kucoin_futures $377.85, kraken_futures $377.96, coinbase_intl $378.00, phemex $378.06, bingx $378.07, okx $378.20, bitget $378.30, gate $378.31, htx $378.75) — **90-cent spread between min/max marks**, doubling the 4-venue 46-cent spread from Phase 55. The HTX outlier ($378.75) is the only X-suffix-but-non-stock-backed venue (HTX uses X-suffix for "expanded volume" tier listings, not Backed-issued); the methodology entry's caveat (a) on backing-classification empirics is directly testable here. | Item 45 fully closed at the venue-coverage level. Phemex OHLCV deferred is the only known gap; tickers ship and are sufficient for §1.1 dispersion analysis (which is the load-bearing argument for paper 1's §1.1 critique). The Phase-57 implementation pattern crystallized into a reusable template: each venue module exports `fetch_one_ticker(client, cfg, exchange_symbol, underlier, backing_kind, fetched_at) -> Result<Option<Tick>, _>` (per-symbol) OR `fetch_stock_perps(client, cfg, &underliers, fetched_at) -> Result<Vec<Tick>, _>` (batch endpoint), plus the parallel `fetch_ohlcv` shape. Future venues (when Binance + Bybit unblock via VPN) follow the same template at ~30-40min each. The HTX `close`-as-mark-proxy decision is documented in the module — HTX's `merged` endpoint doesn't expose a separate mark price, and a v2 enrichment can add per-symbol `/swap_index` calls for proper mark/index decomposition if paper-1 dispersion analysis surfaces an HTX-specific bias. Crypto.com's `last`-as-mark-proxy is the same trade-off; no separate mark on the public ticker endpoint. The cross-venue dispersion finding (90 cents at this moment) is the empirical headline: the panel ages quickly into a paper-1 figure the moment the next Friday→Monday window passes. |
 | v0.1-phase-56 | 2026-04-29 | Wishlist item 45 (companion forward tape) — `cex_stock_perp_ohlcv.v1` 1-minute OHLCV bars per venue per stock-perp. **Closes paper 1's §1.2 weekday-vs-weekend volume DiD panel.** The tickers tape (Phase 55) carries `vol_24h` which is rolling-window and can't cleanly partition into US-cash-open vs cash-closed buckets; per-bar 1m volume can. New schema `cex_stock_perp_ohlcv.v1::Bar` (12 logical fields: exchange, exchange_symbol, underlier_symbol, backing_kind, bar_open_ts, bar_close_ts, OHLC, volume_base, volume_quote nullable, trade_count nullable). Daily + underlier-keyed partition: `dataset/cex_stock_perp/ohlcv/v1/underlier={SYM}/year=Y/month=M/day=D.parquet`. Dedup_key = `cex_stock_perp_ohlcv:{exchange}:{exchange_symbol}:{bar_open_ts}` so cron-driven roll-forward fetches dedup cleanly. **Same 4 venues as Phase 55**, each with their respective candle endpoints: **Kraken Futures** (`/api/charts/v1/trade/{SYM}/1m`, deep history per `PF_*XUSD` listing date), **Gate.io** (`/api/v4/futures/usdt/candlesticks?contract={SYM}&interval=1m`, `v` field is base contracts + `sum` field is USD-quote — both shipped per-bar), **OKX** (`/api/v5/market/candles?bar=1m&instId={SYM}`, tuple format with index 5=vol_base + index 7=volCcyQuote both shipped), **Coinbase International** (`/api/v1/instruments/{SYM-PERP}/candles?granularity=ONE_MINUTE&start={iso}`, single-call shape, base volume only). 7 remaining venues from item 45 spec deferred as v1-followup enrichment. **Volume-quote-where-exposed** is the schema asymmetry: Gate + OKX populate it (USD-quote notional), Kraken + Coinbase Intl don't. `trade_count` field is in the schema but null across all 4 v1 venues — none of their basic-1m endpoints surface a trade-count; reserved for v2 enrichment. **Tolerant per-symbol error handling** matches Phase 55: 400 / 404 / OKX 51001 listing-gaps log warn + skip. Gate.io fetcher tries both `{U}X_USDT` (xstock_backed) and `{U}_USDT` (synthetic) per underlier and silently swallows the 404 on whichever variant doesn't list. CLI `scry cex-stock-perp ohlcv --underliers ... --lookback-minutes N`. 4 schema tests + 12 fetcher tests = 16 new. **Live-validated 2026-04-29 across all 4 venues**: 394 rows / 5 partitions in one tick (5 underliers × 30min lookback). Cross-venue TSLA at the latest 1m bar (ts=1777433340): Gate `TSLAX_USDT` close=$378.42 vol_base=62 contracts vol_quote=$234.62, Kraken `PF_TSLAXUSD` close=$377.59 vol_base=0 (no trades that minute), OKX `TSLA-USDT-SWAP` close=$378.25 vol_base=1.01 vol_quote=$382.11, Coinbase International `TSLA-PERP` close=$378.13 (5min behind). TLT Gate-only at $88.14 with 2 contracts/min — exactly the low-volume after-hours signature paper-1 §1.2 predicts. | Companion to item 45's tickers tape (Phase 55). Schema-grain split is the load-bearing decision: state-snapshot panel (Phase 55) vs 1m-OHLCV panel (Phase 56) measure different statistical objects (instantaneous mark/index vs flow). Folding into one schema would force consumers to disambiguate by `_source` per row at query time. The volume-base-vs-volume-quote split per venue is upstream-asymmetric (Phase 41 convention applied to OHLCV); consumers normalize via `volume_quote ≈ volume_base × close × multiplier` where multiplier is per-venue contract-size-aware. The Companion Kraken-Futures historical-backfill CLI (deep history via the same `/charts/v1/trade/{SYM}/1m` endpoint with `from`/`to` cursors) is partially in place — the `fetch_ohlcv` signature already takes `from_unix` / `to_unix` — and just needs a backfill-mode CLI knob; deferred until paper 1 explicitly needs the retrospective panel beyond ~30-90 days. |

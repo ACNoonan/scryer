@@ -6135,6 +6135,7 @@ dependencies = [
  "scryer-fetch-rss",
  "scryer-fetch-sec",
  "scryer-fetch-solana",
+ "scryer-fetch-xstocks",
  "scryer-schema",
  "scryer-store",
  "serde",
@@ -6374,6 +6375,19 @@ dependencies = [
  "tokio",
  "tracing",
  "wiremock",
+]
+
+[[package]]
+name = "scryer-fetch-xstocks"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "scryer-schema",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

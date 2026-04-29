@@ -20,6 +20,7 @@ mod jito_cmd;
 mod jito_tip_floor_cmd;
 mod kamino_obligations_cmd;
 mod kamino_reserves_cmd;
+mod backed_cmd;
 mod cboe_cmd;
 mod cex_funding_cmd;
 mod cex_stock_perp_cmd;
@@ -86,6 +87,10 @@ enum Command {
     /// from `data.sec.gov/submissions/CIK*.json`. Requires a
     /// User-Agent header per SEC fair-access policy.
     Sec(SecCmd),
+    /// Backed Finance xStocks public-API fetcher. v1 surface:
+    /// `nav-strikes` continuous indicative-quote tape from
+    /// `api.xstocks.fi/api/v2/public/*`. Public, no auth.
+    Backed(BackedCmd),
     /// EVM lending-protocol liquidation panel. Aave V3 (Ethereum,
     /// Arbitrum) + Spark (Ethereum) via `eth_getLogs`. Writes to
     /// dataset/evm/liquidations/v1/chain={X}/year=Y/month=M/day=D.parquet.
@@ -206,6 +211,22 @@ struct FredCmd {
 struct SecCmd {
     #[command(subcommand)]
     target: SecTarget,
+}
+
+#[derive(Parser, Debug)]
+struct BackedCmd {
+    #[command(subcommand)]
+    target: BackedTarget,
+}
+
+#[derive(Subcommand, Debug)]
+enum BackedTarget {
+    /// Single-tick poll of Backed's per-xStock indicative quote
+    /// (`api.xstocks.fi/api/v2/public/assets/{symbol}/price-data`)
+    /// plus per-symbol multiplier + halt-status enrichment.
+    /// Schedule via launchd at the desired cadence (typical: 60s
+    /// during US market hours).
+    NavStrikes(backed_cmd::NavStrikesArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -351,6 +372,11 @@ enum EquitiesTarget {
     /// Earnings dates from Finnhub per symbol. Writes one yearly
     /// parquet per symbol under dataset/yahoo/earnings/v1/.
     Earnings(equities_cmd::EarningsArgs),
+    /// Per-symbol corporate-action history (splits + dividends) from
+    /// Yahoo's `chart` endpoint with `events=div|split`. Writes one
+    /// yearly parquet per symbol under dataset/yahoo/corp_actions/v1/.
+    /// Soothsayer Paper-1 §10.2 OOS DQ-panel filter.
+    CorpActions(equities_cmd::CorpActionsArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -557,6 +583,7 @@ async fn main() -> Result<()> {
         Command::Equities(c) => match c.target {
             EquitiesTarget::Bars(a) => equities_cmd::run_bars(a).await,
             EquitiesTarget::Earnings(a) => equities_cmd::run_earnings(a).await,
+            EquitiesTarget::CorpActions(a) => equities_cmd::run_corp_actions(a).await,
         },
         Command::Rss(c) => match c.target {
             RssTarget::Backed(a) => rss_cmd::run_backed(a).await,
@@ -568,6 +595,9 @@ async fn main() -> Result<()> {
         },
         Command::Sec(c) => match c.target {
             SecTarget::Edgar8k(a) => sec_cmd::run_edgar_8k(a).await,
+        },
+        Command::Backed(c) => match c.target {
+            BackedTarget::NavStrikes(a) => backed_cmd::run_nav_strikes(a).await,
         },
         Command::Evm(c) => match c.target {
             EvmTarget::Liquidations(a) => evm_cmd::run_liquidations(a).await,
