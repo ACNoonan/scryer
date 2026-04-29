@@ -20,6 +20,7 @@
 //! dialect, and the choice is easier to keep stable when it's explicit.
 
 pub mod backed;
+pub mod cboe_indices;
 pub mod cex_perp_funding_multi;
 pub mod cme_intraday_1m;
 pub mod deribit_iv;

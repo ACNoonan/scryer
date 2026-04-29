@@ -22,7 +22,7 @@
 use arrow_array::RecordBatch;
 use arrow_schema::ArrowError;
 use scryer_schema::{
-    backed, cex_perp_funding_multi, cme_intraday_1m, deribit_iv, dex_xstock_swaps, drift_liquidation, earnings, fluid_vault_config, fred_macro, fred_macro_extended, geckoterminal,
+    backed, cboe_indices, cex_perp_funding_multi, cme_intraday_1m, deribit_iv, dex_xstock_swaps, drift_liquidation, earnings, fluid_vault_config, fred_macro, fred_macro_extended, geckoterminal,
     jito_bundles, jito_tip_floor, jupiter_lend_liquidation, kamino_liquidation, kamino_obligation,
     kamino_obligation_position, kamino_reserve, kamino_scope, kraken_funding, loopscale_loan,
     loopscale_loan_collateral, mango_v4_liquidation, mango_v4_oracle_config, nasdaq_halts,
@@ -539,6 +539,25 @@ impl DatasetSchema for fred_macro::v1::Event {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         fred_macro::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for cboe_indices::v1::Bar {
+    const DATA_TYPE: &'static str = "indices";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("index");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Yearly;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.date as i64 * 86_400
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        cboe_indices::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        cboe_indices::v1::from_record_batch(batch)
     }
 }
 

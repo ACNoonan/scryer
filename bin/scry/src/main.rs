@@ -20,6 +20,7 @@ mod jito_cmd;
 mod jito_tip_floor_cmd;
 mod kamino_obligations_cmd;
 mod kamino_reserves_cmd;
+mod cboe_cmd;
 mod cex_funding_cmd;
 mod databento_cmd;
 mod deribit_cmd;
@@ -79,6 +80,10 @@ enum Command {
     /// Databento Historical API — CME futures 1-minute OHLCV bars.
     /// Pay-as-you-go against the operator's $125 signup credit.
     Databento(DatabentoCmd),
+    /// CBOE public-CSV index fetcher — VIX-family + SKEW historical
+    /// daily bars from cdn.cboe.com. Writes to
+    /// dataset/cboe/indices/v1/index={X}/year=YYYY.parquet.
+    Cboe(CboeCmd),
     /// Deribit DVOL — BTC/ETH volatility-index fetcher (the
     /// crypto equivalent of CBOE's VIX). Public REST, no auth.
     /// Writes to dataset/deribit/dvol/v1/underlying={X}/year=YYYY.parquet.
@@ -176,6 +181,20 @@ struct FredCmd {
 struct DatabentoCmd {
     #[command(subcommand)]
     target: DatabentoTarget,
+}
+
+#[derive(Parser, Debug)]
+struct CboeCmd {
+    #[command(subcommand)]
+    target: CboeTarget,
+}
+
+#[derive(Subcommand, Debug)]
+enum CboeTarget {
+    /// Pull historical daily bars for the configured CBOE indices
+    /// (default: VIX,VIX9D,VIX1D,VIX3M,VIX6M,SKEW). One row per
+    /// (index, date) pair.
+    Indices(cboe_cmd::IndicesArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -452,6 +471,9 @@ async fn main() -> Result<()> {
         Command::Databento(c) => match c.target {
             DatabentoTarget::Intraday1m(a) => databento_cmd::run_intraday(a).await,
             DatabentoTarget::EquitiesDaily(a) => databento_cmd::run_equities_daily(a).await,
+        },
+        Command::Cboe(c) => match c.target {
+            CboeTarget::Indices(a) => cboe_cmd::run_indices(a).await,
         },
         Command::Deribit(c) => match c.target {
             DeribitTarget::Dvol(a) => deribit_cmd::run_dvol(a).await,

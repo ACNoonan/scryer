@@ -1319,7 +1319,7 @@ exists in workspace; needs implementation.
 **Effort.** ~6+ hours per protocol (separate methodology entries
 each).
 
-### 30. `vix_term_structure.v1` — VIX1D / VIX9D / VIX / VIX3M / VIX6M forward  `[methodology-entry-needed; deferred — no upstream identified]`
+### 30. `vix_term_structure.v1` — VIX1D / VIX9D / VIX / VIX3M / VIX6M forward  `[done — phase 47 via cboe_indices.v1]`
 
 > **Status (2026-04-28).** Probed Databento (the natural fit given
 > Phase 38's CME futures infrastructure): **VIX index calculations
@@ -1421,7 +1421,7 @@ _dedup_key        string  (= symbol + date)
 
 **Effort.** ~1 hour (yfinance batch).
 
-### 33. `cboe_pc_skew.v1` — Cboe daily put/call ratio + SKEW index  `[methodology-entry-needed]`
+### 33. `cboe_pc_skew.v1` — Cboe daily put/call ratio + SKEW index  `[partial — phase 47 ships SKEW; P/C deferred]`
 
 **What.** Daily Cboe equity P/C ratio and SKEW index. Tail-risk
 regime signal complementary to VIX level — captures "the market is
