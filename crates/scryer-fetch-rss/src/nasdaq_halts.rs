@@ -127,7 +127,11 @@ fn assign_field(acc: &mut HaltAccumulator, tag: &str, text: &str) {
         "HaltTime" => acc.halt_time = value,
         "IssueSymbol" => acc.issue_symbol = value,
         "IssueName" => acc.issue_name = value,
-        "MarketCategory" => acc.market_category = value,
+        // Nasdaq's RSS used `<ndaq:Market>` historically and switched
+        // to `<ndaq:MarketCategory>` at some point — accept both into
+        // the same column so historical snapshots from the Wayback
+        // backfill (item 15b) populate `market_category` cleanly.
+        "MarketCategory" | "Market" => acc.market_category = value,
         "ReasonCode" => acc.reason_code = value,
         "PauseThresholdPrice" => acc.pause_threshold_price = value,
         "ResumptionDate" => acc.resumption_date = value,

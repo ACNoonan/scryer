@@ -3,12 +3,27 @@
 Quantitative-crypto data fetcher and store. See `README.md` for what it
 does and `methodology_log.md` for why the architecture is what it is.
 
+## Documentation layout
+
+Four files. Load only what your task needs.
+
+- `methodology_log.md` (root) — locked architectural decisions
+  (workspace shape, storage policy, proxy scope, write-side daemon
+  contract, etc.). Audit trail of WHY the system is the way it is.
+- `wishlist.md` (root) — forward-looking work log. What's next,
+  what's blocked, what's gated. Schema specs are NOT here.
+- `docs/schemas.md` — every parquet schema's columns, dedup key, and
+  storage path. Locked, proposed, done, and retracted schemas.
+- `docs/phase_log.md` — running ledger of v0.1-phase-N rows
+  (Decision log + Specification log + Done index). What shipped,
+  when, and why.
+
 ## Methodology — read first
 
 `methodology_log.md` is the architecture-decision audit trail. It is
 **not optional context**: the locked decisions there override defaults,
-and code that contradicts them either updates the log first (with a
-new version row) or doesn't get merged.
+and code that contradicts them either appends a new row in
+`docs/phase_log.md` (with the change reason) or doesn't get merged.
 
 When citing a decision in a response, cite the section by name so the
 user can jump to it (e.g., "see Schema versioning policy in
@@ -23,8 +38,9 @@ them is large.
 1. **Pre-flight before any new crate or major change.** Read
    `methodology_log.md`'s pre-flight section. If the change touches a
    locked decision (workspace shape, schema versioning policy, storage
-   layout, provider abstraction), update the methodology log with a new
-   version row before writing code.
+   layout, provider abstraction), append a new version row to
+   `docs/phase_log.md`'s Decision log before writing code, and (if a
+   new schema is involved) add the schema spec to `docs/schemas.md`.
 
 2. **Schemas are append-only within a major version.** Never rename,
    drop, or change the type/semantics of an existing column in

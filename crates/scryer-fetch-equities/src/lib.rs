@@ -29,6 +29,7 @@
 
 pub mod finnhub;
 pub mod stooq;
+pub mod yahoo_corp_actions;
 
 use std::time::Duration;
 

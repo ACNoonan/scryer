@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# scryer — control script for scryer launchd services
+#
+# Symlink to ~/.local/bin/scryer (or any PATH dir):
+#   ln -sf "$(pwd)/ops/scripts/scryer" ~/.local/bin/scryer
+#
+# Operates on every plist matching com.adamnoonan.scryer.*  in
+# ~/Library/LaunchAgents/ (proxy daemon, portal HTTP daemon, fetch tapes).
+#
+# Commands:
+#   up              Refresh UI bundle then bootstrap any missing scryer plists
+#   down            Bootout all loaded scryer plists
+#   status          Show launchctl state for every scryer plist
+#   open            Open the portal in your default browser
+#   ui-refresh      Rebuild the React UI and rsync to the install location
+#   logs <name>     Tail logs for one job (e.g. proxy, portal-server, pyth-tape)
+#   kick <name>     launchctl kickstart -k for one job
+#
+# Conventions match ops/launchd/README.md:
+#   binaries:        ~/Library/Application Support/scryer/bin/
+#   ui bundle:       ~/Library/Application Support/scryer/portal-ui/
+#   logs:            ~/Library/Logs/scryer/<name>.{out,err}.log
+
+set -euo pipefail
+
+REPO_ROOT="${SCRYER_REPO:-$HOME/Documents/scryer}"
+LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
+SUPPORT_ROOT="$HOME/Library/Application Support/scryer"
+PORTAL_URL="http://127.0.0.1:47777/"
+UI_DEST="$SUPPORT_ROOT/portal-ui"
+UI_SRC="$REPO_ROOT/crates/scryer-portal-shell/ui"
+LOG_ROOT="$HOME/Library/Logs/scryer"
+
+uid="$(id -u)"
+domain="gui/$uid"
+
+scryer_labels() {
+  shopt -s nullglob
+  for plist in "$LAUNCH_AGENTS"/com.adamnoonan.scryer.*.plist; do
+    basename "$plist" .plist
+  done
+}
+
+is_loaded() {
+  launchctl print "$domain/$1" >/dev/null 2>&1
+}
+
+cmd_up() {
+  if [[ -d "$UI_SRC" ]]; then
+    cmd_ui_refresh
+  fi
+  loaded_any=0
+  while IFS= read -r label; do
+    plist="$LAUNCH_AGENTS/$label.plist"
+    if is_loaded "$label"; then
+      printf "  [ok]   %-50s already loaded\n" "$label"
+    else
+      if launchctl bootstrap "$domain" "$plist" 2>/dev/null; then
+        printf "  [up]   %-50s loaded\n" "$label"
+        loaded_any=1
+      else
+        printf "  [fail] %-50s bootstrap failed\n" "$label"
+      fi
+    fi
+  done < <(scryer_labels)
+  if [[ $loaded_any -eq 0 ]]; then
+    echo "(everything was already up)"
+  fi
+}
+
+cmd_down() {
+  while IFS= read -r label; do
+    if is_loaded "$label"; then
+      if launchctl bootout "$domain/$label" 2>/dev/null; then
+        printf "  [down] %-50s unloaded\n" "$label"
+      else
+        printf "  [fail] %-50s bootout failed\n" "$label"
+      fi
+    else
+      printf "  [skip] %-50s not loaded\n" "$label"
+    fi
+  done < <(scryer_labels)
+}
+
+cmd_status() {
+  while IFS= read -r label; do
+    if out=$(launchctl print "$domain/$label" 2>/dev/null); then
+      state=$(echo "$out" | awk -F' = ' '/^\tstate /{print $2; exit}')
+      pid=$(echo "$out" | awk -F' = ' '/^\tpid /{print $2; exit}')
+      exit_code=$(echo "$out" | awk -F' = ' '/^\tlast exit code /{print $2; exit}')
+      printf "  %-50s %-12s pid=%-7s exit=%s\n" \
+        "$label" "${state:-unknown}" "${pid:-—}" "${exit_code:-—}"
+    else
+      printf "  %-50s %s\n" "$label" "not loaded"
+    fi
+  done < <(scryer_labels)
+}
+
+cmd_open() {
+  open "$PORTAL_URL"
+}
+
+cmd_ui_refresh() {
+  if [[ ! -d "$UI_SRC" ]]; then
+    echo "[ERROR] UI source not found at $UI_SRC" >&2
+    exit 1
+  fi
+  if ! command -v npm >/dev/null; then
+    echo "[ERROR] npm not on PATH; install Node.js or skip ui-refresh" >&2
+    exit 1
+  fi
+  ( cd "$UI_SRC" && npm run --silent build >/dev/null )
+  mkdir -p "$UI_DEST"
+  rsync -a --delete "$UI_SRC/dist/" "$UI_DEST/"
+  size_kb=$(du -sk "$UI_DEST" | awk '{print $1}')
+  echo "  [ui]   bundled to $UI_DEST (${size_kb} KB)"
+}
+
+cmd_logs() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo "usage: scryer logs <name>   (e.g. proxy, portal-server, pyth-tape)" >&2
+    exit 1
+  fi
+  shift
+  files=( "$LOG_ROOT/$name.out.log" "$LOG_ROOT/$name.err.log" )
+  existing=()
+  for f in "${files[@]}"; do
+    [[ -f "$f" ]] && existing+=("$f")
+  done
+  if [[ ${#existing[@]} -eq 0 ]]; then
+    echo "[ERROR] no logs at $LOG_ROOT/$name.{out,err}.log" >&2
+    exit 1
+  fi
+  exec tail -F "${existing[@]}"
+}
+
+cmd_kick() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo "usage: scryer kick <name>" >&2
+    exit 1
+  fi
+  # Accept either a bare name (proxy, portal-server) or a full label.
+  local label="$name"
+  if [[ "$label" != com.* ]]; then
+    label="com.adamnoonan.scryer.$name"
+  fi
+  launchctl kickstart -k "$domain/$label"
+  echo "  [kick] $label"
+}
+
+usage() {
+  sed -n '2,30p' "$0" | sed -e 's/^# //' -e 's/^#$//' >&2
+  exit 1
+}
+
+main() {
+  local cmd="${1:-}"
+  if [[ -z "$cmd" ]]; then usage; fi
+  shift
+  case "$cmd" in
+    up)         cmd_up         "$@" ;;
+    down)       cmd_down       "$@" ;;
+    status)     cmd_status     "$@" ;;
+    open)       cmd_open       "$@" ;;
+    ui|ui-refresh|refresh) cmd_ui_refresh "$@" ;;
+    logs)       cmd_logs       "$@" ;;
+    kick)       cmd_kick       "$@" ;;
+    -h|--help)  usage ;;
+    *)          echo "unknown command: $cmd" >&2; usage ;;
+  esac
+}
+
+main "$@"

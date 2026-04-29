@@ -207,21 +207,11 @@ async fn summarize_one(path: &Path) -> Result<JobSummary> {
             .get("StandardErrorPath")
             .and_then(Value::as_string)
             .map(PathBuf::from);
-        let lines = tail_file(stderr_path.as_deref(), 30).await;
-        lines
-            .into_iter()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .map(|l| {
-                let trimmed = l.trim();
-                if trimmed.chars().count() > 200 {
-                    let mut out: String = trimmed.chars().take(197).collect();
-                    out.push_str("...");
-                    out
-                } else {
-                    trimmed.to_string()
-                }
-            })
+        let stdout_path = dict
+            .get("StandardOutPath")
+            .and_then(Value::as_string)
+            .map(PathBuf::from);
+        pick_last_error(stderr_path.as_deref(), stdout_path.as_deref()).await
     } else {
         None
     };
@@ -471,6 +461,51 @@ async fn stdio_paths(plist_path: &Path) -> Result<(Option<PathBuf>, Option<PathB
         .and_then(Value::as_string)
         .map(PathBuf::from);
     Ok((out, err))
+}
+
+/// Surface the most informative recent log line for a failed job.
+///
+/// Prefers the file (stderr or stdout) with the newer mtime — `set -e` shells
+/// often exit after writing the failure to *stdout* (see kamino-weekly-rollup
+/// where step 1/7 logs "cannot pull with rebase: You have unstaged changes" to
+/// stdout, while stderr stays stale from a prior run). Falls back to the other
+/// file if the chosen one has no usable line.
+async fn pick_last_error(
+    stderr_path: Option<&Path>,
+    stdout_path: Option<&Path>,
+) -> Option<String> {
+    let stderr_mtime = mtime(stderr_path).await;
+    let stdout_mtime = mtime(stdout_path).await;
+    let (primary, fallback) = match (stderr_mtime, stdout_mtime) {
+        (Some(s), Some(o)) if s >= o => (stderr_path, stdout_path),
+        (Some(_), Some(_)) => (stdout_path, stderr_path),
+        (Some(_), None) => (stderr_path, None),
+        (None, Some(_)) => (stdout_path, None),
+        (None, None) => (None, None),
+    };
+    if let Some(line) = last_error_line(primary).await {
+        return Some(line);
+    }
+    last_error_line(fallback).await
+}
+
+async fn mtime(path: Option<&Path>) -> Option<std::time::SystemTime> {
+    let p = path?;
+    fs::metadata(p).await.ok()?.modified().ok()
+}
+
+async fn last_error_line(path: Option<&Path>) -> Option<String> {
+    let lines = tail_file(path, 30).await;
+    lines.into_iter().rev().find(|l| !l.trim().is_empty()).map(|l| {
+        let trimmed = l.trim();
+        if trimmed.chars().count() > 200 {
+            let mut out: String = trimmed.chars().take(197).collect();
+            out.push_str("...");
+            out
+        } else {
+            trimmed.to_string()
+        }
+    })
 }
 
 async fn tail_file(path: Option<&Path>, max_lines: usize) -> Vec<String> {

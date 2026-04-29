@@ -19,12 +19,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use clap::Parser;
 use scryer_fetch_equities::{
-    finnhub, stooq, PollConfig, FetchError as EqFetchError,
+    finnhub, stooq, yahoo_corp_actions, PollConfig, FetchError as EqFetchError,
 };
-use scryer_schema::{earnings, yahoo, Meta};
+use scryer_schema::{earnings, yahoo, yahoo_corp_actions as schema_corp_actions, Meta};
 use scryer_store::{venue, Dataset};
 
 #[derive(Parser, Debug)]
@@ -101,6 +101,52 @@ pub struct EarningsArgs {
     retry_delay_secs: u64,
     /// Delay between successive symbol calls. Finnhub free tier is
     /// 60 calls/min — default 1100ms keeps us safely under.
+    #[arg(long, default_value_t = 1100)]
+    rate_limit_ms: u64,
+    #[arg(long, default_value = "./dataset")]
+    dataset: PathBuf,
+    #[arg(long, default_value = venue::YAHOO)]
+    venue: String,
+}
+
+#[derive(Parser, Debug)]
+pub struct CorpActionsArgs {
+    /// Comma-separated tickers — equity / ETF symbols whose
+    /// dividend + split history is to be backfilled. Use the same
+    /// case Yahoo expects (`AAPL`, `SPY`, `MSTR`).
+    #[arg(long, value_delimiter = ',', required = true)]
+    symbols: Vec<String>,
+    /// Window start as `YYYY-MM-DD` UTC. Yahoo serves the entire
+    /// history per symbol on every call; the fetcher clips response-
+    /// side to `[start, end]`.
+    #[arg(long)]
+    start: String,
+    /// Window end as `YYYY-MM-DD` UTC.
+    #[arg(long)]
+    end: String,
+    /// `_source` stamped on every emitted row.
+    #[arg(long, default_value = "yahoo:chart")]
+    source: String,
+    /// Yahoo chart base URL.
+    #[arg(long, default_value = yahoo_corp_actions::DEFAULT_BASE_URL)]
+    base_url: String,
+    /// Browser-shaped User-Agent. Yahoo's gate is sensitive to
+    /// non-browser TLS clients; the default below matches what
+    /// `yfinance` uses internally as of v0.2.43.
+    #[arg(
+        long,
+        default_value = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )]
+    user_agent: String,
+    #[arg(long, default_value_t = 30)]
+    request_timeout_secs: u64,
+    #[arg(long, default_value_t = 3)]
+    retry_max: u32,
+    #[arg(long, default_value_t = 2)]
+    retry_delay_secs: u64,
+    /// Delay between successive symbol calls in milliseconds. Yahoo's
+    /// per-IP rate-limit triggers around ~1-2 req/sec; default 1100ms
+    /// keeps a small safety margin.
     #[arg(long, default_value_t = 1100)]
     rate_limit_ms: u64,
     #[arg(long, default_value = "./dataset")]
@@ -306,6 +352,114 @@ pub async fn run_earnings(args: EarningsArgs) -> Result<()> {
         errors.len()
     );
     Ok(())
+}
+
+pub async fn run_corp_actions(args: CorpActionsArgs) -> Result<()> {
+    let cfg = PollConfig {
+        request_timeout: Duration::from_secs(args.request_timeout_secs),
+        retry_max: args.retry_max,
+        retry_delay: Duration::from_secs(args.retry_delay_secs),
+        source_label: args.source.clone(),
+        user_agent: args.user_agent.clone(),
+        ..Default::default()
+    };
+    let client = reqwest::Client::builder()
+        .timeout(cfg.request_timeout)
+        .user_agent(cfg.user_agent.clone())
+        .build()
+        .context("building reqwest client")?;
+
+    let now = Utc::now();
+    let meta = Meta::new(
+        schema_corp_actions::v1::SCHEMA_VERSION,
+        now.timestamp(),
+        &args.source,
+    );
+
+    let start_unix = parse_ymd_to_unix(&args.start)?;
+    // End-exclusive YYYY-MM-DD turns into "midnight of end day +
+    // 1 day" so events on `end` itself are included.
+    let end_unix = parse_ymd_to_unix(&args.end)?
+        .checked_add(86_400)
+        .context("end date overflow")?;
+
+    tracing::info!(
+        symbols = args.symbols.len(),
+        start = args.start,
+        end = args.end,
+        "fetching Yahoo corp-actions"
+    );
+
+    let mut by_symbol: BTreeMap<String, Vec<schema_corp_actions::v1::Action>> = BTreeMap::new();
+    let mut errors: Vec<(String, String)> = Vec::new();
+    for symbol in &args.symbols {
+        match yahoo_corp_actions::fetch_corp_actions(
+            &client,
+            &cfg,
+            &args.base_url,
+            symbol,
+            start_unix,
+            end_unix,
+            &meta,
+        )
+        .await
+        {
+            Ok(rows) => {
+                tracing::info!(symbol, rows = rows.len(), "decoded");
+                by_symbol.entry(symbol.clone()).or_default().extend(rows);
+            }
+            Err(e) => {
+                tracing::warn!(symbol, error = %e, "fetch failed; continuing");
+                errors.push((symbol.clone(), format_eq_error(&e)));
+            }
+        }
+        if args.rate_limit_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(args.rate_limit_ms)).await;
+        }
+    }
+
+    if by_symbol.values().all(|v| v.is_empty()) {
+        if !errors.is_empty() {
+            anyhow::bail!(
+                "all {} symbol(s) failed; first error: {}",
+                errors.len(),
+                errors.first().map(|(_, e)| e.as_str()).unwrap_or("?")
+            );
+        }
+        println!(
+            "equities corp-actions: rows_added=0 rows_deduped=0 partitions_written=0 (empty)"
+        );
+        return Ok(());
+    }
+
+    let ds = Dataset::new(&args.dataset);
+    let mut total_added = 0usize;
+    let mut total_deduped = 0usize;
+    let mut total_partitions = 0usize;
+    for (symbol, rows) in &by_symbol {
+        if rows.is_empty() {
+            continue;
+        }
+        let stats = ds
+            .write::<schema_corp_actions::v1::Action>(&args.venue, Some(symbol), rows)
+            .with_context(|| format!("Dataset::write yahoo corp_actions for {symbol}"))?;
+        total_added += stats.rows_added;
+        total_deduped += stats.rows_deduped;
+        total_partitions += stats.partitions_written;
+    }
+    println!(
+        "equities corp-actions: rows_added={} rows_deduped={} partitions_written={} symbols_failed={}",
+        total_added, total_deduped, total_partitions, errors.len()
+    );
+    Ok(())
+}
+
+fn parse_ymd_to_unix(s: &str) -> Result<i64> {
+    let d = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .with_context(|| format!("expected YYYY-MM-DD, got {s}"))?;
+    let dt = chrono::Utc
+        .from_utc_datetime(&d.and_hms_opt(0, 0, 0).context("invalid time-of-day")?);
+    Ok(dt.timestamp())
 }
 
 fn format_eq_error(e: &EqFetchError) -> String {

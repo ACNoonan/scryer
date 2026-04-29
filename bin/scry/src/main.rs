@@ -24,6 +24,7 @@ mod backed_cmd;
 mod cboe_cmd;
 mod cex_funding_cmd;
 mod cex_stock_perp_cmd;
+mod chainlink_reports_cmd;
 mod databento_cmd;
 mod deribit_cmd;
 mod dex_xstock_swaps_cmd;
@@ -515,6 +516,13 @@ enum SolanaTarget {
     /// jupiter_mid, redstone). Emits one oracle_context.v1 row per
     /// (event, source[, session]) triple within ±window_secs.
     OracleContext(oracle_context_cmd::OracleContextArgs),
+    /// Continuous Chainlink Data Streams report tape. Walks the
+    /// Verifier program's signature stream, decodes every verify CPI,
+    /// emits one `chainlink_data_streams.v1::Report` per
+    /// (feed, observation, signature) triple. Third leg (alongside
+    /// backed_nav_strikes + cex_stock_perp_tape) for the paper §1.1
+    /// oracle-divergence analysis.
+    ChainlinkReports(chainlink_reports_cmd::ChainlinkReportsArgs),
 }
 
 #[tokio::main]
@@ -565,6 +573,7 @@ async fn main() -> Result<()> {
             SolanaTarget::PriorityFees(a) => priority_fees_cmd::run_priority_fees(a).await,
             SolanaTarget::XstockHolders(a) => xstock_holders_cmd::run_xstock_holders(a).await,
             SolanaTarget::OracleContext(a) => oracle_context_cmd::run_oracle_context(a).await,
+            SolanaTarget::ChainlinkReports(a) => chainlink_reports_cmd::run_chainlink_reports(a).await,
         },
         Command::Redstone(c) => match c.target {
             RedstoneTarget::Tape(a) => redstone_cmd::run_tape(a).await,

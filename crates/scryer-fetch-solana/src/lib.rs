@@ -39,6 +39,11 @@ pub mod sig_paginate;
 pub mod types;
 pub mod xstock_holders;
 
+pub use chainlink::{
+    decode_v10, extract_all_reports as extract_chainlink_reports, fetch_latest_per_xstock,
+    parse_verify_ix, ChainlinkFetcherConfig, ParsedVerify, V10Observation, V10Report,
+    SCHEMA_V10, VERIFIER_PROGRAM_ID, XSTOCK_FEEDS,
+};
 pub use error::FetchError;
 pub use fluid_vault_configs::{
     decode_vault_config_bytes, FluidVaultConfigsFetcher, FluidVaultConfigsFetcherConfig,
@@ -516,3 +521,138 @@ impl JupiterLendLiquidationsFetcher {
     }
 }
 
+
+/// Continuous-tape fetcher for Chainlink Data Streams reports
+/// observed on Solana via the Verifier program. Walks
+/// `getSignaturesForAddress(VERIFIER_PROGRAM_ID)` over `[start_ts,
+/// end_ts]`, decodes every verify CPI, and emits one
+/// `chainlink_data_streams::v1::Report` per (feed, observation, sig)
+/// triple. Mirror of the `KaminoLiquidationsFetcher` shape.
+#[derive(Clone, Debug)]
+pub struct ChainlinkReportsFetcherConfig {
+    pub proxy_rpc_url: String,
+    pub helius_parse_url: String,
+    pub source_label: String,
+    pub paginate: SigPaginateConfig,
+    pub parse_txs: ParseTxsConfig,
+    pub use_get_transaction: bool,
+    pub get_tx: get_transactions::GetTxConfig,
+    pub request_timeout: Duration,
+}
+
+impl ChainlinkReportsFetcherConfig {
+    pub fn new(
+        proxy_rpc_url: impl Into<String>,
+        helius_parse_url: impl Into<String>,
+    ) -> Self {
+        Self {
+            proxy_rpc_url: proxy_rpc_url.into(),
+            helius_parse_url: helius_parse_url.into(),
+            source_label: "helius:parseTransactions".into(),
+            paginate: SigPaginateConfig::default(),
+            parse_txs: ParseTxsConfig::default(),
+            use_get_transaction: false,
+            get_tx: get_transactions::GetTxConfig::default(),
+            request_timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+pub struct ChainlinkReportsFetcher {
+    cfg: ChainlinkReportsFetcherConfig,
+    client: reqwest::Client,
+}
+
+impl ChainlinkReportsFetcher {
+    pub fn new(cfg: ChainlinkReportsFetcherConfig) -> Result<Self, FetchError> {
+        let client = reqwest::Client::builder()
+            .timeout(cfg.request_timeout)
+            .user_agent(concat!("scryer-fetch-solana/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .map_err(FetchError::Transport)?;
+        Ok(Self { cfg, client })
+    }
+
+    pub async fn fetch(
+        &self,
+        start_ts: i64,
+        end_ts: i64,
+    ) -> Result<Vec<scryer_schema::chainlink_data_streams::v1::Report>, FetchError> {
+        let fetched_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let meta = Meta::new(
+            scryer_schema::chainlink_data_streams::v1::SCHEMA_VERSION,
+            fetched_at,
+            self.cfg.source_label.clone(),
+        );
+
+        tracing::info!(
+            program = chainlink::VERIFIER_PROGRAM_ID,
+            start_ts,
+            end_ts,
+            "stage 1: paginating Chainlink Verifier signatures"
+        );
+        let sigs = get_signatures_in_window(
+            &self.client,
+            &self.cfg.proxy_rpc_url,
+            chainlink::VERIFIER_PROGRAM_ID,
+            start_ts,
+            end_ts,
+            &self.cfg.paginate,
+        )
+        .await?;
+        tracing::info!(count = sigs.len(), "sig pagination complete");
+        if sigs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let sig_strs: Vec<String> = sigs.iter().map(|s| s.signature.clone()).collect();
+        let txs = if self.cfg.use_get_transaction {
+            tracing::info!(
+                sigs = sig_strs.len(),
+                "stage 2: getTransaction (proxy-routed)"
+            );
+            get_transactions::get_transactions_via_proxy(
+                &self.client,
+                &self.cfg.proxy_rpc_url,
+                &sig_strs,
+                &self.cfg.get_tx,
+            )
+            .await?
+        } else {
+            tracing::info!(
+                sigs = sig_strs.len(),
+                batch_size = self.cfg.parse_txs.batch_size,
+                "stage 2: parseTransactions batches"
+            );
+            parse_all(
+                &self.client,
+                &self.cfg.helius_parse_url,
+                &sig_strs,
+                &self.cfg.parse_txs,
+            )
+            .await?
+        };
+        tracing::info!(parsed = txs.len(), "stage 2 complete");
+
+        let mut out = Vec::new();
+        let mut n_no_verify = 0u64;
+        for tx in &txs {
+            let rows = chainlink::extract_all_reports(tx, &meta);
+            if rows.is_empty() {
+                n_no_verify += 1;
+            } else {
+                out.extend(rows);
+            }
+        }
+        tracing::info!(
+            reports = out.len(),
+            txs_without_verify = n_no_verify,
+            missing = sig_strs.len() - txs.len(),
+            "decode complete"
+        );
+        Ok(out)
+    }
+}

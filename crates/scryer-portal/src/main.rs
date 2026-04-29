@@ -36,6 +36,12 @@ struct Args {
     /// Default ~/Library/Logs/scryer.
     #[arg(long, env = "SCRYER_PORTAL_LOG_DIR")]
     log_dir: Option<String>,
+
+    /// Path to the built React UI (vite `dist/`). When present, served at `/`.
+    /// Default: ~/Library/Application Support/scryer/portal-ui, falling back
+    /// to a `crates/scryer-portal-shell/ui/dist` near the binary in dev.
+    #[arg(long, env = "SCRYER_PORTAL_UI_DIR")]
+    ui_dir: Option<String>,
 }
 
 #[tokio::main]
@@ -49,7 +55,12 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    let cfg = PortalConfig::resolve(args.dataset, args.launch_agents, args.log_dir)?;
+    let cfg = PortalConfig::resolve(
+        args.dataset,
+        args.launch_agents,
+        args.log_dir,
+        args.ui_dir,
+    )?;
     tracing::info!(?cfg, "scryer-portal starting");
 
     let state = Arc::new(AppState::new(cfg)?);

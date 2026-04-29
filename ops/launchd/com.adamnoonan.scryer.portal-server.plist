@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.portal-server</string>
+
+    <!--
+        Long-running HTTP backend for the scryer portal (axum + DuckDB).
+        Always-on so the Tauri portal app can connect at any time and so
+        ad-hoc browser access at http://127.0.0.1:47777/api/* just works.
+        The Tauri shell (when launched) talks to this same binary; it does
+        not spawn its own sidecar in this mode.
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin/scryer-portal-server</string>
+        <string>--bind</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>47777</string>
+        <string>--dataset</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/dataset</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!--
+        Always-on. Same KeepAlive shape as the proxy: restart on crash,
+        do not restart on clean exit (so manual launchctl bootout actually
+        unloads the daemon).
+    -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <!-- 10s minimum between respawn attempts when crash-looping. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/portal-server.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/portal-server.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SCRYER_PORTAL_LOG</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>

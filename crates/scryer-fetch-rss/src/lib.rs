@@ -17,6 +17,7 @@
 
 pub mod backed_corp_actions;
 pub mod nasdaq_halts;
+pub mod wayback;
 
 use std::time::Duration;
 

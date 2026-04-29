@@ -8,7 +8,6 @@ export function JobsView() {
   const [jobs, setJobs] = useState<JobSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showOther, setShowOther] = useState(false);
-  const [showOtherForced, setShowOtherForced] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<JobDetail | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
@@ -57,16 +56,17 @@ export function JobsView() {
     for (const j of jobs ?? []) {
       if (j.group === "scryer") s.push(j);
       else o.push(j);
-      if (j.status === "failed") f.push(j);
+      // Banner shouts only about scryer-track failures. Non-scryer jobs
+      // (soothsayer, google, etc) are still visible in the Other table when
+      // expanded — but they don't hijack the top of the portal.
+      if (j.status === "failed" && j.group === "scryer") f.push(j);
     }
     return { scryer: s, other: o, failures: f };
   }, [jobs]);
 
-  // Auto-expand "other" when it contains a failure — but respect a manual
-  // toggle once the user takes one. `showOtherForced` flips true the first
-  // time the user clicks the toggle, after which auto-expand stops winning.
-  const otherHasFailure = other.some((j) => j.status === "failed");
-  const otherExpanded = showOtherForced ? showOther : showOther || otherHasFailure;
+  // Other group never auto-expands — it's always opt-in. Keeps the portal
+  // calm about non-scryer jobs the operator may not own.
+  const otherExpanded = showOther;
 
   return (
     <div className="section jobs-view">
@@ -138,19 +138,12 @@ export function JobsView() {
           />
           <div style={{ marginTop: 14 }} />
           <button
-            onClick={() => {
-              setShowOther((v) => !v);
-              setShowOtherForced(true);
-            }}
+            onClick={() => setShowOther((v) => !v)}
             style={{ marginBottom: 12 }}
             title="Show / hide non-scryer launchd agents on this machine"
           >
             {otherExpanded ? "Hide" : "Show"} other launchd agents (
-            {other.length}
-            {otherHasFailure
-              ? ` · ${other.filter((j) => j.status === "failed").length} failing`
-              : ""}
-            )
+            {other.length})
           </button>
           {otherExpanded && (
             <JobsTable

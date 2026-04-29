@@ -489,6 +489,126 @@ fn extract_first_v10_observation(tx: &ParsedTx) -> Option<V10Observation> {
     None
 }
 
+/// Walk every verify CPI in a parsed tx and emit one
+/// `chainlink_data_streams::v1::Report` row per successfully decoded
+/// report. Used by the continuous-tape fetcher (Phase 60). Unlike
+/// `extract_first_v10_observation`, this:
+///
+/// 1. Recursively walks `inner_instructions` (the verifier may sit
+///    arbitrarily deep — Helius typically only exposes one level, but
+///    `walk()` handles deeper trees safely).
+/// 2. Emits *every* verify, not just the first match.
+/// 3. Doesn't gate on the xStock registry — feeds outside the registry
+///    still produce rows with `symbol=""` so cadence histograms cover
+///    the full v10/v11 universe, not just our 8 stocks.
+/// 4. Currently decodes v10 only. v11 reports get a stub row with
+///    schema_id=11 + cadence-critical fields (feed_id, observation_ts
+///    via the same `parse_verify_ix` walk) but null prices, awaiting
+///    a v11 layout decoder.
+pub fn extract_all_reports(
+    tx: &ParsedTx,
+    meta: &scryer_schema::Meta,
+) -> Vec<scryer_schema::chainlink_data_streams::v1::Report> {
+    let mut out = Vec::new();
+    let mut visit = |ix: &crate::types::HeliusInstruction| {
+        if ix.program_id != VERIFIER_PROGRAM_ID {
+            return;
+        }
+        let bytes = match bs58::decode(&ix.data).into_vec() {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        let parsed = match parse_verify_ix(&bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::debug!(sig = tx.signature, err = %e, "verify ix decode failed");
+                return;
+            }
+        };
+        let feed_id_hex = if parsed.raw_report.len() >= 32 {
+            hex_encode(&parsed.raw_report[..32])
+        } else {
+            return;
+        };
+        let symbol = feed_id_to_xstock(&parsed.raw_report[..32])
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        if parsed.schema == SCHEMA_V10 {
+            let r = match decode_v10(&parsed.raw_report) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::debug!(sig = tx.signature, err = %e, "v10 decode failed");
+                    return;
+                }
+            };
+            out.push(scryer_schema::chainlink_data_streams::v1::Report {
+                symbol,
+                feed_id: feed_id_hex,
+                schema_id: SCHEMA_V10 as i32,
+                valid_from_ts: r.valid_from_timestamp as i64,
+                observation_ts: r.observations_timestamp as i64,
+                expires_at: r.expires_at as i64,
+                last_update_ts_ns: Some(r.last_update_timestamp_ns as i64),
+                native_fee_raw: Some(r.native_fee as i64),
+                link_fee_raw: Some(r.link_fee as i64),
+                price: Some(r.price()),
+                tokenized_price: Some(r.tokenized_price()),
+                market_status: Some(r.market_status as i32),
+                current_multiplier: Some(r.current_multiplier()),
+                signature: tx.signature.clone(),
+                slot: tx.slot as i64,
+                fee_payer: tx.fee_payer.clone(),
+                block_time: tx.timestamp,
+                meta: meta.clone(),
+            });
+        } else {
+            // Non-v10: emit cadence-only row. observation_ts is at the
+            // same offset (word 2 / bytes 92..96) for both v10 and v11
+            // per the Verifier source's parse_report_details_from_report.
+            // valid_from / expires_at also share offsets across schemas.
+            // Prices are null — a future v11 decoder will fill them in.
+            let observation_ts = read_u32_at(&parsed.raw_report, 92).unwrap_or(0);
+            let valid_from_ts = read_u32_at(&parsed.raw_report, 60).unwrap_or(0);
+            let expires_at = read_u32_at(&parsed.raw_report, 188).unwrap_or(0);
+            out.push(scryer_schema::chainlink_data_streams::v1::Report {
+                symbol,
+                feed_id: feed_id_hex,
+                schema_id: parsed.schema as i32,
+                valid_from_ts: valid_from_ts as i64,
+                observation_ts: observation_ts as i64,
+                expires_at: expires_at as i64,
+                last_update_ts_ns: None,
+                native_fee_raw: None,
+                link_fee_raw: None,
+                price: None,
+                tokenized_price: None,
+                market_status: None,
+                current_multiplier: None,
+                signature: tx.signature.clone(),
+                slot: tx.slot as i64,
+                fee_payer: tx.fee_payer.clone(),
+                block_time: tx.timestamp,
+                meta: meta.clone(),
+            });
+        }
+    };
+    for outer in &tx.instructions {
+        outer.walk(&mut visit);
+    }
+    out
+}
+
+/// Read a big-endian u32 at byte offset `off` in `buf`. Returns
+/// `None` if the read would go past the buffer.
+fn read_u32_at(buf: &[u8], off: usize) -> Option<u32> {
+    if off + 4 > buf.len() {
+        return None;
+    }
+    let mut b = [0u8; 4];
+    b.copy_from_slice(&buf[off..off + 4]);
+    Some(u32::from_be_bytes(b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,5 +791,89 @@ mod tests {
         let buf = vec![0xff; 32];
         let val = read_i256_low_i128(&buf, 0).unwrap();
         assert_eq!(val, -1);
+    }
+
+    /// `extract_all_reports` should emit one Report row per
+    /// successfully decoded verify CPI in the tx, walking arbitrarily
+    /// nested inner_instructions. This builds a synthetic ParsedTx
+    /// with two router-CPI'd verify calls (different feeds) and a
+    /// non-verifier IX in between, and confirms we emit exactly two
+    /// rows with the right fields.
+    #[test]
+    fn extract_all_reports_emits_one_per_verify_cpi() {
+        use crate::types::{HeliusInstruction, ParsedTx};
+        use scryer_schema::Meta;
+
+        let report_spy = synth_v10_report(
+            "000ac6ba1b453a15c1fe9dcd82265ca47bcd04e7b3667de1623617c45cef2a77",
+        );
+        let report_qqq = synth_v10_report(
+            "000a1db22e3e1aa657d910dc90e1f0dbe693d345b7b0b04fd9efc8eb17aef267",
+        );
+        let ix_data_spy =
+            bs58::encode(synth_ix_data(&synth_envelope(&report_spy))).into_string();
+        let ix_data_qqq =
+            bs58::encode(synth_ix_data(&synth_envelope(&report_qqq))).into_string();
+
+        // Outer router IX with two inner verifier CPIs and one
+        // unrelated inner IX — the unrelated inner should be skipped.
+        let outer = HeliusInstruction {
+            program_id: "HFn8GnPADiny6XqUoWE8uRPPxb29ikn4yTuPa9MF2fWJ".to_string(),
+            accounts: vec![],
+            data: String::new(),
+            inner_instructions: vec![
+                HeliusInstruction {
+                    program_id: "ComputeBudget111111111111111111111111111111".to_string(),
+                    accounts: vec![],
+                    data: String::new(),
+                    inner_instructions: vec![],
+                },
+                HeliusInstruction {
+                    program_id: VERIFIER_PROGRAM_ID.to_string(),
+                    accounts: vec![],
+                    data: ix_data_spy,
+                    inner_instructions: vec![],
+                },
+                HeliusInstruction {
+                    program_id: VERIFIER_PROGRAM_ID.to_string(),
+                    accounts: vec![],
+                    data: ix_data_qqq,
+                    inner_instructions: vec![],
+                },
+            ],
+        };
+        let tx = ParsedTx {
+            signature: "TEST_SIG".to_string(),
+            slot: 415_999_999,
+            timestamp: 1_777_300_013,
+            transaction_error: None,
+            fee_payer: "HFn8GnPADiny6XqUoWE8uRPPxb29ikn4yTuPa9MF2fWJ".to_string(),
+            account_data: vec![],
+            instructions: vec![outer],
+        };
+        let meta = Meta::new(
+            scryer_schema::chainlink_data_streams::v1::SCHEMA_VERSION,
+            1_777_300_100,
+            "test:fixture",
+        );
+
+        let rows = extract_all_reports(&tx, &meta);
+        assert_eq!(rows.len(), 2, "expected 2 verify reports, got {}", rows.len());
+
+        let symbols: HashSet<_> = rows.iter().map(|r| r.symbol.as_str()).collect();
+        assert!(symbols.contains("SPYx"));
+        assert!(symbols.contains("QQQx"));
+
+        for r in &rows {
+            assert_eq!(r.schema_id, 10);
+            assert_eq!(r.observation_ts, 1_777_300_010);
+            assert_eq!(r.signature, "TEST_SIG");
+            assert_eq!(r.slot, 415_999_999);
+            assert_eq!(r.block_time, 1_777_300_013);
+            assert_eq!(r.fee_payer, "HFn8GnPADiny6XqUoWE8uRPPxb29ikn4yTuPa9MF2fWJ");
+            assert!(r.price.is_some());
+            assert!(r.tokenized_price.is_some());
+            assert_eq!(r.market_status, Some(2));
+        }
     }
 }

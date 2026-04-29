@@ -24,6 +24,7 @@ JSON-RPC proxy under `KeepAlive`.
 | Plist | Cadence | Depends on |
 |-------|---------|------------|
 | `com.adamnoonan.scryer.proxy.plist` | KeepAlive (always-on) | `.env` (provider keys), `providers.json` |
+| `com.adamnoonan.scryer.portal-server.plist` | KeepAlive (always-on) | `dataset/`, `~/Library/LaunchAgents/` (read) |
 | `com.adamnoonan.scryer.kamino-scope-tape.plist` | every 60s | proxy must be running |
 | `com.adamnoonan.scryer.redstone-tape.plist` | every 600s (10m) | nothing (REST direct) |
 | `com.adamnoonan.scryer.pyth-tape.plist` | every 60s | nothing (REST direct) |

@@ -25,6 +25,7 @@ pub mod cboe_indices;
 pub mod cex_perp_funding_multi;
 pub mod cex_stock_perp_ohlcv;
 pub mod cex_stock_perp_tape;
+pub mod chainlink_data_streams;
 pub mod cme_intraday_1m;
 pub mod deribit_iv;
 pub mod dex_xstock_swaps;

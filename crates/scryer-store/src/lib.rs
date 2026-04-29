@@ -78,6 +78,10 @@ pub mod venue {
     pub const EVM: &str = "evm";
     pub const CEX_PERP_FUNDING: &str = "cex_perp_funding";
     pub const CEX_STOCK_PERP: &str = "cex_stock_perp";
+    /// Chainlink Data Streams reports observed on Solana via the
+    /// Verifier program. Single venue covers all schema versions
+    /// (v10, v11, future) — the row's `schema_id` column distinguishes.
+    pub const CHAINLINK: &str = "chainlink";
     pub const GECKOTERMINAL: &str = "geckoterminal";
     pub const JITO: &str = "jito";
     pub const LOOPSCALE: &str = "loopscale";
