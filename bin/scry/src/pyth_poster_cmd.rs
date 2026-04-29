@@ -22,9 +22,11 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use scryer_fetch_pyth_poster::{
-    daemon::{placeholder_posted_pda, Daemon, IterationInputs, IterationOutcome},
+    daemon::{Daemon, IterationInputs, IterationOutcome, SkipIfSimilarConfig},
+    pda::{parse_feed_id_hex, price_update_pda},
     DevKeypair, DryRunSubmitter, FeedConfig, FeedDefaults, HermesClient, RunMode, TxSubmitter,
 };
+use solana_client::nonblocking::rpc_client::RpcClient;
 
 #[derive(Parser, Debug)]
 pub struct PythPosterArgs {
@@ -89,6 +91,28 @@ pub struct PythPosterArgs {
     /// and writes `dataset/pyth_poster/posts/v1/...`.
     #[arg(long, default_value = "./dataset")]
     dataset: PathBuf,
+
+    /// Disable the on-chain skip-if-similar pre-read. Default: gate
+    /// is ON. Disable for offline tests or when the operator's RPC
+    /// endpoint doesn't have the push-oracle PDAs populated yet.
+    #[arg(long, default_value_t = false)]
+    skip_onchain_precheck: bool,
+
+    /// Skip-if-similar threshold in basis points (methodology
+    /// default 5).
+    #[arg(long, default_value_t = 5)]
+    skip_if_similar_bps: u32,
+
+    /// On-chain `publish_time` staleness threshold for the
+    /// skip-if-similar gate, in seconds (methodology default 300).
+    #[arg(long, default_value_t = 300)]
+    staleness_skip_threshold_secs: u32,
+
+    /// Push-oracle shard id for the PriceUpdateV2 PDA. Methodology
+    /// default 0 (the canonical Pyth-managed shard); soothsayer can
+    /// register a custom shard later via a methodology entry.
+    #[arg(long, default_value_t = 0)]
+    push_oracle_shard_id: u16,
 }
 
 pub async fn run_pyth_poster(args: PythPosterArgs) -> Result<()> {
@@ -110,8 +134,11 @@ pub async fn run_pyth_poster(args: PythPosterArgs) -> Result<()> {
     if !args.dry_run {
         return Err(anyhow!(
             "real on-chain submit not yet implemented — pass --dry-run for now. \
-             Slice 2c lands the real submitter (priority-fee derivation + Pyth \
-             receiver CPI + 3-attempt retry + confirmation polling)."
+             Slice 2c-2 lands the real submitter (push-oracle update_price_feed \
+             instruction encoding + 3-attempt retry + confirmation polling). \
+             Slice 2c-1 (current) wires the on-chain skip-if-similar pre-read + \
+             real PriceUpdateV2 PDA derivation; the only remaining piece is the \
+             tx submission itself."
         ));
     }
 
@@ -197,6 +224,51 @@ pub async fn run_pyth_poster(args: PythPosterArgs) -> Result<()> {
         }
     };
 
+    // Real PDA resolver — derives the push-oracle PriceUpdateV2 PDA
+    // from feed_id + configured shard. Returns base58 for the mirror
+    // tape's `posted_pda` column.
+    let shard_id = args.push_oracle_shard_id;
+    let posted_pda_resolver = |feed_id_hex: &str| -> String {
+        match parse_feed_id_hex(feed_id_hex) {
+            Ok(feed_id) => {
+                let (pda, _bump) = price_update_pda(&feed_id, shard_id);
+                pda.to_string()
+            }
+            Err(_) => format!("invalid:{feed_id_hex}"),
+        }
+    };
+
+    // Skip-if-similar gate — opt-out via --skip-onchain-precheck.
+    // The RPC client + closure live in scope through the iteration;
+    // we build them eagerly so failures (e.g. malformed feed_id)
+    // surface before the iteration starts.
+    let rpc_timeout = std::time::Duration::from_secs(15);
+    let rpc = if !args.skip_onchain_precheck {
+        Some(RpcClient::new(args.rpc_url.clone()))
+    } else {
+        None
+    };
+    let pda_resolver = |feed_id_hex: &str| -> solana_sdk::pubkey::Pubkey {
+        match parse_feed_id_hex(feed_id_hex) {
+            Ok(feed_id) => {
+                let (pda, _bump) = price_update_pda(&feed_id, shard_id);
+                pda
+            }
+            // Unreachable in practice — the resolve_feed_ids call
+            // above already validated hex. If we hit it, return
+            // Pubkey::default() so the on-chain fetch fails fast as
+            // "account not found" → no-skip.
+            Err(_) => solana_sdk::pubkey::Pubkey::default(),
+        }
+    };
+    let skip_gate = rpc.as_ref().map(|rpc| SkipIfSimilarConfig {
+        rpc,
+        rpc_timeout,
+        skip_if_similar_bps: args.skip_if_similar_bps,
+        staleness_skip_threshold_secs: args.staleness_skip_threshold_secs,
+        pda_resolver: &pda_resolver,
+    });
+
     let inputs = IterationInputs {
         mode,
         feeds: &feeds,
@@ -205,7 +277,8 @@ pub async fn run_pyth_poster(args: PythPosterArgs) -> Result<()> {
         submitter,
         priority_fee_micro_lamports_per_cu: priority_fee,
         dataset_root: &args.dataset,
-        posted_pda_resolver: &placeholder_posted_pda,
+        posted_pda_resolver: &posted_pda_resolver,
+        skip_gate: skip_gate.as_ref(),
     };
 
     let outcomes = Daemon::run_once(inputs)

@@ -6139,6 +6139,8 @@ dependencies = [
  "scryer-store",
  "serde",
  "serde_json",
+ "solana-client",
+ "solana-sdk",
  "time",
  "tokio",
  "tracing",

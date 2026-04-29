@@ -25,6 +25,8 @@ pub mod daemon;
 pub mod hermes;
 pub mod keys;
 pub mod mode;
+pub mod onchain;
+pub mod pda;
 pub mod priority_fee;
 pub mod tx;
 
@@ -33,6 +35,13 @@ pub use daemon::{Daemon, DaemonError, IterationInputs, IterationOutcome, VENUE};
 pub use hermes::{HermesClient, HermesError, PriceFeed, PriceUpdate};
 pub use keys::{DevKeypair, KeyError};
 pub use mode::{ModeError, RunMode};
+pub use onchain::{
+    fetch_price_update, should_skip_similar, similarity_bps, OnchainError, OnchainPriceState,
+};
+pub use pda::{
+    parse_feed_id_hex, price_update_pda, push_oracle_program_id, receiver_program_id,
+    DEFAULT_SHARD_ID, PUSH_ORACLE_PROGRAM_ID_STR, RECEIVER_PROGRAM_ID_STR,
+};
 pub use priority_fee::{
     compute_priority_fee, PriorityFeeDecision, PriorityFeeError, HARD_FLOOR_MICRO_LAMPORTS_PER_CU,
 };

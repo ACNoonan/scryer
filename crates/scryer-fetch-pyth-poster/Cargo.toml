@@ -21,6 +21,10 @@ async-trait = "0.1"
 base64 = "0.22"
 bs58 = "0.5"
 sha2 = "0.10"
+borsh = { version = "1", features = ["derive"] }
+solana-sdk = "2"
+solana-client = "2"
+pyth-min = "0.1"
 
 [features]
 test-mock = []

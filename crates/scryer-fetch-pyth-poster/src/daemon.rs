@@ -77,6 +77,19 @@ pub enum IterationOutcome {
     },
 }
 
+/// Optional skip-if-similar pre-read context. When `Some`, the
+/// daemon fetches the on-chain `PriceUpdateV2` PDA per feed and runs
+/// the methodology's similarity gate before submission.
+pub struct SkipIfSimilarConfig<'a> {
+    pub rpc: &'a solana_client::nonblocking::rpc_client::RpcClient,
+    pub rpc_timeout: std::time::Duration,
+    pub skip_if_similar_bps: u32,
+    pub staleness_skip_threshold_secs: u32,
+    /// Resolves a feed_id_hex string to its on-chain PriceUpdateV2
+    /// PDA. Caller picks the shard via this closure.
+    pub pda_resolver: &'a dyn Fn(&str) -> solana_sdk::pubkey::Pubkey,
+}
+
 /// All inputs the daemon needs for one `run_once` invocation. Held
 /// outside the Daemon struct so the CLI can build it from clap args
 /// and pass it in.
@@ -87,17 +100,21 @@ pub struct IterationInputs<'a> {
     pub http_client: &'a reqwest::Client,
     pub hermes: &'a HermesClient,
     pub submitter: Arc<dyn TxSubmitter>,
-    /// Priority fee unit price to pass to the submitter (slice 2a:
-    /// caller picks; slice 2c will derive from `jito_tip_floor.v1`).
+    /// Priority fee unit price to pass to the submitter, derived
+    /// upstream from `jito_tip_floor.v1` per methodology.
     pub priority_fee_micro_lamports_per_cu: u64,
     /// Output dataset root. Mirror-tape writes go here under
     /// `dataset/pyth_poster/posts/v1/...`.
     pub dataset_root: &'a Path,
-    /// Used in the mirror tape's `posted_pda` column. Slice 2a uses
-    /// a placeholder per feed (`pending:<feed_id>`) since on-chain
-    /// PDA derivation needs solana-sdk; slice 2c replaces with real
-    /// derivation.
+    /// Used in the mirror tape's `posted_pda` column. Real
+    /// derivation lives in `crate::pda::price_update_pda`; the
+    /// resolver here turns a `feed_id_hex` string into the base58
+    /// PDA address so this struct stays decoupled from solana-sdk
+    /// types in the caller.
     pub posted_pda_resolver: &'a dyn Fn(&str) -> String,
+    /// When `Some`, daemon performs the skip-if-similar pre-read.
+    /// `None` skips the gate (matches slice-2/2c-1 dry-run behavior).
+    pub skip_gate: Option<&'a SkipIfSimilarConfig<'a>>,
 }
 
 pub struct Daemon;
@@ -145,6 +162,62 @@ impl Daemon {
         for (cfg, update) in inputs.feeds.iter().zip(updates.into_iter()) {
             let posted_pda = (inputs.posted_pda_resolver)(&cfg.feed_id_hex);
 
+            // Skip-if-similar pre-read (when configured). RPC failures
+            // here degrade to "no on-chain context — post anyway"
+            // rather than failing the iteration; we don't want a
+            // flaky RPC to block posting.
+            let onchain_state: Option<crate::onchain::OnchainPriceState> =
+                if let Some(gate) = inputs.skip_gate {
+                    let pda = (gate.pda_resolver)(&cfg.feed_id_hex);
+                    match crate::onchain::fetch_price_update(gate.rpc, &pda, gate.rpc_timeout)
+                        .await
+                    {
+                        Ok(state) => state,
+                        Err(e) => {
+                            warn!(
+                                symbol = %cfg.underlier_symbol,
+                                feed_id = %cfg.feed_id_hex,
+                                error = %e,
+                                "skip-if-similar pre-read failed; proceeding without gate"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+            let should_skip = match (&onchain_state, inputs.skip_gate) {
+                (Some(state), Some(gate)) => crate::onchain::should_skip_similar(
+                    update.price,
+                    update.publish_time,
+                    state,
+                    gate.skip_if_similar_bps,
+                    gate.staleness_skip_threshold_secs,
+                ),
+                _ => false,
+            };
+
+            if should_skip {
+                let (row, iter_outcome) = build_tape_row_skipped(
+                    cfg,
+                    &update,
+                    onchain_state.as_ref(),
+                    &posted_pda,
+                    &source_label,
+                    now_ts,
+                );
+                info!(
+                    symbol = %cfg.underlier_symbol,
+                    feed_id = %cfg.feed_id_hex,
+                    reason = "similar",
+                    "pyth-poster skipped"
+                );
+                tape_rows.push(row);
+                outcomes.push(iter_outcome);
+                continue;
+            }
+
             let submit_inputs = SubmitInputs {
                 feed_id_hex: cfg.feed_id_hex.clone(),
                 vaa_base64: update.vaa_base64.clone(),
@@ -159,6 +232,7 @@ impl Daemon {
                 outcome,
                 &posted_pda,
                 inputs.priority_fee_micro_lamports_per_cu,
+                onchain_state.as_ref(),
                 &source_label,
                 now_ts,
             );
@@ -211,9 +285,19 @@ fn build_tape_row(
     outcome: SubmitOutcome,
     posted_pda: &str,
     priority_fee_micro_lamports_per_cu: u64,
+    onchain_state: Option<&crate::onchain::OnchainPriceState>,
     source_label: &str,
     now_ts: i64,
 ) -> (Post, IterationOutcome) {
+    let (onchain_publish_time_pre, onchain_price_pre, similarity_bps) = match onchain_state {
+        Some(s) => (
+            Some(s.publish_time),
+            Some(s.price),
+            crate::onchain::similarity_bps(update.price, s.price),
+        ),
+        None => (None, None, None),
+    };
+
     // Common fields — populated for every outcome class.
     let mut row = Post {
         feed_id_hex: cfg.feed_id_hex.clone(),
@@ -225,11 +309,9 @@ fn build_tape_row(
         hermes_publish_time: update.publish_time,
         hermes_price: update.price,
         hermes_exponent: clamp_exponent(update.exponent),
-        // Slice 2a: skip-if-similar pre-read isn't wired yet (no
-        // on-chain client). Slice 2c populates these.
-        onchain_publish_time_pre: None,
-        onchain_price_pre: None,
-        similarity_bps: None,
+        onchain_publish_time_pre,
+        onchain_price_pre,
+        similarity_bps,
         solana_post_ts: None,
         solana_post_slot: None,
         priority_fee_micro_lamports_per_cu: None,
@@ -278,6 +360,60 @@ fn build_tape_row(
         }
     };
 
+    (row, iter_outcome)
+}
+
+/// Builds a `skipped_similar` tape row + outcome. Called when the
+/// skip-if-similar gate fires; never goes through the submitter so
+/// `posting_signature` / `solana_post_*` / `priority_fee_*` /
+/// `post_lamports` / `verification_level` all stay null.
+fn build_tape_row_skipped(
+    cfg: &FeedConfig,
+    update: &PriceUpdate,
+    onchain_state: Option<&crate::onchain::OnchainPriceState>,
+    posted_pda: &str,
+    source_label: &str,
+    now_ts: i64,
+) -> (Post, IterationOutcome) {
+    let (onchain_publish_time_pre, onchain_price_pre, similarity_bps_val) = match onchain_state {
+        Some(s) => (
+            Some(s.publish_time),
+            Some(s.price),
+            crate::onchain::similarity_bps(update.price, s.price),
+        ),
+        None => (None, None, None),
+    };
+
+    let row = Post {
+        feed_id_hex: cfg.feed_id_hex.clone(),
+        underlier_symbol: cfg.underlier_symbol.clone(),
+        result_class: result_class::SKIPPED_SIMILAR.to_string(),
+        posting_signature: None,
+        posted_pda: posted_pda.to_string(),
+        hermes_update_id: update.update_id.clone(),
+        hermes_publish_time: update.publish_time,
+        hermes_price: update.price,
+        hermes_exponent: clamp_exponent(update.exponent),
+        onchain_publish_time_pre,
+        onchain_price_pre,
+        similarity_bps: similarity_bps_val,
+        solana_post_ts: None,
+        solana_post_slot: None,
+        priority_fee_micro_lamports_per_cu: None,
+        post_lamports: None,
+        verification_level: None,
+        error_class: None,
+        error_detail: None,
+        meta: Meta::new(
+            scryer_schema::pyth_poster_post::v1::SCHEMA_VERSION,
+            now_ts,
+            source_label,
+        ),
+    };
+    let iter_outcome = IterationOutcome::Skipped {
+        feed_symbol: cfg.underlier_symbol.clone(),
+        reason: "similar".to_string(),
+    };
     (row, iter_outcome)
 }
 
@@ -359,6 +495,7 @@ mod tests {
             SubmitOutcome::Posted(receipt.clone()),
             "REALPDA1111",
             2_500,
+            None,
             "pyth-poster/dev",
             1_777_400_002,
         );
@@ -385,6 +522,7 @@ mod tests {
             SubmitOutcome::Failed(SubmitError::TxError("preflight: invalid blockhash".into())),
             "PDA",
             2_500,
+            None,
             "pyth-poster/dev",
             1_777_400_002,
         );
@@ -415,6 +553,7 @@ mod tests {
             SubmitOutcome::Failed(SubmitError::DryRun),
             "PDA",
             2_500,
+            None,
             "pyth-poster/dev",
             1_777_400_002,
         );
@@ -472,6 +611,7 @@ mod tests {
             SubmitOutcome::Failed(SubmitError::DryRun),
             "pending:eaa020...",
             0,
+            None,
             "pyth-poster/dev",
             1_777_400_002,
         );
@@ -501,6 +641,7 @@ mod tests {
                 SubmitOutcome::Failed(SubmitError::DryRun),
                 "pending:eaa020...",
                 0,
+                None,
                 "pyth-poster/dev",
                 1_777_400_002,
             );
@@ -533,6 +674,7 @@ mod tests {
                 SubmitOutcome::Failed(SubmitError::DryRun),
                 "pending:eaa020...",
                 0,
+                None,
                 "pyth-poster/dev",
                 1_777_400_200,
             );
