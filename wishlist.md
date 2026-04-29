@@ -1280,7 +1280,7 @@ mid, bid, ask, observation_ts, signature, slot.
 
 **Effort.** ~3 hours.
 
-### 18. Backed-vault SPL holders enumeration
+### 18. Backed-vault SPL holders enumeration  `[done — phase 50]`
 
 **What.** Periodic snapshot of every wallet/program that holds
 ≥$X of any xStock mint, with owner-program resolution. Already-done

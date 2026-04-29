@@ -40,6 +40,7 @@ mod pyth_cmd;
 mod redstone_cmd;
 mod solana_cmd;
 mod v5_cmd;
+mod xstock_holders_cmd;
 
 #[derive(Parser, Debug)]
 #[command(name = "scry", version, about = "scryer CLI: fetch + import + manage")]
@@ -391,6 +392,11 @@ enum SolanaTarget {
     /// `latest-N`). Writes to dataset/solana/priority_fees/v1/year=Y/
     /// month=M/day=D.parquet.
     PriorityFees(priority_fees_cmd::PriorityFeesArgs),
+    /// Top-N holders snapshot per xStock mint via
+    /// `getTokenLargestAccounts` + per-account owner lookup.
+    /// Writes to dataset/xstock/xstock_holders/v1/year=Y/month=M/
+    /// day=D.parquet. Schedule weekly via launchd.
+    XstockHolders(xstock_holders_cmd::XstockHoldersArgs),
     /// Single-tick poll of `bundles.jito.wtf/api/v1/bundles/tip_floor`
     /// — the Jito chain-wide rolling tip-percentile distribution.
     /// Writes one `jito_tip_floor.v1::Tick` row to
@@ -452,6 +458,7 @@ async fn main() -> Result<()> {
             SolanaTarget::JitoBundles(a) => jito_cmd::run_jito_bundles(a).await,
             SolanaTarget::JitoTipFloor(a) => jito_tip_floor_cmd::run_jito_tip_floor(a).await,
             SolanaTarget::PriorityFees(a) => priority_fees_cmd::run_priority_fees(a).await,
+            SolanaTarget::XstockHolders(a) => xstock_holders_cmd::run_xstock_holders(a).await,
             SolanaTarget::OracleContext(a) => oracle_context_cmd::run_oracle_context(a).await,
         },
         Command::Redstone(c) => match c.target {

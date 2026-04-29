@@ -37,6 +37,7 @@ pub mod pool_snapshots;
 pub mod priority_fees;
 pub mod sig_paginate;
 pub mod types;
+pub mod xstock_holders;
 
 pub use error::FetchError;
 pub use fluid_vault_configs::{
