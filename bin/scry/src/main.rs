@@ -34,6 +34,7 @@ mod mango_v4_oracle_configs_cmd;
 mod oracle_context_cmd;
 mod pyth_publisher_cmd;
 mod rss_cmd;
+mod sec_cmd;
 mod pool_snapshots_cmd;
 mod priority_fees_cmd;
 mod pyth_cmd;
@@ -78,6 +79,10 @@ enum Command {
     /// RetailSales by default). REST against api.stlouisfed.org;
     /// requires a free FRED_API_KEY.
     Fred(FredCmd),
+    /// SEC EDGAR public-data fetcher. Per-ticker 8-K filing index
+    /// from `data.sec.gov/submissions/CIK*.json`. Requires a
+    /// User-Agent header per SEC fair-access policy.
+    Sec(SecCmd),
     /// Databento Historical API — CME futures 1-minute OHLCV bars.
     /// Pay-as-you-go against the operator's $125 signup credit.
     Databento(DatabentoCmd),
@@ -176,6 +181,21 @@ struct RssCmd {
 struct FredCmd {
     #[command(subcommand)]
     target: FredTarget,
+}
+
+#[derive(Parser, Debug)]
+struct SecCmd {
+    #[command(subcommand)]
+    target: SecTarget,
+}
+
+#[derive(Subcommand, Debug)]
+enum SecTarget {
+    /// Pull the 8-K filing index for the configured tickers from
+    /// SEC EDGAR. Writes one
+    /// `edgar_8k.v1::Filing` row per 8-K (or 8-K/A) per ticker.
+    /// Idempotent — accession_number is the dedup key.
+    Edgar8k(sec_cmd::Edgar8kArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -486,6 +506,9 @@ async fn main() -> Result<()> {
         Command::Fred(c) => match c.target {
             FredTarget::MacroCalendar(a) => fred_cmd::run_macro_calendar(a).await,
             FredTarget::Series(a) => fred_cmd::run_series(a).await,
+        },
+        Command::Sec(c) => match c.target {
+            SecTarget::Edgar8k(a) => sec_cmd::run_edgar_8k(a).await,
         },
         Command::Databento(c) => match c.target {
             DatabentoTarget::Intraday1m(a) => databento_cmd::run_intraday(a).await,

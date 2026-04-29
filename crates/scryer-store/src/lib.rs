@@ -70,6 +70,7 @@ pub mod venue {
     pub const CBOE: &str = "cboe";
     pub const RAYDIUM: &str = "raydium";
     pub const XSTOCK: &str = "xstock";
+    pub const SEC: &str = "sec";
     pub const CEX_PERP_FUNDING: &str = "cex_perp_funding";
     pub const GECKOTERMINAL: &str = "geckoterminal";
     pub const JITO: &str = "jito";

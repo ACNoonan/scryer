@@ -27,6 +27,7 @@ pub mod deribit_iv;
 pub mod dex_xstock_swaps;
 pub mod drift_liquidation;
 pub mod earnings;
+pub mod edgar_8k;
 pub mod error;
 pub mod fluid_vault_config;
 pub mod fred_macro;

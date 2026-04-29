@@ -1467,7 +1467,7 @@ _dedup_key         string  (= date)
 
 **Effort.** ~2 hours.
 
-### 34. `edgar_8k.v1` — SEC EDGAR 8-K filing timestamps + form-type tags  `[methodology-entry-needed]`
+### 34. `edgar_8k.v1` — SEC EDGAR 8-K filing timestamps + form-type tags  `[done — phase 51]`
 
 **What.** Per-filing timestamp + form-type for 8-K filings on the
 10 xStock underliers. Material-event fingerprint at second-resolution.

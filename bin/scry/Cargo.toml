@@ -24,6 +24,7 @@ scryer-fetch-databento = { path = "../../crates/scryer-fetch-databento" }
 scryer-fetch-cex-perps = { path = "../../crates/scryer-fetch-cex-perps" }
 scryer-fetch-deribit = { path = "../../crates/scryer-fetch-deribit" }
 scryer-fetch-cboe = { path = "../../crates/scryer-fetch-cboe" }
+scryer-fetch-sec = { path = "../../crates/scryer-fetch-sec" }
 time = "0.3"
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { workspace = true }
