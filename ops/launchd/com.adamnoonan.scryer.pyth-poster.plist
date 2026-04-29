@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.pyth-poster</string>
+
+    <!--
+        Pyth equity-feed poster daemon (item 44 / phase 52-53).
+
+        WRITE-SIDE DAEMON. This is the first scryer fetcher that
+        signs and submits Solana transactions with a soothsayer-
+        controlled keypair. Read the methodology lock at
+        `methodology_log.md` "Write-side daemons — 2026-04-28
+        (locked)" before enabling this on a host that doesn't
+        already run scryer's read-side fetchers.
+
+        Pre-flight checklist:
+
+          1. Generate a dedicated dev-mode keypair:
+                solana-keygen new -o \
+                  ~/Library/Application\ Support/scryer/keys/pyth-poster.json
+             chmod 600 the file. The daemon refuses to start if the
+             mode isn't `0o600`.
+
+          2. Fund the keypair with devnet SOL (slice 2/2c run as
+             dry-run only — no actual posts — but the keypair load
+             is still validated at boot to fail fast on misconfig).
+
+          3. Confirm `dataset/jito/tip_floor/v1/...` is being
+             populated by `com.adamnoonan.scryer.jito-tip-floor.plist`
+             — the poster reads it for priority-fee derivation per
+             the methodology. Without it, posts fall back to the
+             hard floor (1000 µ-lamports/CU).
+
+          4. SLICE 2c-2 GATE: `--dry-run` is REQUIRED in this
+             plist's ProgramArguments until the real on-chain
+             submitter (slice 2c-2 / phase 54) lands. Removing
+             `--dry-run` before that phase causes the daemon to
+             error at boot rather than half-submitting.
+
+        Disabled by default (RunAtLoad=false). Activate with:
+          launchctl bootstrap gui/$(id -u) \
+            ~/Library/LaunchAgents/com.adamnoonan.scryer.pyth-poster.plist
+          launchctl enable gui/$(id -u)/com.adamnoonan.scryer.pyth-poster
+          launchctl kickstart gui/$(id -u)/com.adamnoonan.scryer.pyth-poster
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin/scry</string>
+        <string>pyth-poster</string>
+        <string>--mode</string>
+        <string>dev</string>
+        <string>--feeds</string>
+        <string>SPY</string>
+        <string>--rpc-url</string>
+        <string>https://api.devnet.solana.com</string>
+        <string>--signer-keypair</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/keys/pyth-poster.json</string>
+        <string>--dry-run</string>
+        <string>--priority-fee-source</string>
+        <string>tape</string>
+        <string>--dataset</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/dataset</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
+
+    <!--
+        Disabled by default. Operator must explicitly enable per the
+        pre-flight checklist above. This is non-negotiable while the
+        write-side daemon is in slice-2 dry-run mode — accidental
+        long-running launches that drift into a future slice's
+        non-dry-run defaults are how state-bugs get into prod.
+    -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!--
+        60s cadence per the methodology's open-hours default
+        (`open_hours_cadence_secs: 60`). The daemon's per-feed cadence
+        guard (slice 2c-2) refines this further during off-hours;
+        for slice 2/2c this is a uniform 60s.
+    -->
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/pyth-poster.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/pyth-poster.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SCRY_LOG</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>

@@ -18,6 +18,9 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 async-trait = "0.1"
+base64 = "0.22"
+bs58 = "0.5"
+sha2 = "0.10"
 
 [features]
 test-mock = []

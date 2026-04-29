@@ -72,15 +72,21 @@ pub struct PythPosterArgs {
     #[arg(long, default_value_t = false)]
     dry_run: bool,
 
-    /// Priority fee unit price (micro-lamports / CU) we WOULD set if
-    /// we were submitting. Captured into the mirror tape's
-    /// `priority_fee_micro_lamports_per_cu` column on submit_failed
-    /// rows that aren't dry-run. Slice 2c will derive this from
-    /// `jito_tip_floor.v1` 75th-pct.
-    #[arg(long, default_value_t = 1_000)]
-    priority_fee_micro_lamports_per_cu: u64,
+    /// Source for the priority-fee unit price. `tape` derives from
+    /// the latest `jito_tip_floor.v1` 75th-pct in the dataset (per
+    /// methodology); `flat` uses `--priority-fee-flat-micro-lamports-per-cu`
+    /// verbatim. Defaults to `tape`.
+    #[arg(long, default_value = "tape")]
+    priority_fee_source: String,
 
-    /// Output dataset root.
+    /// Used only when `--priority-fee-source flat`. Captured into the
+    /// mirror tape's `priority_fee_micro_lamports_per_cu` column.
+    #[arg(long, default_value_t = 1_000)]
+    priority_fee_flat_micro_lamports_per_cu: u64,
+
+    /// Dataset root for both the priority-fee tape read and the
+    /// poster's mirror-tape write. Reads `dataset/jito/tip_floor/v1/...`
+    /// and writes `dataset/pyth_poster/posts/v1/...`.
     #[arg(long, default_value = "./dataset")]
     dataset: PathBuf,
 }
@@ -163,13 +169,41 @@ pub async fn run_pyth_poster(args: PythPosterArgs) -> Result<()> {
     let _defaults = FeedDefaults::default();
     let submitter: Arc<dyn TxSubmitter> = Arc::new(DryRunSubmitter);
 
+    // Derive priority fee per the methodology lock. `tape` reads
+    // `jito_tip_floor.v1` from the dataset and falls back to the
+    // hard floor if the tape is stale or missing; `flat` is for
+    // operators running without the Jito tape collected yet.
+    let priority_fee = match args.priority_fee_source.as_str() {
+        "tape" => {
+            let now = scryer_fetch_pyth_poster::priority_fee::unix_now();
+            let dec = scryer_fetch_pyth_poster::compute_priority_fee(&args.dataset, now)
+                .map_err(|e| anyhow!(e))
+                .context("priority fee derivation from jito_tip_floor.v1")?;
+            tracing::info!(
+                micro_lamports_per_cu = dec.micro_lamports_per_cu,
+                used_floor = dec.used_floor,
+                tape_time_unix = ?dec.tape_time_unix,
+                tape_p75_lamports = ?dec.tape_p75_lamports,
+                rationale = %dec.rationale,
+                "pyth-poster priority fee decision"
+            );
+            dec.micro_lamports_per_cu
+        }
+        "flat" => args.priority_fee_flat_micro_lamports_per_cu,
+        other => {
+            return Err(anyhow!(
+                "--priority-fee-source must be `tape` or `flat`, got `{other}`"
+            ))
+        }
+    };
+
     let inputs = IterationInputs {
         mode,
         feeds: &feeds,
         http_client: &http_client,
         hermes: &hermes,
         submitter,
-        priority_fee_micro_lamports_per_cu: args.priority_fee_micro_lamports_per_cu,
+        priority_fee_micro_lamports_per_cu: priority_fee,
         dataset_root: &args.dataset,
         posted_pda_resolver: &placeholder_posted_pda,
     };

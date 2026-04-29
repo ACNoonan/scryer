@@ -25,6 +25,7 @@ pub mod daemon;
 pub mod hermes;
 pub mod keys;
 pub mod mode;
+pub mod priority_fee;
 pub mod tx;
 
 pub use config::{FeedConfig, FeedDefaults, PosterConfig};
@@ -32,6 +33,9 @@ pub use daemon::{Daemon, DaemonError, IterationInputs, IterationOutcome, VENUE};
 pub use hermes::{HermesClient, HermesError, PriceFeed, PriceUpdate};
 pub use keys::{DevKeypair, KeyError};
 pub use mode::{ModeError, RunMode};
+pub use priority_fee::{
+    compute_priority_fee, PriorityFeeDecision, PriorityFeeError, HARD_FLOOR_MICRO_LAMPORTS_PER_CU,
+};
 pub use tx::{
     DryRunSubmitter, PostedReceipt, SubmitError, SubmitInputs, SubmitOutcome, TxSubmitter,
 };
