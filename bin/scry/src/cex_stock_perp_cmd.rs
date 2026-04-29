@@ -670,3 +670,153 @@ fn format_unix_as_iso(unix: i64) -> String {
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string()
 }
+
+// ============================================================
+// Kraken Futures historical OHLCV backfill (item 45 / Phase 58)
+// ============================================================
+
+#[derive(Parser, Debug)]
+pub struct BackfillArgs {
+    /// Venue to backfill. Currently only `kraken_futures` exposes
+    /// deep history per `PF_*XUSD` listing date. Other venues cap
+    /// at ~30-90 days; if needed, a v2 follow-up adds per-venue
+    /// backfill paths.
+    #[arg(long, default_value = "kraken_futures")]
+    venue: String,
+    /// Comma-separated canonical underlier symbols.
+    #[arg(long, value_delimiter = ',', default_value = "SPY,QQQ,AAPL,GOOGL,NVDA,TSLA,HOOD,MSTR,GLD")]
+    underliers: Vec<String>,
+    /// Window start (`YYYY-MM-DD` UTC).
+    #[arg(long)]
+    start: String,
+    /// Window end (`YYYY-MM-DD` UTC, inclusive). Default: today.
+    #[arg(long, default_value = "")]
+    end: String,
+    #[arg(long, default_value_t = 30)]
+    request_timeout_secs: u64,
+    #[arg(long, default_value_t = 3)]
+    retry_max: u32,
+    #[arg(long, default_value_t = 2)]
+    retry_delay_secs: u64,
+    /// Inter-call delay within the chunk loop (milliseconds).
+    #[arg(long, default_value_t = 250)]
+    rate_limit_ms: u64,
+    #[arg(long, default_value = "./dataset")]
+    dataset: PathBuf,
+    #[arg(long, default_value = venue::CEX_STOCK_PERP)]
+    dataset_venue: String,
+}
+
+pub async fn run_backfill(args: BackfillArgs) -> Result<()> {
+    if args.underliers.is_empty() {
+        anyhow::bail!("--underliers cannot be empty");
+    }
+    if args.venue != "kraken_futures" {
+        anyhow::bail!(
+            "only --venue kraken_futures is supported in v1; other venues cap at ~30-90 days of forward-only candles"
+        );
+    }
+    let start_ts = parse_ymd(&args.start)?;
+    let end_ts = if args.end.is_empty() {
+        Utc::now().timestamp()
+    } else {
+        parse_ymd(&args.end)? + 86_400
+    };
+    if end_ts <= start_ts {
+        anyhow::bail!("--end must be after --start");
+    }
+
+    let cfg = PollConfig {
+        request_timeout: Duration::from_secs(args.request_timeout_secs),
+        retry_max: args.retry_max,
+        retry_delay: Duration::from_secs(args.retry_delay_secs),
+        rate_limit_delay: Duration::from_millis(args.rate_limit_ms),
+        ..Default::default()
+    };
+    let client = build_client(&cfg).context("building reqwest client")?;
+    let now = Utc::now();
+    let fetched_at = now.timestamp();
+    let underliers_upper: Vec<String> =
+        args.underliers.iter().map(|s| s.to_uppercase()).collect();
+
+    let mut all_rows: Vec<OhlcvBar> = Vec::new();
+    let mut per_underlier: BTreeMap<String, usize> = BTreeMap::new();
+    for u in &underliers_upper {
+        let exchange_symbol = format!("PF_{u}XUSD");
+        let mut cursor = start_ts;
+        let mut underlier_rows = 0usize;
+        loop {
+            // Kraken caps at 2000 bars/call (~1.39 days at 1m). Walk
+            // the window forward until we exhaust it or upstream
+            // returns nothing.
+            match kraken_futures::fetch_ohlcv(
+                &client,
+                &cfg,
+                &exchange_symbol,
+                cursor,
+                end_ts,
+                fetched_at,
+            )
+            .await
+            {
+                Ok(rows) if !rows.is_empty() => {
+                    let last_ts = rows.last().unwrap().bar_open_ts;
+                    underlier_rows += rows.len();
+                    all_rows.extend(rows);
+                    let next = last_ts + 60;
+                    if next <= cursor || next > end_ts {
+                        break;
+                    }
+                    cursor = next;
+                }
+                Ok(_) => break,
+                Err(e) => {
+                    tracing::warn!(symbol = %exchange_symbol, cursor, error = %e, "kraken backfill chunk failed; advancing");
+                    cursor += 86_400; // skip a day on error
+                    if cursor >= end_ts {
+                        break;
+                    }
+                }
+            }
+            if cfg.rate_limit_delay > Duration::ZERO {
+                tokio::time::sleep(cfg.rate_limit_delay).await;
+            }
+        }
+        tracing::info!(symbol = %exchange_symbol, rows = underlier_rows, "backfill complete");
+        per_underlier.insert(u.clone(), underlier_rows);
+    }
+
+    if all_rows.is_empty() {
+        println!("cex-stock-perp backfill: rows_added=0 (no rows from kraken_futures)");
+        return Ok(());
+    }
+
+    let mut by_underlier: BTreeMap<String, Vec<OhlcvBar>> = BTreeMap::new();
+    for r in all_rows {
+        by_underlier.entry(r.underlier_symbol.clone()).or_default().push(r);
+    }
+    let ds = Dataset::new(&args.dataset);
+    let mut total_added = 0usize;
+    let mut total_deduped = 0usize;
+    let mut total_partitions = 0usize;
+    for (under, rows) in &by_underlier {
+        let stats = ds
+            .write::<OhlcvBar>(&args.dataset_venue, Some(under), rows)
+            .with_context(|| format!("Dataset::write underlier={under}"))?;
+        total_added += stats.rows_added;
+        total_deduped += stats.rows_deduped;
+        total_partitions += stats.partitions_written;
+    }
+    println!(
+        "cex-stock-perp backfill: rows_added={total_added} rows_deduped={total_deduped} partitions_written={total_partitions} per_underlier_rows={per_underlier:?}"
+    );
+    Ok(())
+}
+
+fn parse_ymd(s: &str) -> Result<i64> {
+    use chrono::TimeZone;
+    let d = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .with_context(|| format!("expected YYYY-MM-DD, got {s}"))?;
+    let naive = d.and_hms_opt(0, 0, 0).context("invalid time-of-day")?;
+    Ok(chrono::Utc.from_utc_datetime(&naive).timestamp())
+}

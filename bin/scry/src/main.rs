@@ -288,6 +288,13 @@ enum CexStockPerpTarget {
     /// DiD. Writes to dataset/cex_stock_perp/ohlcv/v1/underlier=
     /// {SYM}/year=Y/month=M/day=D.parquet.
     Ohlcv(cex_stock_perp_cmd::OhlcvArgs),
+    /// Kraken Futures historical 1m OHLCV backfill — walks the
+    /// `[start, end]` window in chunks (Kraken caps at 2000 bars
+    /// per call ≈ 1.39 days at 1m) and writes to the same dataset
+    /// as the forward `ohlcv` tape. Only Kraken Futures exposes
+    /// deep history per `PF_*XUSD` listing date; other venues cap
+    /// at ~30-90 days and rely on the forward tape.
+    Backfill(cex_stock_perp_cmd::BackfillArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -578,6 +585,7 @@ async fn main() -> Result<()> {
         Command::CexStockPerp(c) => match c.target {
             CexStockPerpTarget::Tape(a) => cex_stock_perp_cmd::run_tape(a).await,
             CexStockPerpTarget::Ohlcv(a) => cex_stock_perp_cmd::run_ohlcv(a).await,
+            CexStockPerpTarget::Backfill(a) => cex_stock_perp_cmd::run_backfill(a).await,
         },
         Command::CexFunding(c) => match c.target {
             CexFundingTarget::Multi(a) => cex_funding_cmd::run_multi(a).await,

@@ -53,7 +53,8 @@ entry is kept below in its priority section for historical context.
 | 41 | `geckoterminal_ohlcv.v1` | phase 49 | GeckoTerminal historical OHLCV (quant-work) |
 | 44 | `pyth_poster_post.v1` | phases 52-54 | Pyth equity-feed poster daemon mirror tape (item 44 slices 1+2+2c) |
 | 45 | `cex_stock_perp_tape.v1` | phases 55 + 57 | Multi-venue 24/7 CEX-perp tape (11 of 11 venues; tape complete) |
-| 45 (companion) | `cex_stock_perp_ohlcv.v1` | phases 56 + 57 | 1-minute OHLCV per venue (10 of 11 venues; Phemex OHLCV auth-required, deferred) |
+| 45 (companion) | `cex_stock_perp_ohlcv.v1` | phases 56 + 57 | 1-minute OHLCV per venue (10 of 11 venues; Phemex OHLCV US-IP-blocked, deferred) |
+| 45 (Kraken historical) | (existing schema) | phase 58 | `scry cex-stock-perp backfill` walks deep Kraken Futures history; live-validated 7d×2 = 20,162 rows |
 
 **Retracted (do not implement)** — premise-incorrect after live source verification:
 
@@ -73,7 +74,7 @@ entry is kept below in its priority section for historical context.
 | 38 | `treasury_auction.v1` | Priority 4, same gate. |
 | 42 | soothsayer-streams-relay-program | Soothsayer-side, in flight. |
 | 43 | `chainlink_streams_relay_tape.v1` | Depends on 42. Soothsayer-side. |
-| 45 (Phemex OHLCV) | (auth-required candle endpoint) | Defer until an API-key path is added to `scryer-fetch-cex-perps`. Tickers shipped. |
+| 45 (Phemex OHLCV) | (US-IP blocked at CDN) | Phemex's public kline endpoints all return `Full authentication required` from the operator's US IP — same geo-block class as Binance + Bybit. Won't unblock without a VPN-access path. Tickers fetcher works (different endpoint, no geo-gate); OHLCV stays deferred. |
 
 ---
 
