@@ -22,6 +22,7 @@
 pub mod backed;
 pub mod cboe_indices;
 pub mod cex_perp_funding_multi;
+pub mod cex_stock_perp_ohlcv;
 pub mod cex_stock_perp_tape;
 pub mod cme_intraday_1m;
 pub mod deribit_iv;

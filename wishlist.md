@@ -53,6 +53,7 @@ entry is kept below in its priority section for historical context.
 | 41 | `geckoterminal_ohlcv.v1` | phase 49 | GeckoTerminal historical OHLCV (quant-work) |
 | 44 | `pyth_poster_post.v1` | phases 52-54 | Pyth equity-feed poster daemon mirror tape (item 44 slices 1+2+2c) |
 | 45 | `cex_stock_perp_tape.v1` | phase 55 | Multi-venue 24/7 CEX-perp tape (4 of 11 venues; 7 enrichment-followups) |
+| 45 (companion) | `cex_stock_perp_ohlcv.v1` | phase 56 | 1-minute OHLCV per venue per perp (paper 1 §1.2 volume DiD; same 4 venues) |
 
 **Retracted (do not implement)** — premise-incorrect after live source verification:
 
@@ -759,18 +760,28 @@ _dedup_key       string  (= symbol + ts)
 
 **Effort.** ~3 hours once the API key exists.
 
-### 45. `cex_stock_perp_tape.v1` — multi-venue 24/7 CEX perp tape on xStock underliers  `[v1 done — phase 55 (4 of 11 venues); 7 enrichment venues outstanding]`
+### 45. `cex_stock_perp_tape.v1` + `cex_stock_perp_ohlcv.v1` — multi-venue 24/7 CEX perp tape on xStock underliers  `[v1 done — phases 55 + 56 (4 of 11 venues); 7 enrichment venues outstanding]`
 
-**Status (2026-04-29).** v1 shipped with **Kraken Futures + Gate.io
-+ OKX + Coinbase International** (the four most-data-rich venues).
-Live-validated cross-venue TSLA dispersion across all 4: 46-cent
-spread between min/max marks at the smoke moment. Gate.io confirmed
-the only TLT venue. The remaining 7 venues from the spec below
-(HTX, BingX, Bitget, MEXC, KuCoin Futures, Phemex, Crypto.com) are
-v1-followup enrichment modules — same pattern as the 4 shipped, ~30-
-40min/venue per the `scryer-fetch-cex-perps` add-a-module template.
-Companion Kraken-Futures historical-backfill CLI deferred until the
-forward tape ages enough to motivate it.
+**Status (2026-04-29).** Both schemas shipped with **Kraken Futures
++ Gate.io + OKX + Coinbase International** (the four most-data-rich
+venues). Phase 55 is the state tape (mark/index/bid/ask snapshots,
+§1.1 oracle-dispersion figure); Phase 56 is the 1m-OHLCV companion
+(per-bar volume_base + volume_quote where exposed, §1.2 weekday-vs-
+weekend volume DiD). Live-validated:
+- §1.1 dispersion: 46-cent spread between min/max marks across the
+  4 venues for TSLA at the smoke moment.
+- §1.2 volume: same-bar TSLA across 3 venues at ts=1777433340
+  produced 0/1.01/62 contracts (Kraken/OKX/Gate respectively),
+  TLT Gate-only at 2 contracts/min — exactly the after-hours
+  low-volume signature paper-1 §1.2 predicts.
+Gate.io is the only TLT venue. The remaining 7 venues from the spec
+below (HTX, BingX, Bitget, MEXC, KuCoin Futures, Phemex, Crypto.com)
+are v1-followup enrichment modules — same pattern as the 4 shipped,
+~30-40min/venue per the `scryer-fetch-cex-perps` add-a-module
+template (×2 for tickers + candles per venue). Kraken-Futures
+historical-backfill CLI deferred — `fetch_ohlcv(from_unix,
+to_unix)` signature is already in place, just needs a backfill-mode
+flag.
 
 
 **What.** Continuous (≤60s cadence) forward tape of every centralized

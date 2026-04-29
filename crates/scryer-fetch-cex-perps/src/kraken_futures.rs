@@ -216,3 +216,180 @@ mod tests {
         assert_eq!(rows[0].underlier_symbol, "SPY");
     }
 }
+
+// ============================================================
+// 1m OHLCV (companion forward tape, item 45 §1.2 / Phase 56)
+// ============================================================
+
+use scryer_schema::cex_stock_perp_ohlcv::v1::{Bar, SCHEMA_VERSION as OHLCV_SCHEMA_VERSION};
+
+pub const OHLCV_SOURCE_LABEL: &str = "kraken_futures:charts/v1/trade";
+
+/// Fetch 1m OHLCV bars for one Kraken Futures stock-perp over
+/// `[from_unix, to_unix]`. Endpoint:
+/// `GET /api/charts/v1/trade/{SYMBOL}/1m`. Free-tier returns deep
+/// history per `PF_*XUSD` listing date.
+pub async fn fetch_ohlcv(
+    client: &reqwest::Client,
+    cfg: &PollConfig,
+    exchange_symbol: &str,
+    from_unix: i64,
+    to_unix: i64,
+    fetched_at: i64,
+) -> Result<Vec<Bar>, FetchError> {
+    let underlier = match underlier_from_symbol(exchange_symbol) {
+        Some(u) => u,
+        None => {
+            return Err(FetchError::UpstreamError(format!(
+                "kraken_futures: not a PF_*XUSD symbol: {exchange_symbol}"
+            )));
+        }
+    };
+    let url = format!(
+        "{}/api/charts/v1/trade/{}/1m",
+        DEFAULT_BASE_URL.trim_end_matches('/'),
+        exchange_symbol
+    );
+    let from_str = from_unix.to_string();
+    let to_str = to_unix.to_string();
+    let mut last_err: Option<FetchError> = None;
+    for _attempt in 0..cfg.retry_max.max(1) {
+        let resp = client
+            .get(&url)
+            .query(&[
+                ("from", from_str.as_str()),
+                ("to", to_str.as_str()),
+            ])
+            .send()
+            .await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = Some(FetchError::Transport(e));
+                tokio::time::sleep(cfg.retry_delay).await;
+                continue;
+            }
+        };
+        let status = resp.status().as_u16();
+        let text = resp.text().await.map_err(FetchError::Transport)?;
+        if status == 429 || status >= 500 {
+            last_err = Some(FetchError::UpstreamStatus {
+                status,
+                body_head: body_head(&text),
+            });
+            tokio::time::sleep(cfg.retry_delay).await;
+            continue;
+        }
+        if status >= 400 {
+            return Err(FetchError::UpstreamStatus {
+                status,
+                body_head: body_head(&text),
+            });
+        }
+        return parse_ohlcv_response(&text, exchange_symbol, &underlier, fetched_at);
+    }
+    Err(last_err.unwrap_or_else(|| {
+        FetchError::UpstreamError(format!("kraken_futures ohlcv retries exhausted for {exchange_symbol}"))
+    }))
+}
+
+/// Parse the Kraken `/charts/v1/trade/{SYM}/1m` body. Public for
+/// unit tests.
+pub fn parse_ohlcv_response(
+    body: &str,
+    exchange_symbol: &str,
+    underlier: &str,
+    fetched_at: i64,
+) -> Result<Vec<Bar>, FetchError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| FetchError::MalformedBody(format!("non-json: {e}")))?;
+    let arr = v
+        .get("candles")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out: Vec<Bar> = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let time_ms = match entry.get("time").and_then(|t| t.as_i64()) {
+            Some(t) => t,
+            None => continue,
+        };
+        let open = parse_str_f64(entry.get("open"));
+        let high = parse_str_f64(entry.get("high"));
+        let low = parse_str_f64(entry.get("low"));
+        let close = parse_str_f64(entry.get("close"));
+        let volume = parse_str_f64(entry.get("volume"));
+        let (open, high, low, close, volume) =
+            match (open, high, low, close, volume) {
+                (Some(o), Some(h), Some(l), Some(c), Some(v)) => (o, h, l, c, v),
+                _ => continue,
+            };
+        let bar_open_ts = time_ms / 1000;
+        out.push(Bar {
+            exchange: "kraken_futures".to_string(),
+            exchange_symbol: exchange_symbol.to_string(),
+            underlier_symbol: underlier.to_string(),
+            backing_kind: "xstock_backed".to_string(),
+            bar_open_ts,
+            bar_close_ts: bar_open_ts + 60,
+            open,
+            high,
+            low,
+            close,
+            volume_base: volume,
+            volume_quote: None,
+            trade_count: None,
+            meta: scryer_schema::Meta::new(OHLCV_SCHEMA_VERSION, fetched_at, OHLCV_SOURCE_LABEL),
+        });
+    }
+    Ok(out)
+}
+
+fn parse_str_f64(v: Option<&serde_json::Value>) -> Option<f64> {
+    v.and_then(|x| x.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .or_else(|| v.and_then(|x| x.as_f64()))
+}
+
+#[cfg(test)]
+mod ohlcv_tests {
+    use super::*;
+
+    #[test]
+    fn parses_typical_kraken_candles() {
+        let body = r#"{"candles":[
+            {"time":1777429500000,"open":"377.59","high":"377.69","low":"377.50","close":"377.65","volume":"100"},
+            {"time":1777429560000,"open":"377.65","high":"377.80","low":"377.60","close":"377.70","volume":"50"}
+        ]}"#;
+        let rows = parse_ohlcv_response(body, "PF_TSLAXUSD", "TSLA", 1_777_400_000)
+            .expect("parse");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].exchange, "kraken_futures");
+        assert_eq!(rows[0].exchange_symbol, "PF_TSLAXUSD");
+        assert_eq!(rows[0].underlier_symbol, "TSLA");
+        assert_eq!(rows[0].backing_kind, "xstock_backed");
+        assert_eq!(rows[0].bar_open_ts, 1_777_429_500);
+        assert_eq!(rows[0].bar_close_ts, 1_777_429_560);
+        assert_eq!(rows[0].open, 377.59);
+        assert_eq!(rows[0].volume_base, 100.0);
+        assert_eq!(rows[0].volume_quote, None);
+        assert_eq!(rows[0].trade_count, None);
+    }
+
+    #[test]
+    fn skips_truncated_candles() {
+        let body = r#"{"candles":[
+            {"time":1777429500000,"open":"377.59"},
+            {"time":1777429560000,"open":"377.65","high":"377.8","low":"377.6","close":"377.7","volume":"50"}
+        ]}"#;
+        let rows = parse_ohlcv_response(body, "PF_TSLAXUSD", "TSLA", 1).expect("parse");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].bar_open_ts, 1_777_429_560);
+    }
+
+    #[test]
+    fn rejects_malformed_body() {
+        let err = parse_ohlcv_response("not json", "PF_X", "X", 1).unwrap_err();
+        assert!(matches!(err, FetchError::MalformedBody(_)));
+    }
+}

@@ -226,3 +226,178 @@ mod tests {
         assert_eq!(rows[0].underlier_symbol, "SPY");
     }
 }
+
+// ============================================================
+// 1m OHLCV (companion forward tape, item 45 §1.2 / Phase 56)
+// ============================================================
+
+use scryer_schema::cex_stock_perp_ohlcv::v1::{Bar, SCHEMA_VERSION as OHLCV_SCHEMA_VERSION};
+
+pub const OHLCV_SOURCE_LABEL: &str = "gate:candlesticks";
+
+/// Fetch 1m OHLCV bars for one Gate.io stock-perp.
+///
+/// Endpoint: `GET /api/v4/futures/usdt/candlesticks?contract={SYM}&interval=1m&limit={N}`.
+/// Free-tier returns ~30-90 days of 1m history depending on contract.
+/// `limit` caps at 2000 per call; pass `None` for the default 100.
+pub async fn fetch_ohlcv(
+    client: &reqwest::Client,
+    cfg: &PollConfig,
+    contract: &str,
+    stock_underliers: &[String],
+    limit: Option<u32>,
+    fetched_at: i64,
+) -> Result<Vec<Bar>, FetchError> {
+    let (underlier, backing_kind) = match underlier_from_contract(contract, stock_underliers) {
+        Some(u) => u,
+        None => {
+            return Err(FetchError::UpstreamError(format!(
+                "gate: not a recognized stock-perp contract: {contract}"
+            )));
+        }
+    };
+    let url = format!(
+        "{}/api/v4/futures/usdt/candlesticks",
+        DEFAULT_BASE_URL.trim_end_matches('/')
+    );
+    let limit_str = limit.map(|n| n.to_string());
+    let mut last_err: Option<FetchError> = None;
+    for _attempt in 0..cfg.retry_max.max(1) {
+        let mut q: Vec<(&str, &str)> =
+            vec![("contract", contract), ("interval", "1m")];
+        if let Some(s) = limit_str.as_deref() {
+            q.push(("limit", s));
+        }
+        let resp = client.get(&url).query(&q).send().await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = Some(FetchError::Transport(e));
+                tokio::time::sleep(cfg.retry_delay).await;
+                continue;
+            }
+        };
+        let status = resp.status().as_u16();
+        let text = resp.text().await.map_err(FetchError::Transport)?;
+        if status == 429 || status >= 500 {
+            last_err = Some(FetchError::UpstreamStatus {
+                status,
+                body_head: body_head(&text),
+            });
+            tokio::time::sleep(cfg.retry_delay).await;
+            continue;
+        }
+        if status >= 400 {
+            return Err(FetchError::UpstreamStatus {
+                status,
+                body_head: body_head(&text),
+            });
+        }
+        return parse_ohlcv_response(&text, contract, &underlier, backing_kind, fetched_at);
+    }
+    Err(last_err.unwrap_or_else(|| {
+        FetchError::UpstreamError(format!("gate ohlcv retries exhausted for {contract}"))
+    }))
+}
+
+pub fn parse_ohlcv_response(
+    body: &str,
+    contract: &str,
+    underlier: &str,
+    backing_kind: &str,
+    fetched_at: i64,
+) -> Result<Vec<Bar>, FetchError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| FetchError::MalformedBody(format!("non-json: {e}")))?;
+    let arr = v.as_array().ok_or_else(|| {
+        FetchError::MalformedBody("gate candles top-level not array".to_string())
+    })?;
+    let mut out: Vec<Bar> = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let t = match entry.get("t").and_then(|x| x.as_i64()) {
+            Some(t) => t,
+            None => continue,
+        };
+        // OHLC are JSON strings; volume `v` is integer (contract count);
+        // `sum` is JSON string for quote-volume.
+        let open = parse_str_f64(entry.get("o"));
+        let high = parse_str_f64(entry.get("h"));
+        let low = parse_str_f64(entry.get("l"));
+        let close = parse_str_f64(entry.get("c"));
+        let v_base = entry.get("v").and_then(|x| x.as_f64());
+        let v_quote = parse_str_f64(entry.get("sum"));
+        let (open, high, low, close, v_base) =
+            match (open, high, low, close, v_base) {
+                (Some(o), Some(h), Some(l), Some(c), Some(v)) => (o, h, l, c, v),
+                _ => continue,
+            };
+        out.push(Bar {
+            exchange: "gate".to_string(),
+            exchange_symbol: contract.to_string(),
+            underlier_symbol: underlier.to_string(),
+            backing_kind: backing_kind.to_string(),
+            bar_open_ts: t,
+            bar_close_ts: t + 60,
+            open,
+            high,
+            low,
+            close,
+            volume_base: v_base,
+            volume_quote: v_quote,
+            trade_count: None,
+            meta: scryer_schema::Meta::new(OHLCV_SCHEMA_VERSION, fetched_at, OHLCV_SOURCE_LABEL),
+        });
+    }
+    Ok(out)
+}
+
+fn parse_str_f64(v: Option<&serde_json::Value>) -> Option<f64> {
+    v.and_then(|x| x.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .or_else(|| v.and_then(|x| x.as_f64()))
+}
+
+#[cfg(test)]
+mod ohlcv_tests {
+    use super::*;
+
+    fn underliers() -> Vec<String> {
+        vec!["TSLA", "SPY", "TLT"].into_iter().map(String::from).collect()
+    }
+
+    #[test]
+    fn parses_typical_gate_candles() {
+        let body = r#"[
+            {"o":"378.35","v":23,"t":1777432920,"c":"378.38","l":"378.35","h":"378.38","sum":"87.0246"},
+            {"o":"378.44","v":333,"t":1777432980,"c":"378.48","l":"378.44","h":"378.48","sum":"1260.2056"}
+        ]"#;
+        let rows = parse_ohlcv_response(body, "TSLAX_USDT", "TSLA", "xstock_backed", 1)
+            .expect("parse");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].exchange, "gate");
+        assert_eq!(rows[0].underlier_symbol, "TSLA");
+        assert_eq!(rows[0].backing_kind, "xstock_backed");
+        assert_eq!(rows[0].bar_open_ts, 1_777_432_920);
+        assert_eq!(rows[0].bar_close_ts, 1_777_432_980);
+        assert_eq!(rows[0].open, 378.35);
+        assert_eq!(rows[0].volume_base, 23.0);
+        assert!((rows[0].volume_quote.unwrap() - 87.0246).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rejects_non_array_body() {
+        let err = parse_ohlcv_response(r#"{"err":"oops"}"#, "X", "X", "synthetic", 1).unwrap_err();
+        assert!(matches!(err, FetchError::MalformedBody(_)));
+    }
+
+    #[test]
+    fn skips_truncated_candles() {
+        let body = r#"[
+            {"t":1,"o":"1"},
+            {"t":2,"o":"100","h":"101","l":"99","c":"100","v":50,"sum":"5000"}
+        ]"#;
+        let rows = parse_ohlcv_response(body, "TLT_USDT", "TLT", "synthetic", 1).expect("parse");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].bar_open_ts, 2);
+    }
+}

@@ -440,3 +440,169 @@ mod tape_tests {
         assert!(tick.is_none());
     }
 }
+
+// ============================================================
+// 1m OHLCV (companion forward tape, item 45 §1.2 / Phase 56)
+// ============================================================
+
+use scryer_schema::cex_stock_perp_ohlcv::v1::{Bar, SCHEMA_VERSION as OHLCV_SCHEMA_VERSION};
+
+pub const OHLCV_SOURCE_LABEL: &str = "coinbase_intl:candles";
+
+/// Fetch 1m OHLCV bars for one Coinbase International stock-perp.
+///
+/// Endpoint: `GET /api/v1/instruments/{SYM}/candles?granularity=ONE_MINUTE&start={iso}`.
+/// `start` is RFC3339 UTC. Returns up to several hundred bars per
+/// call; `end` defaults to current time.
+pub async fn fetch_ohlcv(
+    client: &reqwest::Client,
+    cfg: &PollConfig,
+    exchange_symbol: &str,
+    underlier: &str,
+    start_iso: &str,
+    fetched_at: i64,
+) -> Result<Vec<Bar>, FetchError> {
+    let url = format!(
+        "{}/api/v1/instruments/{}/candles",
+        DEFAULT_BASE_URL.trim_end_matches('/'),
+        exchange_symbol
+    );
+    let mut last_err: Option<FetchError> = None;
+    for _attempt in 0..cfg.retry_max.max(1) {
+        let resp = client
+            .get(&url)
+            .query(&[("granularity", "ONE_MINUTE"), ("start", start_iso)])
+            .send()
+            .await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = Some(FetchError::Transport(e));
+                tokio::time::sleep(cfg.retry_delay).await;
+                continue;
+            }
+        };
+        let status = resp.status().as_u16();
+        let text = resp.text().await.map_err(FetchError::Transport)?;
+        if status == 404 {
+            return Ok(Vec::new());
+        }
+        if status == 429 || status >= 500 {
+            last_err = Some(FetchError::UpstreamStatus {
+                status,
+                body_head: body_head(&text),
+            });
+            tokio::time::sleep(cfg.retry_delay).await;
+            continue;
+        }
+        if status >= 400 {
+            return Err(FetchError::UpstreamStatus {
+                status,
+                body_head: body_head(&text),
+            });
+        }
+        return parse_ohlcv_response(&text, exchange_symbol, underlier, fetched_at);
+    }
+    Err(last_err.unwrap_or_else(|| {
+        FetchError::UpstreamError(format!(
+            "coinbase_intl ohlcv retries exhausted for {exchange_symbol}"
+        ))
+    }))
+}
+
+pub fn parse_ohlcv_response(
+    body: &str,
+    exchange_symbol: &str,
+    underlier: &str,
+    fetched_at: i64,
+) -> Result<Vec<Bar>, FetchError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| FetchError::MalformedBody(format!("non-json: {e}")))?;
+    let arr = v
+        .get("aggregations")
+        .and_then(|a| a.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out: Vec<Bar> = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let start_str = match entry.get("start").and_then(|s| s.as_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+        let bar_open_ts = match parse_rfc3339_to_unix(start_str) {
+            Some(t) => t,
+            None => continue,
+        };
+        let o = parse_str_f64_cb(entry.get("open"));
+        let h = parse_str_f64_cb(entry.get("high"));
+        let l = parse_str_f64_cb(entry.get("low"));
+        let c = parse_str_f64_cb(entry.get("close"));
+        let vol = parse_str_f64_cb(entry.get("volume"));
+        let (o, h, l, c, vol) = match (o, h, l, c, vol) {
+            (Some(o), Some(h), Some(l), Some(c), Some(v)) => (o, h, l, c, v),
+            _ => continue,
+        };
+        out.push(Bar {
+            exchange: "coinbase_intl".to_string(),
+            exchange_symbol: exchange_symbol.to_string(),
+            underlier_symbol: underlier.to_string(),
+            backing_kind: "synthetic".to_string(),
+            bar_open_ts,
+            bar_close_ts: bar_open_ts + 60,
+            open: o,
+            high: h,
+            low: l,
+            close: c,
+            volume_base: vol,
+            volume_quote: None,
+            trade_count: None,
+            meta: scryer_schema::Meta::new(OHLCV_SCHEMA_VERSION, fetched_at, OHLCV_SOURCE_LABEL),
+        });
+    }
+    Ok(out)
+}
+
+fn parse_str_f64_cb(v: Option<&serde_json::Value>) -> Option<f64> {
+    v.and_then(|x| x.as_str()).and_then(|s| s.parse::<f64>().ok())
+}
+
+#[cfg(test)]
+mod ohlcv_tests {
+    use super::*;
+
+    #[test]
+    fn parses_typical_coinbase_candles() {
+        let body = r#"{"aggregations":[
+            {"start":"2026-04-29T03:13:00Z","open":"377.65","high":"377.70","low":"377.60","close":"377.68","volume":"5.26"},
+            {"start":"2026-04-29T03:14:00Z","open":"377.68","high":"377.75","low":"377.65","close":"377.71","volume":"3.10"}
+        ]}"#;
+        let rows = parse_ohlcv_response(body, "TSLA-PERP", "TSLA", 1_777_400_000).expect("parse");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].exchange, "coinbase_intl");
+        assert_eq!(rows[0].underlier_symbol, "TSLA");
+        assert_eq!(rows[0].backing_kind, "synthetic");
+        assert_eq!(rows[0].open, 377.65);
+        assert_eq!(rows[0].volume_base, 5.26);
+        assert_eq!(rows[0].volume_quote, None);
+        // 2026-04-29T03:13:00Z = 1777432380
+        assert_eq!(rows[0].bar_open_ts, 1_777_432_380);
+        assert_eq!(rows[0].bar_close_ts, 1_777_432_440);
+    }
+
+    #[test]
+    fn missing_aggregations_returns_zero_rows() {
+        let body = r#"{"foo":"bar"}"#;
+        let rows = parse_ohlcv_response(body, "X-PERP", "X", 1).expect("parse");
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn skips_unparseable_start() {
+        let body = r#"{"aggregations":[
+            {"start":"not-a-date","open":"1","high":"1","low":"1","close":"1","volume":"1"},
+            {"start":"2026-04-29T03:14:00Z","open":"100","high":"101","low":"99","close":"100","volume":"50"}
+        ]}"#;
+        let rows = parse_ohlcv_response(body, "X-PERP", "X", 1).expect("parse");
+        assert_eq!(rows.len(), 1);
+    }
+}

@@ -283,6 +283,11 @@ enum CexStockPerpTarget {
     /// configured xStock underlier set. Schedule via launchd at
     /// the desired cadence (typical: 60s).
     Tape(cex_stock_perp_cmd::TapeArgs),
+    /// 1-minute OHLCV bars per venue per stock-perp. Companion
+    /// forward tape for paper 1's §1.2 weekday-vs-weekend volume
+    /// DiD. Writes to dataset/cex_stock_perp/ohlcv/v1/underlier=
+    /// {SYM}/year=Y/month=M/day=D.parquet.
+    Ohlcv(cex_stock_perp_cmd::OhlcvArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -572,6 +577,7 @@ async fn main() -> Result<()> {
         },
         Command::CexStockPerp(c) => match c.target {
             CexStockPerpTarget::Tape(a) => cex_stock_perp_cmd::run_tape(a).await,
+            CexStockPerpTarget::Ohlcv(a) => cex_stock_perp_cmd::run_ohlcv(a).await,
         },
         Command::CexFunding(c) => match c.target {
             CexFundingTarget::Multi(a) => cex_funding_cmd::run_multi(a).await,

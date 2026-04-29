@@ -468,3 +468,183 @@ mod tape_tests {
         assert!(tick.is_none());
     }
 }
+
+// ============================================================
+// 1m OHLCV (companion forward tape, item 45 §1.2 / Phase 56)
+// ============================================================
+
+use scryer_schema::cex_stock_perp_ohlcv::v1::{Bar, SCHEMA_VERSION as OHLCV_SCHEMA_VERSION};
+
+pub const OHLCV_SOURCE_LABEL: &str = "okx:candles";
+
+/// Fetch 1m OHLCV bars for one OKX stock-perp.
+///
+/// Endpoint: `GET /api/v5/market/candles?bar=1m&instId={SYM}&limit={N}`.
+/// Returns up to 300 bars per call (most-recent first). For deeper
+/// history use `before`/`after` cursors (deferred to v2).
+pub async fn fetch_ohlcv(
+    client: &reqwest::Client,
+    cfg: &PollConfig,
+    inst_id: &str,
+    underlier: &str,
+    limit: u32,
+    fetched_at: i64,
+) -> Result<Vec<Bar>, FetchError> {
+    let url = format!(
+        "{}/api/v5/market/candles",
+        DEFAULT_BASE_URL.trim_end_matches('/')
+    );
+    let limit_str = limit.to_string();
+    let mut last_err: Option<FetchError> = None;
+    for _attempt in 0..cfg.retry_max.max(1) {
+        let resp = client
+            .get(&url)
+            .query(&[
+                ("instId", inst_id),
+                ("bar", "1m"),
+                ("limit", limit_str.as_str()),
+            ])
+            .send()
+            .await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = Some(FetchError::Transport(e));
+                tokio::time::sleep(cfg.retry_delay).await;
+                continue;
+            }
+        };
+        let status = resp.status().as_u16();
+        let text = resp.text().await.map_err(FetchError::Transport)?;
+        if status == 429 || status >= 500 {
+            last_err = Some(FetchError::UpstreamStatus {
+                status,
+                body_head: body_head(&text),
+            });
+            tokio::time::sleep(cfg.retry_delay).await;
+            continue;
+        }
+        if status >= 400 {
+            return Err(FetchError::UpstreamStatus {
+                status,
+                body_head: body_head(&text),
+            });
+        }
+        return parse_ohlcv_response(&text, inst_id, underlier, fetched_at);
+    }
+    Err(last_err.unwrap_or_else(|| {
+        FetchError::UpstreamError(format!("okx ohlcv retries exhausted for {inst_id}"))
+    }))
+}
+
+/// Parse OKX `/market/candles` body. Tuple shape:
+/// `[ts_ms_str, open, high, low, close, vol_base, vol_ccy_quote, vol_ccy_quote2, confirm]`.
+/// Public for tests.
+pub fn parse_ohlcv_response(
+    body: &str,
+    inst_id: &str,
+    underlier: &str,
+    fetched_at: i64,
+) -> Result<Vec<Bar>, FetchError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| FetchError::MalformedBody(format!("non-json: {e}")))?;
+    let code = v.get("code").and_then(|c| c.as_str()).unwrap_or("");
+    if code != "0" {
+        let msg = v.get("msg").and_then(|m| m.as_str()).unwrap_or("");
+        return Err(FetchError::UpstreamError(format!(
+            "okx code={code} msg={msg}"
+        )));
+    }
+    let arr = v
+        .get("data")
+        .and_then(|d| d.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out: Vec<Bar> = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let tup = match entry.as_array() {
+            Some(t) if t.len() >= 9 => t,
+            _ => continue,
+        };
+        let ts_ms = match tup[0].as_str().and_then(|s| s.parse::<i64>().ok()) {
+            Some(t) => t,
+            None => continue,
+        };
+        let o = parse_str_f64_okx(&tup[1]);
+        let h = parse_str_f64_okx(&tup[2]);
+        let l = parse_str_f64_okx(&tup[3]);
+        let c = parse_str_f64_okx(&tup[4]);
+        let vol_base = parse_str_f64_okx(&tup[5]);
+        // tup[7] is volCcyQuote (USD-quoted notional, OKX docs).
+        let vol_quote = parse_str_f64_okx(&tup[7]);
+        let (o, h, l, c, vol_base) = match (o, h, l, c, vol_base) {
+            (Some(o), Some(h), Some(l), Some(c), Some(v)) => (o, h, l, c, v),
+            _ => continue,
+        };
+        let bar_open_ts = ts_ms / 1000;
+        out.push(Bar {
+            exchange: "okx".to_string(),
+            exchange_symbol: inst_id.to_string(),
+            underlier_symbol: underlier.to_string(),
+            backing_kind: "synthetic".to_string(),
+            bar_open_ts,
+            bar_close_ts: bar_open_ts + 60,
+            open: o,
+            high: h,
+            low: l,
+            close: c,
+            volume_base: vol_base,
+            volume_quote: vol_quote,
+            trade_count: None,
+            meta: scryer_schema::Meta::new(OHLCV_SCHEMA_VERSION, fetched_at, OHLCV_SOURCE_LABEL),
+        });
+    }
+    Ok(out)
+}
+
+fn parse_str_f64_okx(v: &serde_json::Value) -> Option<f64> {
+    v.as_str().and_then(|s| s.parse::<f64>().ok())
+}
+
+#[cfg(test)]
+mod ohlcv_tests {
+    use super::*;
+
+    #[test]
+    fn parses_typical_okx_candles() {
+        // OKX returns most-recent-first.
+        let body = r#"{"code":"0","msg":"","data":[
+            ["1777433040000","378.31","378.31","378.31","378.31","0.03","0.03","11.3493","0"],
+            ["1777432980000","378.2","378.3","378.2","378.26","6.07","6.07","2296.0212","1"]
+        ]}"#;
+        let rows =
+            parse_ohlcv_response(body, "TSLA-USDT-SWAP", "TSLA", 1_777_400_000).expect("parse");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].exchange, "okx");
+        assert_eq!(rows[0].underlier_symbol, "TSLA");
+        assert_eq!(rows[0].backing_kind, "synthetic");
+        assert_eq!(rows[0].bar_open_ts, 1_777_433_040);
+        assert_eq!(rows[0].bar_close_ts, 1_777_433_100);
+        assert_eq!(rows[0].open, 378.31);
+        assert_eq!(rows[0].volume_base, 0.03);
+        assert_eq!(rows[0].volume_quote, Some(11.3493));
+    }
+
+    #[test]
+    fn surfaces_error_envelope() {
+        let body = r#"{"code":"50011","msg":"throttle"}"#;
+        let err = parse_ohlcv_response(body, "X", "X", 1).unwrap_err();
+        assert!(matches!(err, FetchError::UpstreamError(_)));
+    }
+
+    #[test]
+    fn skips_truncated_tuples() {
+        let body = r#"{"code":"0","data":[
+            ["1","2","3"],
+            ["1777432980000","378.2","378.3","378.2","378.26","6.07","6.07","2296.0212","1"]
+        ]}"#;
+        let rows = parse_ohlcv_response(body, "X", "X", 1).expect("parse");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].bar_open_ts, 1_777_432_980);
+    }
+}
