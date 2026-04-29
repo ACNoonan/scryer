@@ -15,9 +15,10 @@ use chrono::{Datelike, Utc};
 use clap::Parser;
 use scryer_fetch_fred::{
     fetch_default_calendar, fetch_release_dates, release::lookup as lookup_release,
-    release::ReleaseEntry, PollConfig, DEFAULT_BASE_URL,
+    release::ReleaseEntry, series::{fetch_series, DEFAULT_SERIES, SOURCE_LABEL as SERIES_SOURCE},
+    PollConfig, DEFAULT_BASE_URL,
 };
-use scryer_schema::{fred_macro, Meta};
+use scryer_schema::{fred_macro, fred_macro_extended, Meta};
 use scryer_store::{venue, Dataset};
 
 #[derive(Parser, Debug)]
@@ -175,4 +176,137 @@ pub async fn run_macro_calendar(args: MacroCalendarArgs) -> Result<()> {
 fn date32_to_year(date32: i32) -> i32 {
     let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
     (epoch + chrono::Duration::days(date32 as i64)).year()
+}
+
+#[derive(Parser, Debug)]
+pub struct SeriesArgs {
+    /// Window start as `YYYY-MM-DD`. Default: 5 years ago (covers
+    /// the typical regime-regressor lookback).
+    #[arg(long, default_value = "")]
+    start: String,
+    /// Window end as `YYYY-MM-DD`. Default: today.
+    #[arg(long, default_value = "")]
+    end: String,
+    /// FRED API key (free at https://fredaccount.stlouisfed.org/apikey).
+    #[arg(long, env = "FRED_API_KEY")]
+    api_key: String,
+    /// Comma-separated FRED series IDs to fetch. Default: the
+    /// 11-series regime-regressor bundle (TIPS breakevens + credit
+    /// spreads + treasury yields + term-premium proxy).
+    #[arg(long, value_delimiter = ',')]
+    series: Vec<String>,
+    #[arg(long, default_value = SERIES_SOURCE)]
+    source: String,
+    #[arg(long, default_value = DEFAULT_BASE_URL)]
+    base_url: String,
+    #[arg(long, default_value_t = 30)]
+    request_timeout_secs: u64,
+    #[arg(long, default_value_t = 3)]
+    retry_max: u32,
+    #[arg(long, default_value_t = 2)]
+    retry_delay_secs: u64,
+    #[arg(long, default_value_t = 500)]
+    rate_limit_ms: u64,
+    #[arg(long, default_value = "./dataset")]
+    dataset: PathBuf,
+    #[arg(long, default_value = venue::FRED)]
+    venue: String,
+}
+
+pub async fn run_series(args: SeriesArgs) -> Result<()> {
+    if args.api_key.is_empty() {
+        anyhow::bail!(
+            "FRED API key required; pass --api-key or set FRED_API_KEY env var"
+        );
+    }
+    let cfg = PollConfig {
+        base_url: args.base_url.clone(),
+        source_label: args.source.clone(),
+        request_timeout: Duration::from_secs(args.request_timeout_secs),
+        retry_max: args.retry_max,
+        retry_delay: Duration::from_secs(args.retry_delay_secs),
+        rate_limit_delay: Duration::from_millis(args.rate_limit_ms),
+        ..Default::default()
+    };
+    let client = reqwest::Client::builder()
+        .timeout(cfg.request_timeout)
+        .user_agent(cfg.user_agent.clone())
+        .build()
+        .context("building reqwest client")?;
+
+    let now = Utc::now();
+    let start = if args.start.is_empty() {
+        (now - chrono::Duration::days(5 * 365))
+            .format("%Y-%m-%d")
+            .to_string()
+    } else {
+        args.start.clone()
+    };
+    let end = if args.end.is_empty() {
+        now.format("%Y-%m-%d").to_string()
+    } else {
+        args.end.clone()
+    };
+    let series: Vec<String> = if args.series.is_empty() {
+        DEFAULT_SERIES.iter().map(|s| s.to_string()).collect()
+    } else {
+        args.series.clone()
+    };
+
+    let meta = Meta::new(
+        fred_macro_extended::v1::SCHEMA_VERSION,
+        now.timestamp(),
+        &args.source,
+    );
+
+    tracing::info!(
+        start = start,
+        end = end,
+        n_series = series.len(),
+        "fetching FRED daily series"
+    );
+
+    let mut all_rows: Vec<fred_macro_extended::v1::Observation> = Vec::new();
+    let mut per_series: BTreeMap<String, usize> = BTreeMap::new();
+    for sid in &series {
+        let rows = fetch_series(&client, &cfg, &args.api_key, sid, &start, &end, &meta)
+            .await
+            .with_context(|| format!("fetch_series {sid}"))?;
+        per_series.insert(sid.clone(), rows.len());
+        tracing::info!(series = sid, rows = rows.len(), "decoded");
+        all_rows.extend(rows);
+        if cfg.rate_limit_delay > Duration::ZERO {
+            tokio::time::sleep(cfg.rate_limit_delay).await;
+        }
+    }
+
+    if all_rows.is_empty() {
+        println!("fred series: rows_added=0 (empty window)");
+        return Ok(());
+    }
+
+    // Bucket by series for partition-key writes.
+    let mut by_series: BTreeMap<String, Vec<fred_macro_extended::v1::Observation>> =
+        BTreeMap::new();
+    for r in all_rows {
+        by_series.entry(r.series_id.clone()).or_default().push(r);
+    }
+
+    let ds = Dataset::new(&args.dataset);
+    let mut total_added = 0usize;
+    let mut total_deduped = 0usize;
+    let mut total_partitions = 0usize;
+    for (sid, rows) in &by_series {
+        let stats = ds
+            .write::<fred_macro_extended::v1::Observation>(&args.venue, Some(sid), rows)
+            .with_context(|| format!("Dataset::write series={sid}"))?;
+        total_added += stats.rows_added;
+        total_deduped += stats.rows_deduped;
+        total_partitions += stats.partitions_written;
+    }
+
+    println!(
+        "fred series: rows_added={total_added} rows_deduped={total_deduped} partitions_written={total_partitions} per_series={per_series:?}"
+    );
+    Ok(())
 }

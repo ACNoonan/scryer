@@ -33,6 +33,7 @@ use thiserror::Error;
 use crate::release::{ReleaseEntry, DEFAULT_RELEASES};
 
 pub mod release;
+pub mod series;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.stlouisfed.org";
 

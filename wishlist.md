@@ -1294,7 +1294,7 @@ listing on a previously-unknown protocol. Worth cron'ing weekly.
 
 **Effort.** ~2 hours.
 
-### 19. Cross-Kamino-market liquidation expansion
+### 19. Cross-Kamino-market liquidation expansion  `[done — flag already shipped]`
 
 **What.** Same Klend liquidation fetcher as item 1 but with the
 lending-market filter dropped. Yields liquidations across Kamino's
@@ -1302,10 +1302,9 @@ Main / Jito / altcoin markets — likely 100x the event volume of the
 xStocks-only panel and unblocks general OEV-concentration claims for
 Paper 2 §C4 even if the xStocks-only panel stays thin.
 
-**Migration target.** Same fetcher as item 1 with `--all-markets`
-flag. Schema unchanged. Just a runtime flag.
-
-**Effort.** Zero additional schema/fetcher work; just a longer scan.
+**Status (2026-04-29).** Already shipped — `scry solana
+kamino-liquidations --all-markets` runs the panel across every Klend
+lending market. Schema unchanged from item 1. No additional work.
 
 ### 20. EVM Aave/Spark liquidation panels for Paper 2 cross-VM comparison
 
@@ -1483,7 +1482,7 @@ _dedup_key         string  (= accession_number)
 
 **Effort.** ~3-4 hours.
 
-### 35. `fred_macro_extended.v1` — TIPS breakevens / credit spreads / term-premium  `[methodology-entry-needed]`
+### 35. `fred_macro_extended.v1` — TIPS breakevens / credit spreads / term-premium  `[done — phase 45]`
 
 **What.** Extends item 16 (FRED macro calendar) from event-calendar-
 only to also include daily series useful as regime regressors or

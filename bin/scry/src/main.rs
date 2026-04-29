@@ -208,6 +208,11 @@ enum FredTarget {
     /// FRED release set in `[start, end]`. Writes
     /// dataset/fred/macro_calendar/v1/year=YYYY.parquet.
     MacroCalendar(fred_cmd::MacroCalendarArgs),
+    /// Pull daily-resolution observations for one or more FRED
+    /// series IDs (TIPS breakevens, credit spreads, treasury
+    /// yields, term-premium proxies). Writes
+    /// dataset/fred/macro_extended/v1/series={SID}/year=YYYY.parquet.
+    Series(fred_cmd::SeriesArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -423,6 +428,7 @@ async fn main() -> Result<()> {
         },
         Command::Fred(c) => match c.target {
             FredTarget::MacroCalendar(a) => fred_cmd::run_macro_calendar(a).await,
+            FredTarget::Series(a) => fred_cmd::run_series(a).await,
         },
         Command::Databento(c) => match c.target {
             DatabentoTarget::Intraday1m(a) => databento_cmd::run_intraday(a).await,
