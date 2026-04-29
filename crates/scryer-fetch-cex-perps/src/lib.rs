@@ -25,12 +25,19 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+pub mod bingx;
+pub mod bitget;
 pub mod coinbase_intl;
+pub mod crypto_com;
 pub mod dydx_v4;
 pub mod gate;
+pub mod htx;
 pub mod hyperliquid;
 pub mod kraken_futures;
+pub mod kucoin_futures;
+pub mod mexc;
 pub mod okx;
+pub mod phemex;
 
 #[derive(Debug, Error)]
 pub enum FetchError {

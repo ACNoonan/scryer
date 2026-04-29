@@ -52,8 +52,8 @@ entry is kept below in its priority section for historical context.
 | 40 | `raydium_pool_metadata.v1` | phase 48 | Raydium v3 API pool-metadata one-shot (quant-work) |
 | 41 | `geckoterminal_ohlcv.v1` | phase 49 | GeckoTerminal historical OHLCV (quant-work) |
 | 44 | `pyth_poster_post.v1` | phases 52-54 | Pyth equity-feed poster daemon mirror tape (item 44 slices 1+2+2c) |
-| 45 | `cex_stock_perp_tape.v1` | phase 55 | Multi-venue 24/7 CEX-perp tape (4 of 11 venues; 7 enrichment-followups) |
-| 45 (companion) | `cex_stock_perp_ohlcv.v1` | phase 56 | 1-minute OHLCV per venue per perp (paper 1 §1.2 volume DiD; same 4 venues) |
+| 45 | `cex_stock_perp_tape.v1` | phases 55 + 57 | Multi-venue 24/7 CEX-perp tape (11 of 11 venues; tape complete) |
+| 45 (companion) | `cex_stock_perp_ohlcv.v1` | phases 56 + 57 | 1-minute OHLCV per venue (10 of 11 venues; Phemex OHLCV auth-required, deferred) |
 
 **Retracted (do not implement)** — premise-incorrect after live source verification:
 
@@ -73,7 +73,7 @@ entry is kept below in its priority section for historical context.
 | 38 | `treasury_auction.v1` | Priority 4, same gate. |
 | 42 | soothsayer-streams-relay-program | Soothsayer-side, in flight. |
 | 43 | `chainlink_streams_relay_tape.v1` | Depends on 42. Soothsayer-side. |
-| 45 (v1+) | (cex_stock_perp_tape — 7 follow-up venues) | HTX, BingX, Bitget, MEXC, KuCoin Futures, Phemex, Crypto.com — extend `scryer-fetch-cex-perps` per the existing Kraken/Gate/OKX/Coinbase pattern. ~30-40min/venue. |
+| 45 (Phemex OHLCV) | (auth-required candle endpoint) | Defer until an API-key path is added to `scryer-fetch-cex-perps`. Tickers shipped. |
 
 ---
 
@@ -760,7 +760,7 @@ _dedup_key       string  (= symbol + ts)
 
 **Effort.** ~3 hours once the API key exists.
 
-### 45. `cex_stock_perp_tape.v1` + `cex_stock_perp_ohlcv.v1` — multi-venue 24/7 CEX perp tape on xStock underliers  `[v1 done — phases 55 + 56 (4 of 11 venues); 7 enrichment venues outstanding]`
+### 45. `cex_stock_perp_tape.v1` + `cex_stock_perp_ohlcv.v1` — multi-venue 24/7 CEX perp tape on xStock underliers  `[done — phases 55 + 56 + 57 (11 venues for tape; 10 venues for OHLCV; Phemex OHLCV auth-deferred)]`
 
 **Status (2026-04-29).** Both schemas shipped with **Kraken Futures
 + Gate.io + OKX + Coinbase International** (the four most-data-rich

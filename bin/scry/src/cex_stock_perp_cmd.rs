@@ -16,7 +16,8 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Parser;
 use scryer_fetch_cex_perps::{
-    build_client, coinbase_intl, gate, kraken_futures, okx, PollConfig,
+    bingx, bitget, build_client, coinbase_intl, crypto_com, gate, htx, kraken_futures,
+    kucoin_futures, mexc, okx, phemex, PollConfig,
 };
 use scryer_schema::cex_stock_perp_tape::v1::Tick;
 use scryer_schema::{cex_stock_perp_tape, Meta};
@@ -39,6 +40,27 @@ pub struct TapeArgs {
     /// Disable Coinbase International.
     #[arg(long, default_value_t = false)]
     no_coinbase_intl: bool,
+    /// Disable Bitget.
+    #[arg(long, default_value_t = false)]
+    no_bitget: bool,
+    /// Disable HTX.
+    #[arg(long, default_value_t = false)]
+    no_htx: bool,
+    /// Disable BingX.
+    #[arg(long, default_value_t = false)]
+    no_bingx: bool,
+    /// Disable MEXC.
+    #[arg(long, default_value_t = false)]
+    no_mexc: bool,
+    /// Disable KuCoin Futures.
+    #[arg(long, default_value_t = false)]
+    no_kucoin_futures: bool,
+    /// Disable Phemex.
+    #[arg(long, default_value_t = false)]
+    no_phemex: bool,
+    /// Disable Crypto.com.
+    #[arg(long, default_value_t = false)]
+    no_crypto_com: bool,
     #[arg(long, default_value_t = 30)]
     request_timeout_secs: u64,
     #[arg(long, default_value_t = 3)]
@@ -119,6 +141,136 @@ pub async fn run_tape(args: TapeArgs) -> Result<()> {
             Err(e) => tracing::warn!(venue = "coinbase_intl", error = %e, "fetch failed; continuing"),
         }
     }
+    if !args.no_bitget {
+        match bitget::fetch_stock_perps(&client, &cfg, &underliers_upper, fetched_at).await {
+            Ok(rows) => {
+                tracing::info!(venue = "bitget", rows = rows.len(), "decoded");
+                *per_venue.entry("bitget").or_insert(0) += rows.len();
+                all_rows.extend(rows);
+            }
+            Err(e) => tracing::warn!(venue = "bitget", error = %e, "fetch failed; continuing"),
+        }
+    }
+    if !args.no_kucoin_futures {
+        match kucoin_futures::fetch_stock_perps(&client, &cfg, &underliers_upper, fetched_at).await {
+            Ok(rows) => {
+                tracing::info!(venue = "kucoin_futures", rows = rows.len(), "decoded");
+                *per_venue.entry("kucoin_futures").or_insert(0) += rows.len();
+                all_rows.extend(rows);
+            }
+            Err(e) => tracing::warn!(venue = "kucoin_futures", error = %e, "fetch failed; continuing"),
+        }
+    }
+    if !args.no_htx {
+        let mut htx_rows = 0usize;
+        for u in &underliers_upper {
+            // Try X-suffix (xstock_backed) first, then plain (synthetic).
+            for (sym, backing) in [
+                (format!("{u}X-USDT"), "xstock_backed"),
+                (format!("{u}-USDT"), "synthetic"),
+            ] {
+                match htx::fetch_one_ticker(&client, &cfg, &sym, u, backing, fetched_at).await {
+                    Ok(Some(t)) => {
+                        all_rows.push(t);
+                        htx_rows += 1;
+                    }
+                    Ok(None) => {}
+                    Err(_) => {}
+                }
+                if cfg.rate_limit_delay > Duration::ZERO {
+                    tokio::time::sleep(cfg.rate_limit_delay).await;
+                }
+            }
+        }
+        tracing::info!(venue = "htx", rows = htx_rows, "decoded");
+        *per_venue.entry("htx").or_insert(0) += htx_rows;
+    }
+    if !args.no_bingx {
+        let mut bingx_rows = 0usize;
+        for u in &underliers_upper {
+            // Try X-suffix (xstock_backed) and NCSK-prefix (synthetic).
+            for (sym, backing) in [
+                (format!("{u}X-USDT"), "xstock_backed"),
+                (format!("NCSK{u}2USD-USDT"), "synthetic"),
+            ] {
+                match bingx::fetch_one_ticker(&client, &cfg, &sym, u, backing, fetched_at).await {
+                    Ok(Some(t)) => {
+                        all_rows.push(t);
+                        bingx_rows += 1;
+                    }
+                    Ok(None) => {}
+                    Err(_) => {}
+                }
+                if cfg.rate_limit_delay > Duration::ZERO {
+                    tokio::time::sleep(cfg.rate_limit_delay).await;
+                }
+            }
+        }
+        tracing::info!(venue = "bingx", rows = bingx_rows, "decoded");
+        *per_venue.entry("bingx").or_insert(0) += bingx_rows;
+    }
+    if !args.no_mexc {
+        let mut mexc_rows = 0usize;
+        for u in &underliers_upper {
+            let sym = format!("{u}STOCK_USDT");
+            match mexc::fetch_one_ticker(&client, &cfg, &sym, u, fetched_at).await {
+                Ok(Some(t)) => {
+                    all_rows.push(t);
+                    mexc_rows += 1;
+                }
+                Ok(None) => {}
+                Err(_) => {}
+            }
+            if cfg.rate_limit_delay > Duration::ZERO {
+                tokio::time::sleep(cfg.rate_limit_delay).await;
+            }
+        }
+        tracing::info!(venue = "mexc", rows = mexc_rows, "decoded");
+        *per_venue.entry("mexc").or_insert(0) += mexc_rows;
+    }
+    if !args.no_phemex {
+        let mut phemex_rows = 0usize;
+        for u in &underliers_upper {
+            // Try X-suffix (xstock_backed) and plain (synthetic).
+            for (sym, backing) in [
+                (format!("{u}XUSDT"), "xstock_backed"),
+                (format!("{u}USDT"), "synthetic"),
+            ] {
+                match phemex::fetch_one_ticker(&client, &cfg, &sym, u, backing, fetched_at).await {
+                    Ok(Some(t)) => {
+                        all_rows.push(t);
+                        phemex_rows += 1;
+                    }
+                    Ok(None) => {}
+                    Err(_) => {}
+                }
+                if cfg.rate_limit_delay > Duration::ZERO {
+                    tokio::time::sleep(cfg.rate_limit_delay).await;
+                }
+            }
+        }
+        tracing::info!(venue = "phemex", rows = phemex_rows, "decoded");
+        *per_venue.entry("phemex").or_insert(0) += phemex_rows;
+    }
+    if !args.no_crypto_com {
+        let mut cc_rows = 0usize;
+        for u in &underliers_upper {
+            let sym = format!("{u}USD-PERP");
+            match crypto_com::fetch_one_ticker(&client, &cfg, &sym, u, fetched_at).await {
+                Ok(Some(t)) => {
+                    all_rows.push(t);
+                    cc_rows += 1;
+                }
+                Ok(None) => {}
+                Err(_) => {}
+            }
+            if cfg.rate_limit_delay > Duration::ZERO {
+                tokio::time::sleep(cfg.rate_limit_delay).await;
+            }
+        }
+        tracing::info!(venue = "crypto_com", rows = cc_rows, "decoded");
+        *per_venue.entry("crypto_com").or_insert(0) += cc_rows;
+    }
 
     if all_rows.is_empty() {
         println!("cex-stock-perp tape: rows_added=0 (no rows from any venue)");
@@ -174,6 +326,24 @@ pub struct OhlcvArgs {
     /// Disable Coinbase International.
     #[arg(long, default_value_t = false)]
     no_coinbase_intl: bool,
+    /// Disable Bitget.
+    #[arg(long, default_value_t = false)]
+    no_bitget: bool,
+    /// Disable HTX.
+    #[arg(long, default_value_t = false)]
+    no_htx: bool,
+    /// Disable BingX.
+    #[arg(long, default_value_t = false)]
+    no_bingx: bool,
+    /// Disable MEXC.
+    #[arg(long, default_value_t = false)]
+    no_mexc: bool,
+    /// Disable KuCoin Futures.
+    #[arg(long, default_value_t = false)]
+    no_kucoin_futures: bool,
+    /// Disable Crypto.com.
+    #[arg(long, default_value_t = false)]
+    no_crypto_com: bool,
     /// Lookback window in minutes for the per-call request.
     /// Defaults to 60 (last hour); cron at the same cadence to
     /// roll forward.
@@ -324,6 +494,146 @@ pub async fn run_ohlcv(args: OhlcvArgs) -> Result<()> {
             }
         }
         tracing::info!(venue = "coinbase_intl", rows = per_venue.get("coinbase_intl").copied().unwrap_or(0), "decoded");
+    }
+
+    if !args.no_bitget {
+        for u in &underliers_upper {
+            let sym = format!("{u}USDT");
+            match bitget::fetch_ohlcv(&client, &cfg, &sym, u, args.gate_limit, fetched_at).await {
+                Ok(rows) => {
+                    *per_venue.entry("bitget").or_insert(0) += rows.len();
+                    all_rows.extend(rows);
+                }
+                Err(_) => {}
+            }
+            if cfg.rate_limit_delay > Duration::ZERO {
+                tokio::time::sleep(cfg.rate_limit_delay).await;
+            }
+        }
+        tracing::info!(venue = "bitget", rows = per_venue.get("bitget").copied().unwrap_or(0), "decoded");
+    }
+
+    if !args.no_kucoin_futures {
+        for u in &underliers_upper {
+            let sym = format!("{u}USDTM");
+            match kucoin_futures::fetch_ohlcv(
+                &client,
+                &cfg,
+                &sym,
+                u,
+                from_unix,
+                fetched_at,
+                fetched_at,
+            )
+            .await
+            {
+                Ok(rows) => {
+                    *per_venue.entry("kucoin_futures").or_insert(0) += rows.len();
+                    all_rows.extend(rows);
+                }
+                Err(_) => {}
+            }
+            if cfg.rate_limit_delay > Duration::ZERO {
+                tokio::time::sleep(cfg.rate_limit_delay).await;
+            }
+        }
+        tracing::info!(venue = "kucoin_futures", rows = per_venue.get("kucoin_futures").copied().unwrap_or(0), "decoded");
+    }
+
+    if !args.no_htx {
+        for u in &underliers_upper {
+            for (sym, backing) in [
+                (format!("{u}X-USDT"), "xstock_backed"),
+                (format!("{u}-USDT"), "synthetic"),
+            ] {
+                match htx::fetch_ohlcv(
+                    &client,
+                    &cfg,
+                    &sym,
+                    u,
+                    backing,
+                    args.gate_limit,
+                    fetched_at,
+                )
+                .await
+                {
+                    Ok(rows) if !rows.is_empty() => {
+                        *per_venue.entry("htx").or_insert(0) += rows.len();
+                        all_rows.extend(rows);
+                    }
+                    _ => {}
+                }
+                if cfg.rate_limit_delay > Duration::ZERO {
+                    tokio::time::sleep(cfg.rate_limit_delay).await;
+                }
+            }
+        }
+        tracing::info!(venue = "htx", rows = per_venue.get("htx").copied().unwrap_or(0), "decoded");
+    }
+
+    if !args.no_bingx {
+        for u in &underliers_upper {
+            for (sym, backing) in [
+                (format!("{u}X-USDT"), "xstock_backed"),
+                (format!("NCSK{u}2USD-USDT"), "synthetic"),
+            ] {
+                match bingx::fetch_ohlcv(
+                    &client,
+                    &cfg,
+                    &sym,
+                    u,
+                    backing,
+                    args.gate_limit,
+                    fetched_at,
+                )
+                .await
+                {
+                    Ok(rows) if !rows.is_empty() => {
+                        *per_venue.entry("bingx").or_insert(0) += rows.len();
+                        all_rows.extend(rows);
+                    }
+                    _ => {}
+                }
+                if cfg.rate_limit_delay > Duration::ZERO {
+                    tokio::time::sleep(cfg.rate_limit_delay).await;
+                }
+            }
+        }
+        tracing::info!(venue = "bingx", rows = per_venue.get("bingx").copied().unwrap_or(0), "decoded");
+    }
+
+    if !args.no_mexc {
+        for u in &underliers_upper {
+            let sym = format!("{u}STOCK_USDT");
+            match mexc::fetch_ohlcv(&client, &cfg, &sym, u, from_unix, fetched_at).await {
+                Ok(rows) => {
+                    *per_venue.entry("mexc").or_insert(0) += rows.len();
+                    all_rows.extend(rows);
+                }
+                Err(_) => {}
+            }
+            if cfg.rate_limit_delay > Duration::ZERO {
+                tokio::time::sleep(cfg.rate_limit_delay).await;
+            }
+        }
+        tracing::info!(venue = "mexc", rows = per_venue.get("mexc").copied().unwrap_or(0), "decoded");
+    }
+
+    if !args.no_crypto_com {
+        for u in &underliers_upper {
+            let sym = format!("{u}USD-PERP");
+            match crypto_com::fetch_ohlcv(&client, &cfg, &sym, u, args.gate_limit, fetched_at).await {
+                Ok(rows) => {
+                    *per_venue.entry("crypto_com").or_insert(0) += rows.len();
+                    all_rows.extend(rows);
+                }
+                Err(_) => {}
+            }
+            if cfg.rate_limit_delay > Duration::ZERO {
+                tokio::time::sleep(cfg.rate_limit_delay).await;
+            }
+        }
+        tracing::info!(venue = "crypto_com", rows = per_venue.get("crypto_com").copied().unwrap_or(0), "decoded");
     }
 
     if all_rows.is_empty() {
