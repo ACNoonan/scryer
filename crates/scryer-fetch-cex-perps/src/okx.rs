@@ -232,3 +232,239 @@ mod tests {
         assert_eq!(rows[0].funding_ts, 1_777_363_200);
     }
 }
+
+// ============================================================
+// stock-perp tape (item 45 / Phase 55)
+// ============================================================
+
+use scryer_schema::cex_stock_perp_tape::v1::{Tick, SCHEMA_VERSION as TAPE_SCHEMA_VERSION};
+
+pub const TAPE_SOURCE_LABEL: &str = "okx:tickers+mark-price";
+
+/// OKX stock-perp `instId` shape: `TSLA-USDT-SWAP`. Strip the suffix
+/// to recover the canonical underlier.
+pub fn underlier_from_inst_id(inst_id: &str) -> Option<String> {
+    let s = inst_id.strip_suffix("-USDT-SWAP")?;
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+/// Fetch one OKX stock-perp tape tick for each `(underlier_symbol)`
+/// in `underliers`. OKX exposes ticker (last/bid/ask/24h) and mark
+/// price on separate endpoints; we make both calls per symbol and
+/// merge into one [`Tick`].
+pub async fn fetch_tape(
+    client: &reqwest::Client,
+    cfg: &PollConfig,
+    underliers: &[String],
+    fetched_at: i64,
+) -> Result<Vec<Tick>, FetchError> {
+    let mut out = Vec::with_capacity(underliers.len());
+    for u in underliers {
+        let inst_id = format!("{u}-USDT-SWAP");
+        match fetch_one_tick(client, cfg, &inst_id, u, fetched_at).await {
+            Ok(Some(t)) => out.push(t),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(symbol = %u, error = %e, "okx tape fetch skipped");
+            }
+        }
+        if cfg.rate_limit_delay > std::time::Duration::ZERO {
+            tokio::time::sleep(cfg.rate_limit_delay).await;
+        }
+    }
+    Ok(out)
+}
+
+async fn fetch_one_tick(
+    client: &reqwest::Client,
+    cfg: &PollConfig,
+    inst_id: &str,
+    underlier: &str,
+    fetched_at: i64,
+) -> Result<Option<Tick>, FetchError> {
+    let ticker = okx_get(
+        client,
+        cfg,
+        &format!(
+            "{}/api/v5/market/ticker",
+            DEFAULT_BASE_URL.trim_end_matches('/')
+        ),
+        &[("instId", inst_id)],
+    )
+    .await?;
+    let mark = okx_get(
+        client,
+        cfg,
+        &format!(
+            "{}/api/v5/public/mark-price",
+            DEFAULT_BASE_URL.trim_end_matches('/')
+        ),
+        &[("instType", "SWAP"), ("instId", inst_id)],
+    )
+    .await?;
+    parse_tape_tick(&ticker, &mark, inst_id, underlier, fetched_at)
+}
+
+async fn okx_get(
+    client: &reqwest::Client,
+    cfg: &PollConfig,
+    url: &str,
+    query: &[(&str, &str)],
+) -> Result<serde_json::Value, FetchError> {
+    let mut last_err: Option<FetchError> = None;
+    for _attempt in 0..cfg.retry_max.max(1) {
+        let resp = client.get(url).query(query).send().await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = Some(FetchError::Transport(e));
+                tokio::time::sleep(cfg.retry_delay).await;
+                continue;
+            }
+        };
+        let status = resp.status().as_u16();
+        let text = resp.text().await.map_err(FetchError::Transport)?;
+        if status == 429 || status >= 500 {
+            last_err = Some(FetchError::UpstreamStatus {
+                status,
+                body_head: body_head(&text),
+            });
+            tokio::time::sleep(cfg.retry_delay).await;
+            continue;
+        }
+        if status >= 400 {
+            return Err(FetchError::UpstreamStatus {
+                status,
+                body_head: body_head(&text),
+            });
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| FetchError::MalformedBody(format!("non-json: {e}")))?;
+        let code = v.get("code").and_then(|c| c.as_str()).unwrap_or("");
+        if code != "0" {
+            let msg = v.get("msg").and_then(|m| m.as_str()).unwrap_or("");
+            return Err(FetchError::UpstreamError(format!(
+                "okx code={code} msg={msg}"
+            )));
+        }
+        return Ok(v);
+    }
+    Err(last_err.unwrap_or_else(|| FetchError::UpstreamError("okx retries exhausted".to_string())))
+}
+
+/// Merge one OKX `/market/ticker` and `/public/mark-price` response
+/// into a single [`Tick`]. Public for unit tests.
+pub fn parse_tape_tick(
+    ticker_v: &serde_json::Value,
+    mark_v: &serde_json::Value,
+    inst_id: &str,
+    underlier: &str,
+    fetched_at: i64,
+) -> Result<Option<Tick>, FetchError> {
+    let t = ticker_v
+        .get("data")
+        .and_then(|d| d.as_array())
+        .and_then(|a| a.first());
+    let m = mark_v
+        .get("data")
+        .and_then(|d| d.as_array())
+        .and_then(|a| a.first());
+    let mark = match m
+        .and_then(|x| x.get("markPx"))
+        .and_then(|s| s.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+    {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    let last_price = t
+        .and_then(|x| x.get("last"))
+        .and_then(|s| s.as_str())
+        .and_then(|s| s.parse::<f64>().ok());
+    let bid = t
+        .and_then(|x| x.get("bidPx"))
+        .and_then(|s| s.as_str())
+        .and_then(|s| s.parse::<f64>().ok());
+    let ask = t
+        .and_then(|x| x.get("askPx"))
+        .and_then(|s| s.as_str())
+        .and_then(|s| s.parse::<f64>().ok());
+    let bid_size = t
+        .and_then(|x| x.get("bidSz"))
+        .and_then(|s| s.as_str())
+        .and_then(|s| s.parse::<f64>().ok());
+    let ask_size = t
+        .and_then(|x| x.get("askSz"))
+        .and_then(|s| s.as_str())
+        .and_then(|s| s.parse::<f64>().ok());
+    let vol_24h = t
+        .and_then(|x| x.get("volCcy24h"))
+        .and_then(|s| s.as_str())
+        .and_then(|s| s.parse::<f64>().ok());
+    Ok(Some(Tick {
+        exchange: "okx".to_string(),
+        exchange_symbol: inst_id.to_string(),
+        underlier_symbol: underlier.to_string(),
+        backing_kind: "synthetic".to_string(),
+        ts: fetched_at,
+        mark_price: mark,
+        index_price: None,
+        last_price,
+        bid,
+        ask,
+        bid_size,
+        ask_size,
+        funding_rate: None,
+        funding_prediction: None,
+        open_interest: None,
+        vol_24h,
+        suspended: None,
+        meta: scryer_schema::Meta::new(TAPE_SCHEMA_VERSION, fetched_at, TAPE_SOURCE_LABEL),
+    }))
+}
+
+#[cfg(test)]
+mod tape_tests {
+    use super::*;
+
+    #[test]
+    fn underlier_from_inst_id_strips_suffix() {
+        assert_eq!(underlier_from_inst_id("TSLA-USDT-SWAP"), Some("TSLA".to_string()));
+        assert_eq!(underlier_from_inst_id("BTC-USDT-SWAP"), Some("BTC".to_string()));
+        assert_eq!(underlier_from_inst_id("BTC-PERP"), None);
+        assert_eq!(underlier_from_inst_id("-USDT-SWAP"), None);
+    }
+
+    #[test]
+    fn parses_tape_tick_from_separate_responses() {
+        let ticker = serde_json::from_str(r#"{"code":"0","msg":"","data":[
+            {"instType":"SWAP","instId":"TSLA-USDT-SWAP","last":"377.64","askPx":"377.65","askSz":"2.86","bidPx":"377.64","bidSz":"29.79","vol24h":"18006.56","volCcy24h":"18006.56","ts":"1777431864210"}
+        ]}"#).unwrap();
+        let mark = serde_json::from_str(r#"{"code":"0","msg":"","data":[
+            {"instId":"TSLA-USDT-SWAP","instType":"SWAP","markPx":"377.64","ts":"1777431865591"}
+        ]}"#).unwrap();
+        let tick = parse_tape_tick(&ticker, &mark, "TSLA-USDT-SWAP", "TSLA", 1_777_400_000)
+            .expect("parse")
+            .expect("non-empty");
+        assert_eq!(tick.exchange, "okx");
+        assert_eq!(tick.underlier_symbol, "TSLA");
+        assert_eq!(tick.backing_kind, "synthetic");
+        assert_eq!(tick.mark_price, 377.64);
+        assert_eq!(tick.last_price, Some(377.64));
+        assert_eq!(tick.bid, Some(377.64));
+        assert_eq!(tick.ask, Some(377.65));
+        assert_eq!(tick.index_price, None);
+    }
+
+    #[test]
+    fn missing_mark_price_returns_none() {
+        let ticker = serde_json::from_str(r#"{"code":"0","data":[]}"#).unwrap();
+        let mark = serde_json::from_str(r#"{"code":"0","data":[]}"#).unwrap();
+        let tick = parse_tape_tick(&ticker, &mark, "X", "X", 1).expect("parse");
+        assert!(tick.is_none());
+    }
+}

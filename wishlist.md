@@ -4,12 +4,75 @@ Source-of-truth TODO for scryer fetchers, schemas, daemons, and one-shot
 snapshots. Soothsayer is being migrated to a pure analysis consumer; all
 data scraping moves here.
 
-Last updated: 2026-04-28.
+Last updated: 2026-04-29.
 
 Each item lists schema name + version, fetcher placement, CLI surface,
 on-chain layout notes if applicable, and rough effort. Items needing a
 pre-flight entry in `methodology_log.md` per hard rule #1 are tagged
 `[methodology-entry-needed]`.
+
+---
+
+## Done — shipped in v0.1
+
+Quick index of items that have landed. Each row points at the
+methodology-log phase row for full detail; the original wishlist
+entry is kept below in its priority section for historical context.
+
+| Item | Schema(s) | Phase | One-line |
+|------|-----------|-------|----------|
+| 1 | `kamino_liquidation.v1` | phase 7 | Klend liquidation event panel |
+| 2 | `jupiter_lend_liquidation.v1` | phase 8 | Fluid Vaults liquidation panel |
+| 3 | `fluid_vault_config.v1` | phase 9 | Fluid xStock vault parameter snapshot |
+| 4 | `kamino_reserve.v1` | phase 28b | Kamino reserve config snapshot |
+| 5 | `kamino_obligation.v1` + `kamino_obligation_position.v1` | phase 31 | Klend borrower-book parent + child |
+| 6 | `loopscale_loan.v1` + `loopscale_loan_collateral.v1` | phase 32 | Loopscale credit-book parent + child |
+| 7 | `jito_bundles.v1` | phase 29 | Jito bundle metadata enrichment |
+| 8 | `oracle_context.v1` | phase 30 | Cross-source pre/post oracle observations |
+| 9-13 | `v5_tape.v1`, `kamino_scope.v1`, `pyth.v1`, `redstone.v1`, `kraken_funding.v1` | phases 14-21, 26 | soothsayer daemon migrations |
+| 14 | `yahoo.v1::Bar` + `earnings.v1` (Stooq + Finnhub) | phase 33 | Equity OHLCV daily + earnings calendar |
+| 15 | `backed.v1` + `nasdaq_halts.v1` | phase 34 | RSS corp-actions + Nasdaq halts |
+| 16 | `fred_macro.v1` | phase 35 | FRED macro release calendar |
+| 18 | `xstock_holders.v1` | phase 50 | Top-N holders + owner-program decomposition |
+| 19 | (Kamino `--all-markets` flag) | n/a | Cross-Kamino-market scan flag (was already shipped) |
+| 20 | `evm_liquidation.v1` | phase 52 | Aave V3 + Spark cross-VM liquidation panel |
+| 23 | `pyth_publisher.v1` | phase 37 | Pythnet per-publisher tape |
+| 24 | `dex_xstock_swaps.v1` | phase 36 | Cross-DEX xStock swap prints (vault-delta) |
+| 25 | `cme_intraday_1m.v1` | phase 38 | CME 1-min OHLCV via Databento |
+| 26 | `drift_liquidation.v1` | phase 40 | Drift Protocol liquidations |
+| 27 | `jito_tip_floor.v1` + `solana_priority_fees.v1` | phases 42 + 43 | Jito tip-floor tape + per-slot priority-fee panel |
+| 28 | `mango_v4_liquidation.v1` + `mango_v4_oracle_config.v1` | phase 44 | Mango v4 liquidations + oracle-config snapshot |
+| 29 | `cex_perp_funding_multi.v1` | phase 41 | OKX + Coinbase Intl + Hyperliquid + dYdX v4 funding |
+| 30 | `cboe_indices.v1` (VIX-family) | phase 47 | VIX/VIX9D/VIX1D/VIX3M/VIX6M historical bars |
+| 31 | `deribit_iv.v1` | phase 46 | Deribit BTC/ETH DVOL tape |
+| 32 | (existing `equities` CLI) | n/a | Intl session ETFs via existing Stooq path |
+| 33 | `cboe_indices.v1` (SKEW only) | phase 47 | SKEW historical (P/C deferred — paywalled) |
+| 34 | `edgar_8k.v1` | phase 51 | SEC 8-K filing index |
+| 35 | `fred_macro_extended.v1` | phase 45 | FRED daily series (TIPS / OAS / DGS / term-premium) |
+| 40 | `raydium_pool_metadata.v1` | phase 48 | Raydium v3 API pool-metadata one-shot (quant-work) |
+| 41 | `geckoterminal_ohlcv.v1` | phase 49 | GeckoTerminal historical OHLCV (quant-work) |
+| 44 | `pyth_poster_post.v1` | phases 52-54 | Pyth equity-feed poster daemon mirror tape (item 44 slices 1+2+2c) |
+| 45 | `cex_stock_perp_tape.v1` | phase 55 | Multi-venue 24/7 CEX-perp tape (4 of 11 venues; 7 enrichment-followups) |
+
+**Retracted (do not implement)** — premise-incorrect after live source verification:
+
+| Item | Reason |
+|------|--------|
+| 21 | `chainlink_streams_tape.v1` — Chainlink Data Streams on Solana is per-tx report-submission, not passive PDA. Replaced by items 42 + 43. |
+| 22 | `switchboard_ondemand_tape.v1` — Switchboard On-Demand has no equity feeds. |
+| 39 | `mango_v4_market_tape.v1` — Mango v4 doesn't expose a post-deviation-guard tape distinct from `mango_v4_oracle_config.v1`. |
+
+**Outstanding implementable items**:
+
+| Item | Schema(s) | Status / blocker |
+|------|-----------|------------------|
+| 17 | `chainlink_report.v1` | One-shot diagnostic (schema + cadence verifier). Re-evaluating after item 21's retraction; user's other agent doing research on the post-21 scope. |
+| 36 | `dex_treasury_swaps.v1` | Priority 4, gated on a deliberate scope decision to extend methodology-scope to tokenized treasuries. |
+| 37 | `backed_nav_strikes.v1` | Priority 4, same gate. |
+| 38 | `treasury_auction.v1` | Priority 4, same gate. |
+| 42 | soothsayer-streams-relay-program | Soothsayer-side, in flight. |
+| 43 | `chainlink_streams_relay_tape.v1` | Depends on 42. Soothsayer-side. |
+| 45 (v1+) | (cex_stock_perp_tape — 7 follow-up venues) | HTX, BingX, Bitget, MEXC, KuCoin Futures, Phemex, Crypto.com — extend `scryer-fetch-cex-perps` per the existing Kraken/Gate/OKX/Coinbase pattern. ~30-40min/venue. |
 
 ---
 
@@ -695,6 +758,289 @@ _dedup_key       string  (= symbol + ts)
   measurement at band-edge events.
 
 **Effort.** ~3 hours once the API key exists.
+
+### 45. `cex_stock_perp_tape.v1` — multi-venue 24/7 CEX perp tape on xStock underliers  `[v1 done — phase 55 (4 of 11 venues); 7 enrichment venues outstanding]`
+
+**Status (2026-04-29).** v1 shipped with **Kraken Futures + Gate.io
++ OKX + Coinbase International** (the four most-data-rich venues).
+Live-validated cross-venue TSLA dispersion across all 4: 46-cent
+spread between min/max marks at the smoke moment. Gate.io confirmed
+the only TLT venue. The remaining 7 venues from the spec below
+(HTX, BingX, Bitget, MEXC, KuCoin Futures, Phemex, Crypto.com) are
+v1-followup enrichment modules — same pattern as the 4 shipped, ~30-
+40min/venue per the `scryer-fetch-cex-perps` add-a-module template.
+Companion Kraken-Futures historical-backfill CLI deferred until the
+forward tape ages enough to motivate it.
+
+
+**What.** Continuous (≤60s cadence) forward tape of every centralized
+crypto exchange listing perpetual futures on the soothsayer xStock
+underlier set (SPY, QQQ, AAPL, GOOGL, NVDA, TSLA, HOOD, MSTR, GLD, TLT
+— note: TLT is currently single-venue, only Gate.io). Captures each
+venue's `markPrice` (the price that drives liquidations) and
+`indexPrice` (the venue's published reference index) plus order-book
+top-of-book and funding state. This is the missing incumbent-benchmark
+panel for paper 1: every venue here is a 24/7 oracle methodology in
+production *for the same instruments soothsayer prices*, and their
+mark-price formulas degrade through the Friday→Monday cash-closed gap
+in directly observable ways.
+
+Paper-1 hypothesis this panel tests: "incumbent CEX-perp mark-price
+methodologies, applied to xStock underliers, fail their implicit
+coverage claim by X bps on Y% of weekend windows" — a numerical
+upgrade to the currently-qualitative §1.1 critique.
+
+**Source coverage (probed 2026-04-28).** Eleven venues, all reachable
+from operator IP:
+
+*xStock-backed (settled against Backed-issued tokenized stock; X-suffix
+or NCSK-prefix naming convention):*
+- **Kraken Futures** — 9 of 10 (`PF_SPYXUSD`, `PF_QQQXUSD`,
+  `PF_AAPLXUSD`, `PF_GOOGLXUSD`, `PF_NVDAXUSD`, `PF_TSLAXUSD`,
+  `PF_HOODXUSD`, `PF_MSTRXUSD`, `PF_GLDXUSD`); rich `/derivatives/api/v3/tickers`
+  schema with `markPrice` + `indexPrice` + bid/ask/sizes/funding/OI/24h;
+  historical mark-price OHLC at `/api/charts/v1/{mark|index|bid|ask}/{SYMBOL}/1m`.
+- **Gate.io** — 12 X-suffix (`AAPLX_USDT`, `AMZNX_USDT`, `COINX_USDT`,
+  `GOOGLX_USDT`, `HOODX_USDT`, `METAX_USDT`, `MSTRX_USDT`, `NVDAX_USDT`,
+  `PLTRX_USDT`, `QQQX_USDT`, `SPYX_USDT`, `TSLAX_USDT`, `TQQQX_USDT`)
+  plus non-X `MSFT_USDT`, `NFLX_USDT`, `AMD_USDT`, **`TLT_USDT` (only
+  venue with TLT)**.
+- **HTX** (Huobi) — 5 X-suffix (`TSLAX-USDT`, `HOODX-USDT`,
+  `MSTRX-USDT`, `AMZNX-USDT`, `COINX-USDT`, `PLTRX-USDT`) plus 9 plain
+  (`META-USDT`, `NVDA-USDT`, `MSFT-USDT`, `SPY-USDT`, `GOOGL-USDT`,
+  `AAPL-USDT`, `QQQ-USDT`, etc.).
+- **BingX** — 3 X-suffix (`AAPLX-USDT`, `NVDAX-USDT`, `METAX-USDT`)
+  plus 13 NCSK-prefix (`NCSKTSLA2USD-USDT`, `NCSKMSFT2USD-USDT`,
+  `NCSKGOOGL2USD-USDT`, `NCSKAMZN2USD-USDT`, `NCSKAAPL2USD-USDT`,
+  `NCSKCOIN2USD-USDT`, `NCSKNVDA2USD-USDT`, `NCSKMETA2USD-USDT`,
+  `NCSKHOOD2USD-USDT`, `NCSKPLTR2USD-USDT`, `NCSKMSTR2USD-USDT`,
+  `NCSKQQQ2USD-USDT`, `NCSKSPY2USD-USDT`); confirm NCSK-issuer in the
+  methodology entry.
+- **Phemex** — 1 X-suffix (`SPYXUSDT`) plus 12 plain (`TSLAUSDT`,
+  `HOODUSDT`, `NVDAUSDT`, `METAUSDT`, `GOOGLUSDT`, `AAPLUSDT`,
+  `AMZNUSDT`, `COINUSDT`, `MSTRUSDT`, `PLTRUSDT`, `QQQUSDT`,
+  `MSFTUSDT`, `AMDUSDT`).
+
+*Synthetic / cash-settled USDT or USDC (no tokenized-asset backing —
+exchange-internal index against actual equity):*
+- **OKX** — 18 (`AAPL-USDT-SWAP`, `AMD-USDT-SWAP`, `AMZN-USDT-SWAP`,
+  `COIN-USDT-SWAP`, `GOOGL-USDT-SWAP`, `HOOD-USDT-SWAP`,
+  `META-USDT-SWAP`, `MSFT-USDT-SWAP`, `MSTR-USDT-SWAP`,
+  `NFLX-USDT-SWAP`, `NVDA-USDT-SWAP`, `PLTR-USDT-SWAP`,
+  `QQQ-USDT-SWAP`, `SPY-USDT-SWAP`, `TSLA-USDT-SWAP`). **Already in
+  scryer fetcher** (item 29) — extend symbol scope only.
+- **Coinbase International** — 9 USDC-margined `*-PERP` (`TSLA-PERP`,
+  `AAPL-PERP`, `NVDA-PERP`, `GOOGL-PERP`, `MSFT-PERP`, `META-PERP`,
+  `AMZN-PERP`, `SPY-PERP`, `QQQ-PERP`). **Already in scryer fetcher**
+  (item 29) — extend symbol scope only.
+- **Bitget** — 17 (`TSLAUSDT`, `AAPLUSDT`, `NVDAUSDT`, `GOOGLUSDT`,
+  `AMZNUSDT`, `METAUSDT`, `HOODUSDT`, `COINUSDT`, `MSTRUSDT`,
+  `PLTRUSDT`, `MSFTUSDT`, `QQQUSDT`, `NFLXUSDT`, `SPYUSDT`,
+  `TQQQUSDT`, `SQQQUSDT`, `AMDUSDT`); includes the leveraged-ETF
+  perps TQQQ/SQQQ which are interesting for paper 1's path-dependence
+  argument (they amplify any oracle drift).
+- **MEXC** — 10 STOCK-suffix (`AAPLSTOCK_USDT`, `MSTRSTOCK_USDT`,
+  `GOOGLSTOCK_USDT`, `MSFTSTOCK_USDT`, `QQQSTOCK_USDT`,
+  `AMZNSTOCK_USDT`, `METASTOCK_USDT`, `NFLXSTOCK_USDT`,
+  `PLTRSTOCK_USDT`, `AMDSTOCK_USDT`) plus full-name aliases
+  (`ROBINHOOD_USDT`, `COINBASE_USDT`).
+- **KuCoin Futures** — 15 (`*USDTM` suffix: AAPLUSDTM, AMDUSDTM,
+  AMZNUSDTM, COINUSDTM, GOOGLUSDTM, HOODUSDTM, METAUSDTM, MSFTUSDTM,
+  MSTRUSDTM, NFLXUSDTM, NVDAUSDTM, PLTRUSDTM, QQQUSDTM, SPYUSDTM,
+  TSLAUSDTM).
+- **Crypto.com** — 2 ETF-only (`QQQUSD-PERP`, `SPYUSD-PERP`); thinnest
+  coverage — include for the index-ETF-only minority view.
+
+*Geo-blocked from operator IP (future-work; same VPN-access path as
+item 29's caveat (a)):*
+- **Binance Futures** — HTTP 451 on `/fapi/v1/exchangeInfo`.
+  Historically lists similar synthetic stock perps in geographies that
+  permit them.
+- **Bybit** — CDN returns non-JSON to the operator IP; same blocker.
+
+*Confirmed-zero stock-perp coverage (do NOT include in fetcher;
+documented here so future agents don't re-probe):*
+- Hyperliquid (230 perps, all crypto), Deribit (BTC/ETH only), dYdX v4
+  (crypto only), Bitfinex (no equity perps).
+
+**Schema** (proposed `cex_stock_perp_tape.v1`):
+```
+exchange             string  ('kraken_futures' | 'okx' | 'coinbase_intl'
+                              | 'bitget' | 'bingx' | 'gate' | 'mexc'
+                              | 'kucoin_futures' | 'htx' | 'phemex'
+                              | 'crypto_com')
+exchange_symbol      string  (raw venue symbol, e.g. 'PF_TSLAXUSD')
+underlier_symbol     string  (canonical: 'TSLA', 'AAPL', ...)
+backing_kind         string  ('xstock_backed' | 'synthetic')
+ts                   i64     (observation epoch seconds)
+mark_price           f64     ← liquidation reference; the column paper 1 lives or dies on
+index_price          f64 nullable  (venue's reference index, where exposed)
+last_price           f64 nullable
+bid                  f64 nullable
+ask                  f64 nullable
+bid_size             f64 nullable
+ask_size             f64 nullable
+funding_rate         f64 nullable
+funding_prediction   f64 nullable
+open_interest        f64 nullable
+vol_24h              f64 nullable
+suspended            bool nullable
+_schema_version      string  ('cex_stock_perp_tape.v1')
+_fetched_at          i64
+_source              string  (per-venue label, e.g. 'kraken_futures:tickers')
+_dedup_key           string  (= '{exchange}:{exchange_symbol}:{ts}')
+```
+
+Per-venue field availability is **upstream-asymmetric, not schema-
+asymmetric** (same pattern as item 29 — leave columns null where the
+venue doesn't expose them; document the matrix in the methodology
+entry).
+
+**Storage.** `dataset/cex_stock_perp/tape/v1/underlier={SYM}/year=Y/
+month=M/day=D.parquet`. Underlier-keyed partition with `exchange`
+in the row (not the path) so cross-venue queries on a single underlier
+read one partition.
+
+**Companion forward tape — `cex_stock_perp_ohlcv.v1` (1-minute
+OHLCV per venue per perp).** Load-bearing for paper 1 §1.2's
+weekday-vs-weekend volume test (the trust-gap market-need argument):
+`vol_24h` from the tickers endpoint is rolling and contaminates
+weekend snapshots with weekday volume, so we need per-bar volume to
+cleanly partition observations into "underlier cash market open" vs
+"closed" buckets. Every venue identified above exposes 1m candles via
+public REST:
+- Kraken Futures: `/api/charts/v1/trade/{SYMBOL}/1m`
+- OKX: `/api/v5/market/candles?bar=1m&instId={SYM}`
+- Coinbase Intl: `/api/v1/instruments/{SYM}/candles?granularity=ONE_MINUTE`
+- Bitget: `/api/v2/mix/market/candles?granularity=1m`
+- BingX: `/openApi/swap/v3/quote/klines?interval=1m`
+- Gate.io: `/api/v4/futures/usdt/candlesticks?interval=1m`
+- MEXC: `/api/v1/contract/kline/{symbol}?interval=Min1`
+- KuCoin Futures: `/api/v1/kline/query?granularity=1`
+- HTX: `/linear-swap-ex/market/history/kline?period=1min`
+- Phemex: `/exchange/public/md/v3/kline/list?resolution=60`
+- Crypto.com: `/exchange/v1/public/get-candlestick?timeframe=1m`
+
+Schema (proposed `cex_stock_perp_ohlcv.v1`):
+```
+exchange             string
+exchange_symbol      string
+underlier_symbol     string
+backing_kind         string  ('xstock_backed' | 'synthetic')
+bar_open_ts          i64     (epoch seconds)
+bar_close_ts         i64
+open, high, low, close   f64
+volume_base          f64     (contracts traded in the bar; canonical paper-1 column)
+volume_quote         f64 nullable  (USD-equivalent notional, where exposed)
+trade_count          i64 nullable
+_schema_version      string  ('cex_stock_perp_ohlcv.v1')
+_fetched_at          i64
+_source              string
+_dedup_key           string  (= '{exchange}:{exchange_symbol}:{bar_open_ts}')
+```
+
+Companion CLI: `scry cex-stock-perp ohlcv --underliers ... [--exchanges ...]
+--cadence 1m`. Same partition as the tickers tape:
+`dataset/cex_stock_perp/ohlcv/v1/underlier={SYM}/year=Y/month=M/day=D.parquet`.
+
+**One-shot historical backfill (Kraken Futures only).** Most venues
+expose only ~30-90 days of 1m candle history; Kraken Futures' chart
+API returns deep history per `PF_*XUSD` listing date. Backfill
+populates `cex_stock_perp_ohlcv.v1` with `_source =
+'kraken_futures:charts/v1/trade'` for the full retrospective panel.
+For other venues, accept the venue's history cap and document it in
+the methodology entry; paper 1's weekday/weekend test only needs ~4
+weeks of forward tape to power the within-instrument DiD.
+
+**CLI.**
+```
+scry cex-stock-perp tape --underliers SPY,QQQ,AAPL,GOOGL,NVDA,TSLA,HOOD,MSTR,GLD,TLT
+  [--exchanges kraken_futures,okx,coinbase_intl,bitget,bingx,gate,mexc,kucoin_futures,htx,phemex,crypto_com]
+  [--cadence-secs 60]
+scry cex-stock-perp backfill --venue kraken_futures --start DATE --end DATE
+  --resolution 1m
+```
+
+**Notes / future-work caveats.**
+- (a) **xStock-backed vs synthetic is not an empirical distinction we
+  can verify on-chain** — it's labelled from venue listing
+  conventions. Methodology entry should record the inferred
+  classification per venue and the observation that empirically the
+  X-suffix perps cluster more tightly to the on-chain xStock DEX mid
+  than the synthetic-USDT perps do (testable claim, becomes a
+  paper 1 figure once the panel ages).
+- (b) **Funding cadences differ.** Kraken Futures 1h, OKX 8h,
+  Coinbase Intl 1h, most others 4h or 8h. Funding-rate column is the
+  raw venue-paid rate per period; consumers compute APR with the
+  per-row `funding_period_secs` (matches item 29 convention; add
+  `funding_period_secs` to the schema if needed — see below).
+- (c) **Add `funding_period_secs`** to the schema if the panel ages
+  show different funding cadences need to be preserved per row.
+  Defer until first paper-1 figure rejects without it.
+- (d) **Binance + Bybit unblock** lift symbol-coverage to ~95%+ but
+  isn't gating; their listings overlap heavily with what's already
+  here.
+- (e) **NCSK-prefix BingX perps** need a methodology entry to nail
+  down the issuer (likely a specific tokenized-stock issuer; may or
+  may not be Backed). If it's a different issuer, paper 1 has a
+  cross-issuer dispersion result for free.
+- (f) **TLT is single-venue (Gate.io only).** Document this; paper 1
+  TLT analysis will be statistically thin on the CEX-perp side. Same
+  TLT-shaped hole already exists for RedStone (project memory).
+- (g) **Per-venue rate limits** are upstream-asymmetric; budget per
+  the existing item-29 pattern (per-venue retry / 429 handling).
+
+**Effort.** ~10-12 hours total. Breakdown:
+- Two schemas (`cex_stock_perp_tape.v1` + `cex_stock_perp_ohlcv.v1`)
+  and storage layout: ~1.5h.
+- Per-venue tickers fetcher (extending `scryer-fetch-cex-perps`;
+  OKX + Coinbase Intl already there, 9 new venues to add): ~4h.
+- Per-venue 1m-candles fetcher (same 11 venues; mostly parallel
+  endpoint shape to the tickers fetchers): ~3.5h.
+- Kraken Futures historical backfill (mark/index/trade/bid/ask charts;
+  one-shot CLI): ~1h.
+- Tests + 1 live integration smoke per venue per tape: ~2h.
+
+**Paper-1 framing.** Two parallel arguments, both supported by this
+panel:
+
+*§1.1 (methodology critique)* — every venue here is *actively trying*
+to publish a 24/7 mark for the same xStocks soothsayer prices, with
+skin in the game (real liquidations). Cross-venue dispersion on the
+same underlier during a weekend window is a §1.1 figure: how much do
+11 production CEX oracles disagree about an xStock through
+Friday→Monday, and does soothsayer's served band contain the cluster?
+This argument lives on the `cex_stock_perp_tape.v1` (state) panel —
+mark/index/bid/ask snapshots.
+
+*§1.2 (market-need framing — the volume-as-trust-evidence argument)* —
+aggregate stock-perp volume across all 11 venues is rounding-error
+compared to the same venues' BTC/ETH perps. The trust-gap hypothesis:
+traders won't put real size against a mark price they can't audit, so
+volume collapses precisely when the underlying cash market closes and
+the mark becomes formula-only. This argument lives on the
+`cex_stock_perp_ohlcv.v1` panel via a within-instrument DiD:
+
+```
+H₀: μ_volume(US cash hours) == μ_volume(US cash closed)
+   per (exchange, exchange_symbol), paired by week
+```
+
+Per-venue stratification distinguishes a methodology-shaped trust gap
+(uniform open→closed volume collapse across reputable + disreputable
+venues — strengthens the soothsayer pitch) from a brand-shaped one
+(reputable venues retain weekend volume — weaker pitch). The decay
+shape (cliff vs exponential) at the Friday 16:00 ET edge is a §1.2
+figure on its own. This converts the soothsayer argument from "better
+calibration for on-chain liquidation reference" to "missing trust
+primitive that unblocks 24/7 RWA derivative markets," which is the
+larger TAM story for the AFT audience specifically.
+
+Both arguments need ~4 weeks of forward tape minimum before the DiD
+has power against weekly demand drift; calendar time is the binding
+constraint, so start the daemons today.
+
+---
 
 ### 39. `mango_v4_market_tape.v1` — Mango v4 post-deviation-guard market price tape  `[premise-incorrect — DO NOT IMPLEMENT]`
 

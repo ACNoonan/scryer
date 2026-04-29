@@ -22,6 +22,7 @@ mod kamino_obligations_cmd;
 mod kamino_reserves_cmd;
 mod cboe_cmd;
 mod cex_funding_cmd;
+mod cex_stock_perp_cmd;
 mod databento_cmd;
 mod deribit_cmd;
 mod dex_xstock_swaps_cmd;
@@ -106,6 +107,11 @@ enum Command {
     /// funding_ts) triple to dataset/cex_perp_funding/funding/v1/
     /// symbol={SYM}/year=Y/month=M/day=D.parquet.
     CexFunding(CexFundingCmd),
+    /// Multi-venue 24/7 CEX perp tape on xStock underliers. v1 ships
+    /// 4 venues (Kraken Futures, Gate.io, OKX, Coinbase International).
+    /// Writes to dataset/cex_stock_perp/tape/v1/underlier={SYM}/year=Y/
+    /// month=M/day=D.parquet.
+    CexStockPerp(CexStockPerpCmd),
     /// Pyth equity-feed poster — write-side daemon (item 44). Fetches
     /// signed Hermes VAAs for SPY/QQQ/AAPL/etc. and posts them to
     /// Solana's existing Pyth receiver program. Methodology:
@@ -263,6 +269,20 @@ enum DeribitTarget {
 struct CexFundingCmd {
     #[command(subcommand)]
     target: CexFundingTarget,
+}
+
+#[derive(Parser, Debug)]
+struct CexStockPerpCmd {
+    #[command(subcommand)]
+    target: CexStockPerpTarget,
+}
+
+#[derive(Subcommand, Debug)]
+enum CexStockPerpTarget {
+    /// Single-tick poll across the configured venues for the
+    /// configured xStock underlier set. Schedule via launchd at
+    /// the desired cadence (typical: 60s).
+    Tape(cex_stock_perp_cmd::TapeArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -549,6 +569,9 @@ async fn main() -> Result<()> {
         },
         Command::Deribit(c) => match c.target {
             DeribitTarget::Dvol(a) => deribit_cmd::run_dvol(a).await,
+        },
+        Command::CexStockPerp(c) => match c.target {
+            CexStockPerpTarget::Tape(a) => cex_stock_perp_cmd::run_tape(a).await,
         },
         Command::CexFunding(c) => match c.target {
             CexFundingTarget::Multi(a) => cex_funding_cmd::run_multi(a).await,

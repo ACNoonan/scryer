@@ -277,3 +277,166 @@ mod tests {
         assert_eq!(rows[0].mark_price, None);
     }
 }
+
+// ============================================================
+// stock-perp tape (item 45 / Phase 55)
+// ============================================================
+
+use scryer_schema::cex_stock_perp_tape::v1::{Tick, SCHEMA_VERSION as TAPE_SCHEMA_VERSION};
+
+pub const TAPE_SOURCE_LABEL: &str = "coinbase_intl:instrument-quote";
+
+/// Fetch one Coinbase International stock-perp tape tick per
+/// underlier in `underliers`. Single `/quote` call per symbol gives
+/// every field needed in one response.
+pub async fn fetch_tape(
+    client: &reqwest::Client,
+    cfg: &PollConfig,
+    underliers: &[String],
+    fetched_at: i64,
+) -> Result<Vec<Tick>, FetchError> {
+    let mut out = Vec::with_capacity(underliers.len());
+    for u in underliers {
+        let exchange_symbol = format!("{u}-PERP");
+        match fetch_one_tape_tick(client, cfg, &exchange_symbol, u, fetched_at).await {
+            Ok(Some(t)) => out.push(t),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(symbol = %u, error = %e, "coinbase_intl tape fetch skipped");
+            }
+        }
+        if cfg.rate_limit_delay > std::time::Duration::ZERO {
+            tokio::time::sleep(cfg.rate_limit_delay).await;
+        }
+    }
+    Ok(out)
+}
+
+async fn fetch_one_tape_tick(
+    client: &reqwest::Client,
+    cfg: &PollConfig,
+    exchange_symbol: &str,
+    underlier: &str,
+    fetched_at: i64,
+) -> Result<Option<Tick>, FetchError> {
+    let url = format!(
+        "{}/api/v1/instruments/{}/quote",
+        DEFAULT_BASE_URL.trim_end_matches('/'),
+        exchange_symbol
+    );
+    let mut last_err: Option<FetchError> = None;
+    for _attempt in 0..cfg.retry_max.max(1) {
+        let resp = client.get(&url).send().await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = Some(FetchError::Transport(e));
+                tokio::time::sleep(cfg.retry_delay).await;
+                continue;
+            }
+        };
+        let status = resp.status().as_u16();
+        let text = resp.text().await.map_err(FetchError::Transport)?;
+        if status == 404 {
+            // Not all underliers list on Coinbase Intl; return None.
+            return Ok(None);
+        }
+        if status == 429 || status >= 500 {
+            last_err = Some(FetchError::UpstreamStatus {
+                status,
+                body_head: body_head(&text),
+            });
+            tokio::time::sleep(cfg.retry_delay).await;
+            continue;
+        }
+        if status >= 400 {
+            return Err(FetchError::UpstreamStatus {
+                status,
+                body_head: body_head(&text),
+            });
+        }
+        return parse_tape_tick(&text, exchange_symbol, underlier, fetched_at);
+    }
+    Err(last_err.unwrap_or_else(|| FetchError::UpstreamError(
+        format!("coinbase_intl retries exhausted for {exchange_symbol}"),
+    )))
+}
+
+/// Parse one Coinbase International `/quote` response into a
+/// [`Tick`]. Public for tests.
+pub fn parse_tape_tick(
+    body: &str,
+    exchange_symbol: &str,
+    underlier: &str,
+    fetched_at: i64,
+) -> Result<Option<Tick>, FetchError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| FetchError::MalformedBody(format!("non-json: {e}")))?;
+    if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
+        if !msg.is_empty() {
+            return Err(FetchError::UpstreamError(format!(
+                "coinbase_intl message: {msg}"
+            )));
+        }
+    }
+    let mark = v
+        .get("mark_price")
+        .and_then(|m| m.as_str())
+        .and_then(|s| s.parse::<f64>().ok());
+    let mark = match mark {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+    Ok(Some(Tick {
+        exchange: "coinbase_intl".to_string(),
+        exchange_symbol: exchange_symbol.to_string(),
+        underlier_symbol: underlier.to_string(),
+        backing_kind: "synthetic".to_string(),
+        ts: fetched_at,
+        mark_price: mark,
+        index_price: pick_str_f64(&v, "index_price"),
+        last_price: pick_str_f64(&v, "trade_price"),
+        bid: pick_str_f64(&v, "best_bid_price"),
+        ask: pick_str_f64(&v, "best_ask_price"),
+        bid_size: pick_str_f64(&v, "best_bid_size"),
+        ask_size: pick_str_f64(&v, "best_ask_size"),
+        funding_rate: None,
+        funding_prediction: pick_str_f64(&v, "predicted_funding"),
+        open_interest: None,
+        vol_24h: None,
+        suspended: None,
+        meta: scryer_schema::Meta::new(TAPE_SCHEMA_VERSION, fetched_at, TAPE_SOURCE_LABEL),
+    }))
+}
+
+fn pick_str_f64(v: &serde_json::Value, key: &str) -> Option<f64> {
+    v.get(key).and_then(|x| x.as_str()).and_then(|s| s.parse::<f64>().ok())
+}
+
+#[cfg(test)]
+mod tape_tests {
+    use super::*;
+
+    #[test]
+    fn parses_typical_quote_response() {
+        let body = r#"{"best_bid_price":"377.46","best_bid_size":"13.7","best_ask_price":"377.55","best_ask_size":"92.75","trade_price":"376.98","trade_qty":"14.69","index_price":"377.26","mark_price":"377.46","settlement_price":"377.33","limit_up":"396.11","limit_down":"358.39","predicted_funding":"0.000024","timestamp":"2026-04-29T03:04:26.220Z"}"#;
+        let tick = parse_tape_tick(body, "TSLA-PERP", "TSLA", 1_777_400_000)
+            .expect("parse")
+            .expect("non-empty");
+        assert_eq!(tick.exchange, "coinbase_intl");
+        assert_eq!(tick.underlier_symbol, "TSLA");
+        assert_eq!(tick.backing_kind, "synthetic");
+        assert_eq!(tick.mark_price, 377.46);
+        assert_eq!(tick.index_price, Some(377.26));
+        assert_eq!(tick.bid, Some(377.46));
+        assert_eq!(tick.ask, Some(377.55));
+        assert_eq!(tick.funding_prediction, Some(0.000024));
+    }
+
+    #[test]
+    fn missing_mark_price_returns_none() {
+        let body = r#"{"best_bid_price":"100"}"#;
+        let tick = parse_tape_tick(body, "X-PERP", "X", 1).expect("parse");
+        assert!(tick.is_none());
+    }
+}

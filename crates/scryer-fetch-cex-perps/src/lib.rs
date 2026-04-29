@@ -27,7 +27,9 @@ use thiserror::Error;
 
 pub mod coinbase_intl;
 pub mod dydx_v4;
+pub mod gate;
 pub mod hyperliquid;
+pub mod kraken_futures;
 pub mod okx;
 
 #[derive(Debug, Error)]
