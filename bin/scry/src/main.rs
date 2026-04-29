@@ -27,6 +27,7 @@ mod deribit_cmd;
 mod dex_xstock_swaps_cmd;
 mod drift_liquidations_cmd;
 mod equities_cmd;
+mod evm_cmd;
 mod fred_cmd;
 mod loopscale_loans_cmd;
 mod mango_v4_liquidations_cmd;
@@ -83,6 +84,10 @@ enum Command {
     /// from `data.sec.gov/submissions/CIK*.json`. Requires a
     /// User-Agent header per SEC fair-access policy.
     Sec(SecCmd),
+    /// EVM lending-protocol liquidation panel. Aave V3 (Ethereum,
+    /// Arbitrum) + Spark (Ethereum) via `eth_getLogs`. Writes to
+    /// dataset/evm/liquidations/v1/chain={X}/year=Y/month=M/day=D.parquet.
+    Evm(EvmCmd),
     /// Databento Historical API — CME futures 1-minute OHLCV bars.
     /// Pay-as-you-go against the operator's $125 signup credit.
     Databento(DatabentoCmd),
@@ -187,6 +192,20 @@ struct FredCmd {
 struct SecCmd {
     #[command(subcommand)]
     target: SecTarget,
+}
+
+#[derive(Parser, Debug)]
+struct EvmCmd {
+    #[command(subcommand)]
+    target: EvmTarget,
+}
+
+#[derive(Subcommand, Debug)]
+enum EvmTarget {
+    /// Aave V3 / Spark `LiquidationCall` event walker. One row per
+    /// matching event over `[from-block, to-block]` (or
+    /// `--lookback-blocks` from current head).
+    Liquidations(evm_cmd::LiquidationsArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -509,6 +528,9 @@ async fn main() -> Result<()> {
         },
         Command::Sec(c) => match c.target {
             SecTarget::Edgar8k(a) => sec_cmd::run_edgar_8k(a).await,
+        },
+        Command::Evm(c) => match c.target {
+            EvmTarget::Liquidations(a) => evm_cmd::run_liquidations(a).await,
         },
         Command::Databento(c) => match c.target {
             DatabentoTarget::Intraday1m(a) => databento_cmd::run_intraday(a).await,

@@ -3,7 +3,19 @@ name = "scryer-fetch-evm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "EVM RPC fetchers — Ethereum, Arbitrum, Base. Routed through scryer-proxy. v0.3+ scope."
+description = "EVM JSON-RPC fetchers — Aave V3 + Spark liquidation event decoder via eth_getLogs. Public-RPC compatible (rpc.flashbots.net, ethereum-rpc.publicnode.com)."
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+scryer-schema = { path = "../scryer-schema" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

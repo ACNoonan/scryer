@@ -1306,18 +1306,28 @@ Paper 2 §C4 even if the xStocks-only panel stays thin.
 kamino-liquidations --all-markets` runs the panel across every Klend
 lending market. Schema unchanged from item 1. No additional work.
 
-### 20. EVM Aave/Spark liquidation panels for Paper 2 cross-VM comparison
+### 20. EVM Aave/Spark liquidation panels for Paper 2 cross-VM comparison  `[done — phase 52]`
+
+**Status (2026-04-29).** Shipped as a single `evm_liquidation.v1`
+schema covering Aave V3 (Ethereum + Arbitrum) and Spark (Ethereum) —
+both protocols emit byte-identical `LiquidationCall` events, so one
+schema + one decoder + one fetcher cover all three (protocol, chain)
+pairs. CLI: `scry evm liquidations --protocol aave_v3|spark
+--chain ethereum|arbitrum [--from-block N --to-block M |
+--lookback-blocks N]`. Live-validated: Aave V3 Ethereum 5 rows /
+50K blocks, Aave V3 Arbitrum 4 rows / 50K, Spark Ethereum 0 rows
+(low-volume window, pipeline works). Public RPCs verified:
+flashbots (no cap), publicnode (50K cap). Effort actual ~3h vs
+~6h+/protocol estimated, mostly because the shared event ABI made
+single-schema consolidation viable.
 
 **What.** Aave V3 and Spark have public liquidation event logs on
-Ethereum and Arbitrum. If Paper 2 wants a cross-VM comparison
-("Solana calibration-transparent oracle vs. EVM opaque-oracle
-baseline"), add an EVM fetcher. `scryer-fetch-evm` crate already
-exists in workspace; needs implementation.
+Ethereum and Arbitrum. Paper 2's cross-VM comparison ("Solana
+calibration-transparent oracle vs. EVM opaque-oracle baseline")
+now has the EVM half.
 
-**Schema.** New `aave_liquidation.v1` / `spark_liquidation.v1`.
-
-**Effort.** ~6+ hours per protocol (separate methodology entries
-each).
+**Schema.** Single `evm_liquidation.v1` (vs originally proposed
+`aave_liquidation.v1` + `spark_liquidation.v1`).
 
 ### 30. `vix_term_structure.v1` — VIX1D / VIX9D / VIX / VIX3M / VIX6M forward  `[done — phase 47 via cboe_indices.v1]`
 

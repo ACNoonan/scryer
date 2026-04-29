@@ -22,7 +22,7 @@
 use arrow_array::RecordBatch;
 use arrow_schema::ArrowError;
 use scryer_schema::{
-    backed, cboe_indices, cex_perp_funding_multi, cme_intraday_1m, deribit_iv, dex_xstock_swaps, drift_liquidation, earnings, edgar_8k, fluid_vault_config, fred_macro, fred_macro_extended, geckoterminal, geckoterminal_ohlcv,
+    backed, cboe_indices, cex_perp_funding_multi, cme_intraday_1m, deribit_iv, dex_xstock_swaps, drift_liquidation, earnings, edgar_8k, evm_liquidation, fluid_vault_config, fred_macro, fred_macro_extended, geckoterminal, geckoterminal_ohlcv,
     jito_bundles, jito_tip_floor, jupiter_lend_liquidation, kamino_liquidation, kamino_obligation,
     kamino_obligation_position, kamino_reserve, kamino_scope, kraken_funding, loopscale_loan,
     loopscale_loan_collateral, mango_v4_liquidation, mango_v4_oracle_config, nasdaq_halts,
@@ -558,6 +558,25 @@ impl DatasetSchema for geckoterminal_ohlcv::v1::Bar {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         geckoterminal_ohlcv::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for evm_liquidation::v1::Liquidation {
+    const DATA_TYPE: &'static str = "liquidations";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("chain");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.block_timestamp
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        evm_liquidation::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        evm_liquidation::v1::from_record_batch(batch)
     }
 }
 

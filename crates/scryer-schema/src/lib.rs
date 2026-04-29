@@ -29,6 +29,7 @@ pub mod drift_liquidation;
 pub mod earnings;
 pub mod edgar_8k;
 pub mod error;
+pub mod evm_liquidation;
 pub mod fluid_vault_config;
 pub mod fred_macro;
 pub mod fred_macro_extended;

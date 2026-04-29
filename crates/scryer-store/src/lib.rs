@@ -71,6 +71,11 @@ pub mod venue {
     pub const RAYDIUM: &str = "raydium";
     pub const XSTOCK: &str = "xstock";
     pub const SEC: &str = "sec";
+    /// Cross-chain EVM venue. Rows distinguish chain via the
+    /// `chain` column inside the row + the `chain={X}` partition
+    /// key. Aave V3 (Ethereum/Arbitrum) and Spark (Ethereum) live
+    /// here; future EVM-protocol venues (Compound, Morpho) join.
+    pub const EVM: &str = "evm";
     pub const CEX_PERP_FUNDING: &str = "cex_perp_funding";
     pub const GECKOTERMINAL: &str = "geckoterminal";
     pub const JITO: &str = "jito";
