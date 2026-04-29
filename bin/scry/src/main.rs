@@ -297,6 +297,11 @@ enum DexaggTarget {
     /// — re-runs within the trade-coverage window dedup cleanly on
     /// `tx_hash`.
     GtTrades(dexagg_cmd::GtTradesArgs),
+    /// Raydium v3 API pool-metadata one-shot. Replaces
+    /// `quant-work/lvr/find_pool.py`. Outputs both parquet (for
+    /// time-series snapshot drift) and the consumer-shape JSON
+    /// (`quant-work/data/pool_metadata.json`).
+    RaydiumPoolMetadata(dexagg_cmd::RaydiumPoolMetadataArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -452,6 +457,7 @@ async fn main() -> Result<()> {
         },
         Command::Dexagg(c) => match c.target {
             DexaggTarget::GtTrades(a) => dexagg_cmd::run_gt_trades(a).await,
+            DexaggTarget::RaydiumPoolMetadata(a) => dexagg_cmd::run_raydium_pool_metadata(a).await,
         },
         Command::V5tape(c) => match c.target {
             V5tapeTarget::Tape(a) => v5_cmd::run_tape(a).await,

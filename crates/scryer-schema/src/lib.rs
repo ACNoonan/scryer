@@ -51,6 +51,7 @@ pub mod oracle_context;
 pub mod pool_snapshot;
 pub mod pyth;
 pub mod pyth_publisher;
+pub mod raydium_pool_metadata;
 pub mod redstone;
 pub mod solana_priority_fees;
 pub mod swap;

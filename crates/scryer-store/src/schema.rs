@@ -27,7 +27,7 @@ use scryer_schema::{
     kamino_obligation_position, kamino_reserve, kamino_scope, kraken_funding, loopscale_loan,
     loopscale_loan_collateral, mango_v4_liquidation, mango_v4_oracle_config, nasdaq_halts,
     oracle_context, pool_snapshot, pyth, pyth_publisher,
-    redstone, solana_priority_fees, swap, trade, v5_tape, yahoo, FromArrowError,
+    raydium_pool_metadata, redstone, solana_priority_fees, swap, trade, v5_tape, yahoo, FromArrowError,
 };
 
 /// Time granularity of a dataset's partitioning. Each schema picks
@@ -539,6 +539,25 @@ impl DatasetSchema for fred_macro::v1::Event {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         fred_macro::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for raydium_pool_metadata::v1::PoolMetadata {
+    const DATA_TYPE: &'static str = "pool_metadata";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("pool");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Yearly;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.fetched_at
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        raydium_pool_metadata::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        raydium_pool_metadata::v1::from_record_batch(batch)
     }
 }
 

@@ -1610,7 +1610,7 @@ are small. The corresponding deleted scripts are listed in
 `quant-work/AGENTS.md` § "What was deleted" and
 `quant-work/docs/scryer_consumer_guide.md` § "Migration cheat-sheet".
 
-### 40. `raydium_pool_metadata.v1` — Raydium v3 API pool-metadata one-shot  `[methodology-entry-needed]`
+### 40. `raydium_pool_metadata.v1` — Raydium v3 API pool-metadata one-shot  `[done — phase 48]`
 
 **What.** Replaces the deleted `quant-work/lvr/find_pool.py`. A one-shot
 snapshot of a Raydium pool's structural metadata (pool address, program
