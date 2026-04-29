@@ -33,6 +33,7 @@ mod loopscale_loans_cmd;
 mod mango_v4_liquidations_cmd;
 mod mango_v4_oracle_configs_cmd;
 mod oracle_context_cmd;
+mod pyth_poster_cmd;
 mod pyth_publisher_cmd;
 mod rss_cmd;
 mod sec_cmd;
@@ -105,6 +106,13 @@ enum Command {
     /// funding_ts) triple to dataset/cex_perp_funding/funding/v1/
     /// symbol={SYM}/year=Y/month=M/day=D.parquet.
     CexFunding(CexFundingCmd),
+    /// Pyth equity-feed poster — write-side daemon (item 44). Fetches
+    /// signed Hermes VAAs for SPY/QQQ/AAPL/etc. and posts them to
+    /// Solana's existing Pyth receiver program. Methodology:
+    /// `methodology_log.md` "Write-side daemons" + "Write-side daemon
+    /// schemas". Slice 2: --once + --dry-run only; slice 2c lands the
+    /// real on-chain submitter.
+    PythPoster(pyth_poster_cmd::PythPosterArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -545,6 +553,7 @@ async fn main() -> Result<()> {
         Command::CexFunding(c) => match c.target {
             CexFundingTarget::Multi(a) => cex_funding_cmd::run_multi(a).await,
         },
+        Command::PythPoster(a) => pyth_poster_cmd::run_pyth_poster(a).await,
     }
 }
 

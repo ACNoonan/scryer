@@ -15,6 +15,7 @@ scryer-store = { path = "../../crates/scryer-store" }
 scryer-fetch-solana = { path = "../../crates/scryer-fetch-solana" }
 scryer-fetch-redstone = { path = "../../crates/scryer-fetch-redstone" }
 scryer-fetch-pyth = { path = "../../crates/scryer-fetch-pyth" }
+scryer-fetch-pyth-poster = { path = "../../crates/scryer-fetch-pyth-poster" }
 scryer-fetch-dexagg = { path = "../../crates/scryer-fetch-dexagg" }
 scryer-fetch-jito = { path = "../../crates/scryer-fetch-jito" }
 scryer-fetch-equities = { path = "../../crates/scryer-fetch-equities" }

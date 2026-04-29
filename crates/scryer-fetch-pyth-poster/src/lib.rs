@@ -21,11 +21,17 @@
 //! --dry-run`.
 
 pub mod config;
+pub mod daemon;
 pub mod hermes;
 pub mod keys;
 pub mod mode;
+pub mod tx;
 
 pub use config::{FeedConfig, FeedDefaults, PosterConfig};
+pub use daemon::{Daemon, DaemonError, IterationInputs, IterationOutcome, VENUE};
 pub use hermes::{HermesClient, HermesError, PriceFeed, PriceUpdate};
 pub use keys::{DevKeypair, KeyError};
 pub use mode::{ModeError, RunMode};
+pub use tx::{
+    DryRunSubmitter, PostedReceipt, SubmitError, SubmitInputs, SubmitOutcome, TxSubmitter,
+};
