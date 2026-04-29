@@ -92,3 +92,30 @@ where
             expected: std::any::type_name::<A>(),
         })
 }
+
+/// Append-only-aware variant: returns `Ok(None)` when the column is
+/// absent (older parquet files written before the column was added),
+/// `Ok(Some(&A))` when present and the type matches, or
+/// `Err(WrongType)` when present with a wrong type. Used by schemas
+/// that grew nullable columns within a major version (e.g.
+/// `pyth_poster_post.v1` phase-63 flow-level fields).
+pub(crate) fn try_downcast_column<'a, A>(
+    batch: &'a arrow_array::RecordBatch,
+    name: &'static str,
+) -> Result<Option<&'a A>, FromArrowError>
+where
+    A: arrow_array::Array + 'static,
+{
+    let Ok(idx) = batch.schema().index_of(name) else {
+        return Ok(None);
+    };
+    batch
+        .column(idx)
+        .as_any()
+        .downcast_ref::<A>()
+        .map(Some)
+        .ok_or(FromArrowError::WrongType {
+            column: name,
+            expected: std::any::type_name::<A>(),
+        })
+}

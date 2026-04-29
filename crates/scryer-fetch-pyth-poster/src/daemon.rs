@@ -298,7 +298,12 @@ fn build_tape_row(
         None => (None, None, None),
     };
 
-    // Common fields — populated for every outcome class.
+    // Common fields — populated for every outcome class. Flow-level
+    // fields beyond `posting_path` stay `None` until the staged
+    // submitter lands (slice 2c-3 state machine, phase 63 second
+    // commit); the methodology lock at "pyth-poster posting flow —
+    // 2026-04-29 (locked)" pins push-oracle non-atomic as the only
+    // path the daemon ever attempts.
     let mut row = Post {
         feed_id_hex: cfg.feed_id_hex.clone(),
         underlier_symbol: cfg.underlier_symbol.clone(),
@@ -319,6 +324,14 @@ fn build_tape_row(
         verification_level: None,
         error_class: None,
         error_detail: None,
+        posting_path: Some(
+            scryer_schema::pyth_poster_post::v1::posting_path::PUSH_ORACLE_NON_ATOMIC.to_string(),
+        ),
+        encoded_vaa_account: None,
+        flow_tx_count: None,
+        vaa_write_tx_count: None,
+        flow_total_lamports: None,
+        failed_stage: None,
         meta: Meta::new(
             scryer_schema::pyth_poster_post::v1::SCHEMA_VERSION,
             now_ts,
@@ -384,6 +397,8 @@ fn build_tape_row_skipped(
         None => (None, None, None),
     };
 
+    // Skipped flows never touch the chain: every post-attempt-only
+    // field stays null and every flow-level count is exactly zero.
     let row = Post {
         feed_id_hex: cfg.feed_id_hex.clone(),
         underlier_symbol: cfg.underlier_symbol.clone(),
@@ -404,6 +419,14 @@ fn build_tape_row_skipped(
         verification_level: None,
         error_class: None,
         error_detail: None,
+        posting_path: Some(
+            scryer_schema::pyth_poster_post::v1::posting_path::PUSH_ORACLE_NON_ATOMIC.to_string(),
+        ),
+        encoded_vaa_account: None,
+        flow_tx_count: Some(0),
+        vaa_write_tx_count: Some(0),
+        flow_total_lamports: Some(0),
+        failed_stage: None,
         meta: Meta::new(
             scryer_schema::pyth_poster_post::v1::SCHEMA_VERSION,
             now_ts,

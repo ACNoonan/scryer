@@ -47,7 +47,16 @@ pub fn wormhole_core_program_id() -> Pubkey {
 
 /// PriceUpdateV2 PDA owned by push-oracle.
 ///
-/// Seeds: `["price_feed", shard_id_le_bytes, feed_id_bytes]`.
+/// Seeds: `[shard_id_le_bytes, feed_id_bytes]` — no `"price_feed"`
+/// literal prefix. Verified against
+/// pyth-network/pyth-crosschain @ commit `f8032d3`,
+/// `target_chains/solana/programs/pyth-push-oracle/src/lib.rs:121`
+/// (`#[account(mut, seeds = [&shard_id.to_le_bytes(), &feed_id], bump)]`)
+/// and the SDK helper at
+/// `pyth-push-oracle/src/sdk.rs::get_price_feed_address`. See
+/// `methodology_log.md` "pyth-poster posting flow — 2026-04-29
+/// (locked)" §"What the upstream sources lock #2" for the
+/// phase-56 prose-vs-code-vs-upstream reconciliation.
 ///
 /// This is the address the soothsayer-router reads passively. Once
 /// derived, it's stable across all future posts for the same
@@ -56,10 +65,7 @@ pub fn wormhole_core_program_id() -> Pubkey {
 pub fn price_update_pda(feed_id: &[u8; 32], shard_id: u16) -> (Pubkey, u8) {
     let program_id = push_oracle_program_id();
     let shard_le = shard_id.to_le_bytes();
-    Pubkey::find_program_address(
-        &[b"price_feed", &shard_le, feed_id.as_slice()],
-        &program_id,
-    )
+    Pubkey::find_program_address(&[&shard_le, feed_id.as_slice()], &program_id)
 }
 
 /// Receiver config PDA. Seeds: `["config"]`. Read-only account input

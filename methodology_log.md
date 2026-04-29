@@ -976,8 +976,17 @@ Updates this lands:
 
 - The pyth-poster daemon's posting target is push-oracle, not the
   bare receiver. The methodology entry's `posted_pda` column
-  documents the push-oracle PDA (seeds:
-  `["price_feed", shard_id_le_bytes, feed_id_bytes]`).
+  documents the push-oracle PDA. **Seeds correction (2026-04-29 —
+  see "pyth-poster posting flow — 2026-04-29 (locked)" below):**
+  the canonical seeds are `[shard_id_le_bytes, feed_id_bytes]` —
+  with no leading `"price_feed"` literal. The earlier prose on
+  this line said `["price_feed", shard_id_le, feed_id]`, which
+  mismatches the on-chain push-oracle program's
+  `seeds = [&shard_id.to_le_bytes(), &feed_id]` (verified against
+  pyth-network/pyth-crosschain @ commit `f8032d3`,
+  `target_chains/solana/programs/pyth-push-oracle/src/lib.rs:121`).
+  Phase 56's `crates/scryer-fetch-pyth-poster/src/pda.rs` was
+  derived from the wrong prose and needs the same correction.
 - The "Write-side daemon schemas" § `pyth_poster_post.v1` entry's
   `posted_pda` field clarification stays the same shape — only the
   derivation seeds change. No schema bump.
@@ -1022,6 +1031,240 @@ CLI shape, daemon location, keypair / tx mechanics references) is in
 `docs/schemas.md#pyth_poster_postv1`. Keypair / tx mechanics not
 duplicated — see "Write-side daemons — 2026-04-28 (locked)" above for
 those.
+
+---
+
+## pyth-poster posting flow — 2026-04-29 (locked)
+
+This section locks the on-chain posting flow for the
+`soothsayer-pyth-poster` daemon (wishlist item 44) after a
+2026-04-29 verification pass against pyth-network/pyth-crosschain
+upstream sources. It supersedes the implicit single-tx framing in
+the earlier "Write-side daemons" / "Solana write-side dep tree"
+entries, both of which left the on-chain shape under-specified.
+
+### Source-truth verification
+
+Pinned upstream commit:
+`pyth-network/pyth-crosschain` @ `f8032d370afd1f8ff595ec113eb289ee0c21dd0a`
+(2026-04-29).
+
+Files checked:
+
+- `target_chains/solana/programs/pyth-push-oracle/src/lib.rs`
+- `target_chains/solana/programs/pyth-push-oracle/src/sdk.rs`
+- `target_chains/solana/programs/pyth-solana-receiver/src/lib.rs`
+- `target_chains/solana/cli/src/main.rs` — canonical CLI flow
+  cited inline by the receiver source as the reference
+  implementation for the encoded-VAA stage sequence.
+
+Re-running the verification on a future upstream commit and
+finding any of the locks below have changed (atomic variant added
+to push-oracle, account ordering changed, instruction params
+changed, PDA seeds changed) requires a methodology amendment row
+*before* a code change in the daemon.
+
+### What the upstream sources lock
+
+1. **Push-oracle exposes only a non-atomic `update_price_feed`.**
+   Push-oracle's single instruction `update_price_feed(params,
+   shard_id, feed_id)` CPIs into the bare receiver's
+   non-atomic `post_update`, which requires a Wormhole-core-bridge
+   `encoded_vaa` account already in the `Verified` state. The
+   receiver itself ships a `post_update_atomic` (inline VAA, single
+   tx), but **push-oracle does not expose it**. Therefore the
+   deterministic-PDA-per-feed property the methodology requires is
+   only available via a multi-stage flow that prepares the
+   encoded-VAA account before calling push-oracle.
+
+2. **Push-oracle PDA seeds are `[shard_id_le_bytes, feed_id_bytes]`.**
+   No `"price_feed"` literal prefix. From upstream
+   `pyth-push-oracle/src/lib.rs:121`:
+   `#[account(mut, seeds = [&shard_id.to_le_bytes(), &feed_id], bump)]`.
+   The earlier prose in "Posting target: push-oracle, not bare
+   receiver" said `["price_feed", shard_id_le, feed_id]` — that
+   was wrong; the parent section now carries an inline correction
+   pointer to this entry.
+
+3. **`update_price_feed` instruction-data shape (Anchor +
+   borsh):**
+   - Discriminator: `sha256("global:update_price_feed")[..8]`.
+   - Borsh body, in declaration order:
+     `params: PostUpdateParams { merkle_price_update: MerklePriceUpdate, treasury_id: u8 }`,
+     `shard_id: u16`,
+     `feed_id: [u8; 32]`.
+   - `MerklePriceUpdate` borsh body:
+     `message: Vec<u8>` (u32 LE length prefix per borsh, *not*
+     the u16-BE prefix the Hermes wire format uses for the same
+     bytes), `proof: Vec<[u8; 20]>` (`MerklePath<Keccak160>`,
+     u32 LE length prefix per borsh, then 20-byte hashes).
+   - **Hermes-wire ↔ on-chain-borsh asymmetry.** `PrefixedVec<L, T>`
+     is L-agnostic under borsh: borsh always writes a u32 LE
+     length, regardless of the `L` type parameter that governs
+     the serde wire-format length. Decoders for the Hermes
+     accumulator-update binary blob therefore cannot reuse the
+     blob's length-prefix bytes verbatim when re-encoding for the
+     on-chain ix; they must decode to a logical `Vec<u8>` /
+     `Vec<[u8; 20]>` and re-emit under borsh framing.
+
+4. **`update_price_feed` account order (anchor declaration order
+   from `UpdatePriceFeed` struct):**
+   1. `payer` (mut, signer)
+   2. `pyth_solana_receiver` (program — `rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ`)
+   3. `encoded_vaa` (CHECK; owned by Wormhole core; verified)
+   4. `config` (PDA `seeds=[b"config"]`, owned by receiver)
+   5. `treasury` (mut; PDA `seeds=[b"treasury", &[treasury_id]]`,
+       owned by receiver)
+   6. `price_feed_account` (mut; push-oracle PDA, seeds per #2)
+   7. `system_program`
+
+5. **Encoded-VAA preparation runs against the Wormhole core
+   bridge** (`worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth`, mainnet)
+   in three stages — `init_encoded_vaa`, `write_encoded_vaa`
+   (chunked to fit signatures inside the 1232-byte tx limit),
+   `verify_encoded_vaa_v1`. The reference CLI flow at
+   `target_chains/solana/cli/src/main.rs:606-658` packs the
+   five logical stages into **2 transactions**:
+   - **Tx A:** `system::create_account(encoded_vaa_keypair, owner=wormhole, size=vaa.len()+VAA_START)`
+     + `init_encoded_vaa` + `write_encoded_vaa(idx=0, data=vaa[..VAA_SPLIT_INDEX])`.
+   - **Tx B:** `compute_budget::set_compute_unit_limit(...)` +
+     `compute_budget::set_compute_unit_price(...)` (priority fee
+     set per phase-54 derivation) +
+     `write_encoded_vaa(idx=VAA_SPLIT_INDEX, data=vaa[VAA_SPLIT_INDEX..])` +
+     `verify_encoded_vaa_v1` +
+     `pyth_push_oracle::update_price_feed(params, shard_id, feed_id)`.
+
+   For typical Pyth equity VAAs (~1 KB) the daemon submits 2 txs
+   per Hermes observation; longer VAAs requiring more chunked
+   writes simply add more `write_encoded_vaa` instructions inside
+   Tx B (and possibly a third tx if Tx B's compute or size budget
+   is exceeded). The mirror tape's `vaa_write_tx_count` and
+   `flow_tx_count` columns capture the actual counts per
+   observation.
+
+### The locked staged contract
+
+A "post" in `pyth_poster_post.v1` is a **logical multi-stage
+flow keyed by one Hermes observation**, not a single tx. The
+daemon's per-iteration state machine is:
+
+```
+skip_if_similar (read-only PDA pre-read)
+  └─ if Hermes within bps and on-chain fresh → skipped_similar (no chain writes)
+  └─ otherwise:
+      init_encoded_vaa     ← Wormhole core: create + init account
+      write_encoded_vaa    ← Wormhole core: chunked VAA bytes (1..N stages)
+      verify_encoded_vaa   ← Wormhole core: guardian-signature check
+      update_price_feed    ← push-oracle: CPI into receiver post_update
+      confirm              ← getSignatureStatuses for the terminal tx
+```
+
+`skip_if_similar` precedes any encoded-VAA account creation; if the
+gate fires we never spend rent or fees on Wormhole-core stages.
+That is load-bearing for cost containment — encoded-VAA accounts
+cost rent (~0.002 SOL per VAA) until reclaimed, and skipping
+the whole prep flow keeps `flow_total_lamports == 0` on
+`skipped_similar` rows.
+
+### Retry semantics — per stage, fresh blockhash
+
+Each stage's tx submission follows the same rule already locked
+in "Write-side daemons — 2026-04-28 (locked) §Tx submission
+semantics", applied **per stage**:
+
+- **`RpcError::TransactionError`** (preflight rejection,
+  on-chain instruction failure, account-already-in-use, etc.)
+  is **terminal for the observation**. The mirror-tape row gets
+  `result_class=submit_failed`, `failed_stage` = the stage that
+  raised the error, `error_class=tx_error:<reason>`. No retry of
+  this stage; no advancement to the next stage. Rent already
+  consumed by earlier stages stays consumed (see "Reconciliation
+  on resume" below).
+- **Network errors** (RPC transport failures, timeouts) within
+  one stage retry up to 3 attempts with 250 ms / 1 s / 4 s
+  backoff, **fresh blockhash per attempt**. After exhaustion the
+  mirror-tape row gets `failed_stage` = the failing stage and
+  `error_class=network_after_retries`. Stage advancement gated
+  on confirmation of the prior stage's tx.
+- **`getSignatureStatuses` confirmation timeout** (60 s,
+  commitment `confirmed`) on the terminal `update_price_feed`
+  tx is treated as `failed_stage=confirm` /
+  `error_class=confirmation_timeout`. The signature is captured
+  but slot/lamports may be null because the network-side outcome
+  is ambiguous.
+
+### Failed-stage taxonomy
+
+`failed_stage`, when non-null, takes one of:
+
+- `init_encoded_vaa` — Tx A failed before WriteEncodedVaa(idx=0)
+  could run (or during it; the three system / Wormhole
+  instructions in Tx A are atomic per the tx model, so a single
+  rejection rolls them all back).
+- `write_encoded_vaa` — One of the chunked WriteEncodedVaa
+  instructions in Tx B failed before VerifyEncodedVaaV1 ran.
+- `verify_encoded_vaa` — VerifyEncodedVaaV1 in Tx B rejected the
+  guardian signatures (rare: typically only when the guardian-set
+  PDA is stale).
+- `update_price_feed` — The push-oracle ix failed (PDA
+  ownership, `UnsupportedMessageType`, `PriceFeedMessageMismatch`,
+  receiver `WrongVaaOwner`, …).
+- `confirm` — Terminal tx submitted, signature returned, but
+  `getSignatureStatuses` did not surface `confirmed` within the
+  60 s timeout.
+
+`failed_stage=null` on `result_class ∈ {posted, skipped_similar}`.
+
+### Reconciliation on resume
+
+If the daemon crashes between stages (or the host restarts), the
+next iteration MUST observe the terminal-state semantics from
+"Write-side daemons §O-write-4":
+
+- Re-read the destination push-oracle PDA at iteration start.
+  If `publish_time` is already ≥ the current upstream Hermes
+  observation, skip — same code path as `skip_if_similar`. No
+  reconciliation handle is needed for the encoded-VAA account
+  itself; abandoned encoded-VAA accounts simply hold rent until
+  the daemon explicitly closes them via `close_encoded_vaa`
+  (tracked separately and out of scope for v0). The operational
+  cost is bounded by the mirror tape's `flow_total_lamports`
+  column and the operator's tolerance for the encoded-VAA
+  rent-account leak.
+- Mid-flow signatures captured before the crash are not
+  reconstructed into the row; only the post-resume terminal
+  outcome lands. If a future analysis requires per-stage tx
+  visibility, capture it in a sibling tape (`pyth_poster_tx.v1`,
+  not in scope here) rather than overloading
+  `pyth_poster_post.v1`.
+
+### Why we do NOT bump to v2
+
+Per the user's explicit recommendation 2026-04-29: keep the
+schema at `pyth_poster_post.v1` (append-only) because the
+existing dedup key `feed_id_hex + ':' + hermes_publish_time` is
+**observation-shaped** — the unit "one Hermes observation the
+daemon attempted to act on" is preserved verbatim, and we never
+need attempt-shaped or stage-shaped rows. The terminal-tx
+columns (`posting_signature`, `solana_post_ts`, `solana_post_slot`,
+`post_lamports`, `priority_fee_micro_lamports_per_cu`,
+`verification_level`) gain a precise definition: they refer to
+the **terminal `update_price_feed` tx only**, not the whole
+flow. Six new nullable columns (`posting_path`,
+`encoded_vaa_account`, `flow_tx_count`, `vaa_write_tx_count`,
+`flow_total_lamports`, `failed_stage`) capture the
+flow-level information without rewriting the existing row
+shape. The schema delta is in
+`docs/schemas.md#pyth_poster_postv1` and
+`crates/scryer-schema/src/pyth_poster_post.rs`.
+
+### Decision-log row
+
+Lands with phase 59 (the contract correction + schema delta;
+the staged state-machine implementation lands in the same
+phase or a tightly-following phase). The phase row should
+record the upstream commit sha pinned above and the six new
+schema columns by name.
 
 ---
 

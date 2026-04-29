@@ -916,22 +916,40 @@ jito_tip_max_lamports         i64 nullable
 
 ## pyth_poster_post.v1
 
-**Status.** locked 2026-04-28. Phases 52 + 53 + 54 shipped (item 44
-slices 1 + 2 + 2c-2). Mirror tape for the `soothsayer-pyth-poster`
-daemon. Every attempt produces one row, regardless of outcome
-(`posted` | `skipped_similar` | `submit_failed`).
+**Status.** locked 2026-04-28; row-unit + flow-level columns appended
+2026-04-29 (phase 63). Phases 52 + 53 + 54 shipped the original
+single-tx framing (item 44 slices 1 + 2 + 2c-2); phase 63 tightens
+the contract for the push-oracle non-atomic multi-stage flow per
+`methodology_log.md` "pyth-poster posting flow — 2026-04-29
+(locked)". Mirror tape for the `soothsayer-pyth-poster` daemon.
+
+**Row unit (clarified 2026-04-29).** One row per **upstream Hermes
+observation the daemon chose to act on**. That row records the
+outcome of the *whole* push-oracle posting flow for that
+observation. Internal Solana txs are implementation stages of one
+logical flow, not separate parquet rows. The terminal-tx columns
+(`posting_signature`, `solana_post_ts`, `solana_post_slot`,
+`post_lamports`, `priority_fee_micro_lamports_per_cu`,
+`verification_level`) refer specifically to the **terminal
+`update_price_feed` tx**; use the flow-level columns for per-flow
+analytics. Outcomes captured: `posted` | `skipped_similar` |
+`submit_failed`.
 
 **Source.** Pyth Hermes (`https://hermes.pyth.network/v2/`) for VAA
-fetch; Pyth receiver program (mainnet
-`rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ`) for the on-chain post.
-Hermes is auth-free; no provider abstraction needed.
+fetch; pyth-push-oracle program
+(mainnet+devnet `pythWSnswVUd12oZpeFP8e9CVaEqJg25g1Vtc2biRsT`)
+as the posting target, which CPIs into the bare Pyth receiver
+(`rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ`); Wormhole core
+bridge (`worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth`) verifies the
+encoded VAA before the receiver `post_update` runs. Hermes is
+auth-free; no provider abstraction needed.
 
 ```
 feed_id_hex                       string       // 32-byte Hermes feed id
 underlier_symbol                  string       // 'SPY' | 'QQQ' | ...
 result_class                      string       // 'posted' | 'skipped_similar' | 'submit_failed'
-posting_signature                 string nullable  // null on skip / fail
-posted_pda                        string       // PriceUpdateV2 PDA address
+posting_signature                 string nullable  // terminal update_price_feed tx; null on skip / fail
+posted_pda                        string       // push-oracle PriceUpdateV2 PDA (seeds = [shard_id_le, feed_id])
 hermes_update_id                  string nullable
 hermes_publish_time               i64          // unix seconds
 hermes_price                      i64          // VAA-reported price
@@ -939,16 +957,26 @@ hermes_exponent                   i8
 onchain_publish_time_pre          i64 nullable // PDA time read pre-post (skip-if-similar)
 onchain_price_pre                 i64 nullable
 similarity_bps                    i64 nullable // |hermes - onchain| / onchain * 10000
-solana_post_ts                    i64 nullable // null on skip / fail
-solana_post_slot                  u64 nullable
-priority_fee_micro_lamports_per_cu u64 nullable
-post_lamports                     u64 nullable // tx fee paid; null on skip
+solana_post_ts                    i64 nullable // terminal-tx confirmed_at_unix; null on skip / fail
+solana_post_slot                  u64 nullable // terminal-tx slot; null on skip / fail
+priority_fee_micro_lamports_per_cu u64 nullable // priority fee on terminal tx
+post_lamports                     u64 nullable // terminal-tx fee in lamports; null on skip
 verification_level                string nullable  // 'full' | 'partial' (from receiver)
 error_class                       string nullable  // populated on submit_failed
 error_detail                      string nullable
+posting_path                      string nullable  // 'push_oracle_non_atomic' (locked); null only on pre-phase-63 rows
+encoded_vaa_account               string nullable  // base58 encoded-VAA account; null on skip / pre-flow failure
+flow_tx_count                     u16 nullable     // total Solana txs submitted for this observation; 0 on skip
+vaa_write_tx_count                u16 nullable     // # of write_encoded_vaa instructions across the flow
+flow_total_lamports               u64 nullable     // total lamports paid across the flow (incl. encoded-VAA rent)
+failed_stage                      string nullable  // 'init_encoded_vaa' | 'write_encoded_vaa' | 'verify_encoded_vaa' | 'update_price_feed' | 'confirm'
 ```
 
-**Dedup.** `_dedup_key = feed_id_hex + ':' + hermes_publish_time`.
+**Dedup.** `_dedup_key = feed_id_hex + ':' + hermes_publish_time`
+— observation-shaped, NOT attempt- or stage-shaped. Re-running
+the daemon over the same upstream observation folds to one row;
+mid-flow retries / resumes within an observation never produce
+extra rows.
 
 `result_class` is the load-bearing column for analysis. Skipped rows
 have `posting_signature: null` per the parent methodology's
@@ -956,6 +984,13 @@ have `posting_signature: null` per the parent methodology's
 `verification_level` is the receiver's own report — `partial` is
 acceptable for posts the receiver accepts with sub-quorum guardian
 sigs (rare; flagged for audit).
+
+**Append-only back-compat.** The 6 flow-level columns
+(`posting_path` … `failed_stage`) were added 2026-04-29 within the
+v1 major. Older parquet files written by phase 53/54 of the daemon
+do not carry these columns; the schema reader (`from_record_batch`)
+uses a tolerant column lookup that yields `None` for absent
+columns, so legacy parquets still decode cleanly.
 
 **Storage.** `dataset/pyth_poster/posts/v1/year=Y/month=M/day=D.parquet`.
 venue `pyth_poster`, data_type `posts`, daily, no key.
@@ -982,17 +1017,19 @@ venue `pyth_poster`, data_type `posts`, daily, no key.
 
 **Failure-mode disclosure.**
 
-| Failure | Outcome | `result_class` | `error_class` |
-|---|---|---|---|
-| Hermes endpoint unreachable | retry w/ backoff (250ms/1s/4s); on 3rd fail, log + skip iteration | not written (no Hermes data) | n/a |
-| Hermes returns malformed VAA | log + skip | not written | n/a |
-| `sendTransaction` returns `RpcError::TransactionError` | no retry per parent §"Tx submission semantics #1" | `submit_failed` | `tx_error:<reason>` |
-| `sendTransaction` network error | retry up to 3× with fresh blockhash; on 3rd fail | `submit_failed` | `network_after_retries` |
-| Post lands but confirmation polling times out (60s) | log; capture sig but no slot | `submit_failed` | `confirmation_timeout` |
-| Skip-if-similar threshold satisfied | per skip-if-similar policy | `skipped_similar` | n/a |
-| Cadence guard fires (last post < 0.9 × cadence) | skip iteration; structured-log only, **not written to tape** | n/a | n/a |
-| Keychain unreachable in prod mode | daemon fails fast at boot | n/a | n/a |
-| `--rpc-url` lacks `devnet`/`localhost` in dev mode | daemon refuses to start | n/a | n/a |
+| Failure | Outcome | `result_class` | `error_class` | `failed_stage` |
+|---|---|---|---|---|
+| Hermes endpoint unreachable | retry w/ backoff (250ms/1s/4s); on 3rd fail, log + skip iteration | not written (no Hermes data) | n/a | n/a |
+| Hermes returns malformed VAA | log + skip | not written | n/a | n/a |
+| `sendTransaction` returns `RpcError::TransactionError` at any stage | no retry per parent §"Tx submission semantics #1" — terminal for the observation | `submit_failed` | `tx_error:<reason>` | the failing stage (`init_encoded_vaa` \| `write_encoded_vaa` \| `verify_encoded_vaa` \| `update_price_feed`) |
+| `sendTransaction` network error at any stage | retry up to 3× with fresh blockhash; on 3rd fail | `submit_failed` | `network_after_retries` | the failing stage |
+| Terminal `update_price_feed` lands but confirmation polling times out (60s) | log; capture sig but no slot | `submit_failed` | `confirmation_timeout` | `confirm` |
+| Skip-if-similar threshold satisfied | per skip-if-similar policy; **runs before any encoded-VAA account creation, so 0 lamports spent** | `skipped_similar` | n/a | n/a |
+| Cadence guard fires (last post < 0.9 × cadence) | skip iteration; structured-log only, **not written to tape** | n/a | n/a | n/a |
+| Keychain unreachable in prod mode | daemon fails fast at boot | n/a | n/a | n/a |
+| `--rpc-url` lacks `devnet`/`localhost` in dev mode | daemon refuses to start | n/a | n/a | n/a |
+
+The full per-stage failure semantics (per-stage retry, terminal-on-tx-error, encoded-VAA account-leak behavior on resume) live in `methodology_log.md` "pyth-poster posting flow — 2026-04-29 (locked) §Retry semantics" and §"Reconciliation on resume".
 
 The "not written" cases for upstream-Hermes failures are the only
 exceptions to the mirror-tape-always-written rule, and only because

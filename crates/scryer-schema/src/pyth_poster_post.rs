@@ -1,16 +1,38 @@
 //! Pyth-poster daemon mirror tape — `pyth_poster_post.v1`.
 //!
-//! `v1` is locked. One row per upstream Hermes observation the
-//! `soothsayer-pyth-poster` daemon (wishlist item 44) attempted to
-//! relay onto Solana. Outcomes captured: `posted`, `skipped_similar`,
-//! `submit_failed`. Cadence-skip iterations are NOT written here —
-//! they're daemon-internal control flow with no upstream observation
+//! `v1` is locked. **One row per upstream Hermes observation the
+//! `soothsayer-pyth-poster` daemon (wishlist item 44) chose to act
+//! on.** That row records the outcome of the *whole* push-oracle
+//! posting flow for that observation — internal Solana txs are
+//! implementation stages of one logical flow, not separate parquet
+//! rows. See `methodology_log.md` "pyth-poster posting flow —
+//! 2026-04-29 (locked)" for the staged contract.
+//!
+//! Outcomes captured: `posted`, `skipped_similar`, `submit_failed`.
+//! Cadence-skip iterations are NOT written here — they're
+//! daemon-internal control flow with no upstream observation
 //! attached, and surface via structured logs only.
+//!
+//! ## Row-unit clarification (2026-04-29)
+//!
+//! The terminal-tx columns (`posting_signature`, `solana_post_ts`,
+//! `solana_post_slot`, `post_lamports`,
+//! `priority_fee_micro_lamports_per_cu`, `verification_level`)
+//! refer specifically to the **terminal `update_price_feed` tx**
+//! (push-oracle CPI into receiver `post_update`), NOT to the
+//! whole flow. Use the flow-level columns
+//! (`flow_tx_count`, `vaa_write_tx_count`, `flow_total_lamports`,
+//! `failed_stage`, `posting_path`, `encoded_vaa_account`) for
+//! per-flow analytics.
 //!
 //! See `methodology_log.md` "Write-side daemon schemas — 2026-04-28
 //! (locked)" for the schema lock + feed-allowlist + failure-mode
 //! disclosure, and the parent "Write-side daemons — 2026-04-28
-//! (locked)" section for keypair / tx mechanics.
+//! (locked)" section for keypair / tx mechanics. The 6 nullable
+//! flow-level fields were added 2026-04-29 (phase 63) per the
+//! "pyth-poster posting flow — 2026-04-29 (locked)" methodology
+//! entry; older parquet files written before that delta read
+//! cleanly with these columns absent (decoded as `None`).
 //!
 //! # Why a separate crate later
 //!
@@ -27,9 +49,9 @@ pub mod v1 {
     use arrow_schema::{DataType, Field, Schema};
     use serde::{Deserialize, Serialize};
 
-    use crate::downcast_column;
     use crate::error::FromArrowError;
     use crate::meta::Meta;
+    use crate::{downcast_column, try_downcast_column};
 
     pub const SCHEMA_VERSION: &str = "pyth_poster_post.v1";
 
@@ -46,6 +68,27 @@ pub mod v1 {
     pub mod verification_level {
         pub const FULL: &str = "full";
         pub const PARTIAL: &str = "partial";
+    }
+
+    /// Locked posting-path values for `Post.posting_path`. Today only
+    /// the push-oracle non-atomic flow exists (per
+    /// `methodology_log.md` "pyth-poster posting flow — 2026-04-29
+    /// (locked)"); future paths (atomic, if/when push-oracle adds
+    /// one; alternative receiver targets) get a new constant here.
+    pub mod posting_path {
+        pub const PUSH_ORACLE_NON_ATOMIC: &str = "push_oracle_non_atomic";
+    }
+
+    /// Locked `Post.failed_stage` values. `None` on
+    /// `result_class ∈ {posted, skipped_similar}`. See
+    /// `methodology_log.md` "pyth-poster posting flow — 2026-04-29
+    /// (locked) §Failed-stage taxonomy".
+    pub mod failed_stage {
+        pub const INIT_ENCODED_VAA: &str = "init_encoded_vaa";
+        pub const WRITE_ENCODED_VAA: &str = "write_encoded_vaa";
+        pub const VERIFY_ENCODED_VAA: &str = "verify_encoded_vaa";
+        pub const UPDATE_PRICE_FEED: &str = "update_price_feed";
+        pub const CONFIRM: &str = "confirm";
     }
 
     /// One pyth-poster daemon observation outcome.
@@ -112,6 +155,47 @@ pub mod v1 {
         /// Free-form failure detail string. Truncated by the daemon
         /// to a fixed cap; not meant for machine-parsing.
         pub error_detail: Option<String>,
+        /// **Flow-level (added 2026-04-29 phase 63).** Posting-path
+        /// label; today always `push_oracle_non_atomic` for
+        /// successful and failed observations alike. `None` on
+        /// `skipped_similar` rows (no flow ran) and on rows from
+        /// before phase 63 that didn't carry the column.
+        pub posting_path: Option<String>,
+        /// **Flow-level.** Base58 address of the encoded-VAA account
+        /// the flow created on the Wormhole core bridge during the
+        /// `init_encoded_vaa` stage. `None` on `skipped_similar`,
+        /// on flows that never reached `init_encoded_vaa`, and on
+        /// rows from before phase 63.
+        pub encoded_vaa_account: Option<String>,
+        /// **Flow-level.** Total number of Solana txs the daemon
+        /// actually submitted for this observation. Typically 2 for
+        /// a successful posted-flow (Tx A: init+write, Tx B: write
+        /// rest+verify+update_price_feed); higher when the VAA
+        /// required more chunked writes; smaller when the flow
+        /// failed early. `0` on `skipped_similar`. `None` on rows
+        /// from before phase 63.
+        pub flow_tx_count: Option<i64>,
+        /// **Flow-level.** Number of `write_encoded_vaa` instructions
+        /// the daemon emitted across the flow. Typically 2 (one in
+        /// Tx A, one in Tx B); `1` if the VAA fits in a single chunk;
+        /// `>2` for unusually large VAAs. `0` on `skipped_similar`
+        /// or on flows that failed before any write. `None` on rows
+        /// from before phase 63.
+        pub vaa_write_tx_count: Option<i64>,
+        /// **Flow-level.** Total lamports paid across the entire
+        /// flow (every successful tx's fee, including encoded-VAA
+        /// account rent and the terminal `update_price_feed` post
+        /// fee). On `submit_failed` rows reflects whatever was paid
+        /// before the failed stage rejected — an abandoned encoded
+        /// VAA still consumed rent. `0` on `skipped_similar`.
+        /// `None` on rows from before phase 63. The terminal-tx
+        /// fee alone is recorded in `post_lamports`.
+        pub flow_total_lamports: Option<u64>,
+        /// **Flow-level.** Stage at which the flow failed, when
+        /// `result_class == submit_failed`. One of the
+        /// `failed_stage::*` constants. `None` on `posted`,
+        /// `skipped_similar`, and on rows from before phase 63.
+        pub failed_stage: Option<String>,
         #[serde(flatten)]
         pub meta: Meta,
     }
@@ -134,6 +218,12 @@ pub mod v1 {
     }
 
     pub fn arrow_schema() -> Schema {
+        // Append-only within v1. Six flow-level fields appended
+        // 2026-04-29 (phase 63) per "pyth-poster posting flow —
+        // 2026-04-29 (locked)" in `methodology_log.md`. All six are
+        // nullable; older parquet files from before phase 63 read
+        // cleanly with these columns absent (decoded as `None` by
+        // `from_record_batch`'s tolerant column lookup).
         Schema::new(vec![
             Field::new("feed_id_hex", DataType::LargeUtf8, false),
             Field::new("underlier_symbol", DataType::LargeUtf8, false),
@@ -154,6 +244,16 @@ pub mod v1 {
             Field::new("verification_level", DataType::LargeUtf8, true),
             Field::new("error_class", DataType::LargeUtf8, true),
             Field::new("error_detail", DataType::LargeUtf8, true),
+            // Flow-level (phase 63 append). Order is significant — these
+            // sit between `error_detail` and the `_meta` columns so the
+            // `_meta` columns stay at the tail (consistent with every
+            // other schema in this crate).
+            Field::new("posting_path", DataType::LargeUtf8, true),
+            Field::new("encoded_vaa_account", DataType::LargeUtf8, true),
+            Field::new("flow_tx_count", DataType::Int64, true),
+            Field::new("vaa_write_tx_count", DataType::Int64, true),
+            Field::new("flow_total_lamports", DataType::Int64, true),
+            Field::new("failed_stage", DataType::LargeUtf8, true),
             Field::new("_schema_version", DataType::LargeUtf8, false),
             Field::new("_fetched_at", DataType::Int64, false),
             Field::new("_source", DataType::LargeUtf8, false),
@@ -199,6 +299,19 @@ pub mod v1 {
             LargeStringArray::from_iter(rows.iter().map(|r| r.error_class.as_deref()));
         let error_detail =
             LargeStringArray::from_iter(rows.iter().map(|r| r.error_detail.as_deref()));
+        // Flow-level columns (phase 63).
+        let posting_path =
+            LargeStringArray::from_iter(rows.iter().map(|r| r.posting_path.as_deref()));
+        let encoded_vaa_account =
+            LargeStringArray::from_iter(rows.iter().map(|r| r.encoded_vaa_account.as_deref()));
+        let flow_tx_count = Int64Array::from_iter(rows.iter().map(|r| r.flow_tx_count));
+        let vaa_write_tx_count =
+            Int64Array::from_iter(rows.iter().map(|r| r.vaa_write_tx_count));
+        let flow_total_lamports = Int64Array::from_iter(
+            rows.iter().map(|r| r.flow_total_lamports.map(|n| n as i64)),
+        );
+        let failed_stage =
+            LargeStringArray::from_iter(rows.iter().map(|r| r.failed_stage.as_deref()));
         let sver =
             LargeStringArray::from_iter_values(rows.iter().map(|r| r.meta.schema_version.as_str()));
         let fa = Int64Array::from_iter_values(rows.iter().map(|r| r.meta.fetched_at));
@@ -225,6 +338,12 @@ pub mod v1 {
             Arc::new(verification_level),
             Arc::new(error_class),
             Arc::new(error_detail),
+            Arc::new(posting_path),
+            Arc::new(encoded_vaa_account),
+            Arc::new(flow_tx_count),
+            Arc::new(vaa_write_tx_count),
+            Arc::new(flow_total_lamports),
+            Arc::new(failed_stage),
             Arc::new(sver),
             Arc::new(fa),
             Arc::new(src),
@@ -277,6 +396,18 @@ pub mod v1 {
         let verification_level = downcast_column::<LargeStringArray>(batch, "verification_level")?;
         let error_class = downcast_column::<LargeStringArray>(batch, "error_class")?;
         let error_detail = downcast_column::<LargeStringArray>(batch, "error_detail")?;
+        // Flow-level columns appended in phase 63 (2026-04-29). Tolerant
+        // lookup so older parquet files (written before phase 63) read
+        // cleanly with these fields decoded as `None`.
+        let posting_path = try_downcast_column::<LargeStringArray>(batch, "posting_path")?;
+        let encoded_vaa_account =
+            try_downcast_column::<LargeStringArray>(batch, "encoded_vaa_account")?;
+        let flow_tx_count = try_downcast_column::<Int64Array>(batch, "flow_tx_count")?;
+        let vaa_write_tx_count =
+            try_downcast_column::<Int64Array>(batch, "vaa_write_tx_count")?;
+        let flow_total_lamports =
+            try_downcast_column::<Int64Array>(batch, "flow_total_lamports")?;
+        let failed_stage = try_downcast_column::<LargeStringArray>(batch, "failed_stage")?;
         let sver = downcast_column::<LargeStringArray>(batch, "_schema_version")?;
         let fa = downcast_column::<Int64Array>(batch, "_fetched_at")?;
         let src = downcast_column::<LargeStringArray>(batch, "_source")?;
@@ -310,6 +441,12 @@ pub mod v1 {
                 verification_level: opt_string(verification_level, i),
                 error_class: opt_string(error_class, i),
                 error_detail: opt_string(error_detail, i),
+                posting_path: posting_path.and_then(|a| opt_string(a, i)),
+                encoded_vaa_account: encoded_vaa_account.and_then(|a| opt_string(a, i)),
+                flow_tx_count: flow_tx_count.and_then(|a| opt_i64(a, i)),
+                vaa_write_tx_count: vaa_write_tx_count.and_then(|a| opt_i64(a, i)),
+                flow_total_lamports: flow_total_lamports.and_then(|a| opt_u64(a, i)),
+                failed_stage: failed_stage.and_then(|a| opt_string(a, i)),
                 meta: Meta {
                     schema_version: s.to_string(),
                     fetched_at: fa.value(i),
@@ -349,6 +486,14 @@ pub mod v1 {
                 verification_level: Some(verification_level::FULL.to_string()),
                 error_class: None,
                 error_detail: None,
+                posting_path: Some(posting_path::PUSH_ORACLE_NON_ATOMIC.to_string()),
+                encoded_vaa_account: Some(
+                    "EncVaaAcct11111111111111111111111111111111".to_string(),
+                ),
+                flow_tx_count: Some(2),
+                vaa_write_tx_count: Some(2),
+                flow_total_lamports: Some(2_005_000),
+                failed_stage: None,
                 meta: Meta::new(SCHEMA_VERSION, 1_777_400_002, "pyth-poster/dev"),
             }
         }
@@ -363,6 +508,16 @@ pub mod v1 {
                 post_lamports: None,
                 verification_level: None,
                 hermes_publish_time: 1_777_400_060,
+                // Skipped flows never touched the chain, so all
+                // flow-level columns except `posting_path` are null.
+                // `posting_path` stays populated to make
+                // `SELECT DISTINCT posting_path` cleanly cover every
+                // row the daemon writes.
+                encoded_vaa_account: None,
+                flow_tx_count: Some(0),
+                vaa_write_tx_count: Some(0),
+                flow_total_lamports: Some(0),
+                failed_stage: None,
                 ..sample_posted()
             }
         }
@@ -378,6 +533,13 @@ pub mod v1 {
                 error_class: Some("network_after_retries".to_string()),
                 error_detail: Some("read timed out (3 attempts)".to_string()),
                 hermes_publish_time: 1_777_400_120,
+                // Failed at the write_encoded_vaa stage in this fixture.
+                // `flow_total_lamports` reflects what was already paid
+                // (init_encoded_vaa rent + Tx A fee).
+                flow_tx_count: Some(1),
+                vaa_write_tx_count: Some(1),
+                flow_total_lamports: Some(2_000_000),
+                failed_stage: Some(failed_stage::WRITE_ENCODED_VAA.to_string()),
                 ..sample_posted()
             }
         }
@@ -419,9 +581,104 @@ pub mod v1 {
             let rows = vec![sample_posted(), sample_skipped(), sample_failed()];
             let batch = to_record_batch(&rows).expect("encode");
             assert_eq!(batch.num_rows(), 3);
-            assert_eq!(batch.num_columns(), 23);
+            // 23 original columns + 6 flow-level columns appended in
+            // phase 63 (posting_path, encoded_vaa_account,
+            // flow_tx_count, vaa_write_tx_count, flow_total_lamports,
+            // failed_stage) = 29.
+            assert_eq!(batch.num_columns(), 29);
             let recovered = from_record_batch(&batch).expect("decode");
             assert_eq!(rows, recovered);
+        }
+
+        #[test]
+        fn decodes_pre_phase_63_batch_with_flow_columns_absent() {
+            // Construct a record batch using the pre-phase-63 column
+            // set (no flow-level columns) and verify decode treats
+            // every flow-level field as `None`. This is the
+            // back-compat lifeline for parquet files written by
+            // phase 53/54 of the daemon before the schema delta.
+            use arrow_schema::{DataType, Field, Schema};
+            use std::sync::Arc;
+
+            let pre = sample_posted();
+            let pre = Post {
+                // Match the all-null shape of pre-phase-63 rows.
+                posting_path: None,
+                encoded_vaa_account: None,
+                flow_tx_count: None,
+                vaa_write_tx_count: None,
+                flow_total_lamports: None,
+                failed_stage: None,
+                ..pre
+            };
+
+            let old_schema = Schema::new(vec![
+                Field::new("feed_id_hex", DataType::LargeUtf8, false),
+                Field::new("underlier_symbol", DataType::LargeUtf8, false),
+                Field::new("result_class", DataType::LargeUtf8, false),
+                Field::new("posting_signature", DataType::LargeUtf8, true),
+                Field::new("posted_pda", DataType::LargeUtf8, false),
+                Field::new("hermes_update_id", DataType::LargeUtf8, true),
+                Field::new("hermes_publish_time", DataType::Int64, false),
+                Field::new("hermes_price", DataType::Int64, false),
+                Field::new("hermes_exponent", DataType::Int64, false),
+                Field::new("onchain_publish_time_pre", DataType::Int64, true),
+                Field::new("onchain_price_pre", DataType::Int64, true),
+                Field::new("similarity_bps", DataType::Int64, true),
+                Field::new("solana_post_ts", DataType::Int64, true),
+                Field::new("solana_post_slot", DataType::Int64, true),
+                Field::new("priority_fee_micro_lamports_per_cu", DataType::Int64, true),
+                Field::new("post_lamports", DataType::Int64, true),
+                Field::new("verification_level", DataType::LargeUtf8, true),
+                Field::new("error_class", DataType::LargeUtf8, true),
+                Field::new("error_detail", DataType::LargeUtf8, true),
+                Field::new("_schema_version", DataType::LargeUtf8, false),
+                Field::new("_fetched_at", DataType::Int64, false),
+                Field::new("_source", DataType::LargeUtf8, false),
+                Field::new("_dedup_key", DataType::LargeUtf8, false),
+            ]);
+
+            let arrays: Vec<Arc<dyn Array>> = vec![
+                Arc::new(LargeStringArray::from_iter_values([pre.feed_id_hex.as_str()])),
+                Arc::new(LargeStringArray::from_iter_values([pre.underlier_symbol.as_str()])),
+                Arc::new(LargeStringArray::from_iter_values([pre.result_class.as_str()])),
+                Arc::new(LargeStringArray::from_iter([pre.posting_signature.as_deref()])),
+                Arc::new(LargeStringArray::from_iter_values([pre.posted_pda.as_str()])),
+                Arc::new(LargeStringArray::from_iter([pre.hermes_update_id.as_deref()])),
+                Arc::new(Int64Array::from_iter_values([pre.hermes_publish_time])),
+                Arc::new(Int64Array::from_iter_values([pre.hermes_price])),
+                Arc::new(Int64Array::from_iter_values([pre.hermes_exponent as i64])),
+                Arc::new(Int64Array::from_iter([pre.onchain_publish_time_pre])),
+                Arc::new(Int64Array::from_iter([pre.onchain_price_pre])),
+                Arc::new(Int64Array::from_iter([pre.similarity_bps])),
+                Arc::new(Int64Array::from_iter([pre.solana_post_ts])),
+                Arc::new(Int64Array::from_iter([
+                    pre.solana_post_slot.map(|n| n as i64),
+                ])),
+                Arc::new(Int64Array::from_iter([
+                    pre.priority_fee_micro_lamports_per_cu.map(|n| n as i64),
+                ])),
+                Arc::new(Int64Array::from_iter([
+                    pre.post_lamports.map(|n| n as i64),
+                ])),
+                Arc::new(LargeStringArray::from_iter([pre.verification_level.as_deref()])),
+                Arc::new(LargeStringArray::from_iter([pre.error_class.as_deref()])),
+                Arc::new(LargeStringArray::from_iter([pre.error_detail.as_deref()])),
+                Arc::new(LargeStringArray::from_iter_values([
+                    pre.meta.schema_version.as_str(),
+                ])),
+                Arc::new(Int64Array::from_iter_values([pre.meta.fetched_at])),
+                Arc::new(LargeStringArray::from_iter_values([pre.meta.source.as_str()])),
+                Arc::new(LargeStringArray::from_iter_values([pre.dedup_key()])),
+            ];
+
+            let old_batch = RecordBatch::try_new(Arc::new(old_schema), arrays).unwrap();
+            let recovered = from_record_batch(&old_batch).expect("decode pre-phase-63 batch");
+            assert_eq!(recovered.len(), 1);
+            // Round-trip equality: a pre-phase-63 row decodes to the
+            // same logical Post (with flow-level fields all None) we
+            // constructed.
+            assert_eq!(recovered[0], pre);
         }
 
         #[test]
@@ -431,6 +688,15 @@ pub mod v1 {
                 onchain_publish_time_pre: None,
                 onchain_price_pre: None,
                 similarity_bps: None,
+                // Flow-level: every nullable column nulled to confirm
+                // the encoder/decoder pair handles all-null on the
+                // appended fields too.
+                posting_path: None,
+                encoded_vaa_account: None,
+                flow_tx_count: None,
+                vaa_write_tx_count: None,
+                flow_total_lamports: None,
+                failed_stage: None,
                 ..sample_posted()
             };
             let batch = to_record_batch(&[row.clone()]).expect("encode");
