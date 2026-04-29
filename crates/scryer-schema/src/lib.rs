@@ -32,6 +32,7 @@ pub mod fluid_vault_config;
 pub mod fred_macro;
 pub mod fred_macro_extended;
 pub mod geckoterminal;
+pub mod geckoterminal_ohlcv;
 pub mod jito_bundles;
 pub mod jito_tip_floor;
 pub mod jupiter_lend_liquidation;

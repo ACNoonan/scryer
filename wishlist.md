@@ -1673,7 +1673,7 @@ naming must match it byte-for-byte. The Raydium-v4 program ID
 `675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8` and SOL/USDC pool
 `58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2` are pinned.
 
-### 41. `geckoterminal_ohlcv.v1` — GeckoTerminal historical daily OHLCV  `[methodology-entry-needed]`
+### 41. `geckoterminal_ohlcv.v1` — GeckoTerminal historical daily OHLCV  `[done — phase 49]`
 
 **What.** Replaces the deleted `quant-work/lst/fetch_gt_ohlcv.py`.
 Daily OHLCV bars for any Solana pool, fetched from GeckoTerminal's

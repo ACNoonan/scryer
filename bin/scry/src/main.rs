@@ -302,6 +302,11 @@ enum DexaggTarget {
     /// time-series snapshot drift) and the consumer-shape JSON
     /// (`quant-work/data/pool_metadata.json`).
     RaydiumPoolMetadata(dexagg_cmd::RaydiumPoolMetadataArgs),
+    /// GeckoTerminal historical OHLCV bars (free-tier, ~100-182
+    /// daily bars per pool per call). Replaces
+    /// `quant-work/lst/fetch_gt_ohlcv.py`. Forward-accumulating
+    /// tape — re-runs at any cadence dedup cleanly.
+    GtOhlcv(dexagg_cmd::GtOhlcvArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -458,6 +463,7 @@ async fn main() -> Result<()> {
         Command::Dexagg(c) => match c.target {
             DexaggTarget::GtTrades(a) => dexagg_cmd::run_gt_trades(a).await,
             DexaggTarget::RaydiumPoolMetadata(a) => dexagg_cmd::run_raydium_pool_metadata(a).await,
+            DexaggTarget::GtOhlcv(a) => dexagg_cmd::run_gt_ohlcv(a).await,
         },
         Command::V5tape(c) => match c.target {
             V5tapeTarget::Tape(a) => v5_cmd::run_tape(a).await,

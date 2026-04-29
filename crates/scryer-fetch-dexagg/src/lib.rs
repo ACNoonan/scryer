@@ -22,6 +22,7 @@
 //! single-DEX-per-chain fetcher (`scryer-fetch-solana`'s Raydium-v4
 //! parser).
 
+pub mod gt_ohlcv;
 pub mod jupiter;
 pub mod raydium;
 

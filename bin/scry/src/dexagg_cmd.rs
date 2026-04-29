@@ -224,3 +224,76 @@ fn pool_metadata_to_consumer_json(pm: &raydium_pool_metadata::v1::PoolMetadata) 
     s.push_str("}");
     s
 }
+
+// ============================================================
+// geckoterminal historical OHLCV (item 41 / Phase 49)
+// ============================================================
+
+use scryer_fetch_dexagg::gt_ohlcv::{
+    fetch_ohlcv, PollConfig as GtOhlcvCfg, DEFAULT_BASE_URL as GT_OHLCV_DEFAULT_BASE_URL,
+    DEFAULT_NETWORK as GT_DEFAULT_NETWORK, SOURCE_LABEL as GT_OHLCV_SOURCE_LABEL,
+};
+use scryer_schema::geckoterminal_ohlcv;
+
+#[derive(Parser, Debug)]
+pub struct GtOhlcvArgs {
+    /// Pool address. Required (no good cross-token default).
+    #[arg(long)]
+    pool: String,
+    /// Timeframe: `day`, `hour`, `minute` (free-tier supports all,
+    /// but `before_timestamp` cursor is paid-only — re-runs without
+    /// it just get the most-recent N bars).
+    #[arg(long, default_value = "day")]
+    timeframe: String,
+    /// GeckoTerminal network. Default: solana.
+    #[arg(long, default_value = GT_DEFAULT_NETWORK)]
+    network: String,
+    #[arg(long, default_value = GT_OHLCV_SOURCE_LABEL)]
+    source: String,
+    #[arg(long, default_value = GT_OHLCV_DEFAULT_BASE_URL)]
+    base_url: String,
+    #[arg(long, default_value_t = 30)]
+    request_timeout_secs: u64,
+    #[arg(long, default_value_t = 3)]
+    retry_max: u32,
+    #[arg(long, default_value_t = 2)]
+    retry_delay_secs: u64,
+    #[arg(long, default_value = "./dataset")]
+    dataset: PathBuf,
+    #[arg(long, default_value = venue::GECKOTERMINAL)]
+    venue: String,
+}
+
+pub async fn run_gt_ohlcv(args: GtOhlcvArgs) -> Result<()> {
+    let cfg = GtOhlcvCfg {
+        base_url: args.base_url.clone(),
+        network: args.network.clone(),
+        source_label: args.source.clone(),
+        request_timeout: Duration::from_secs(args.request_timeout_secs),
+        retry_max: args.retry_max,
+        retry_delay: Duration::from_secs(args.retry_delay_secs),
+        ..Default::default()
+    };
+    let client = reqwest::Client::builder()
+        .timeout(cfg.request_timeout)
+        .user_agent(cfg.user_agent.clone())
+        .build()
+        .context("building reqwest client")?;
+    let now = Utc::now();
+    let rows = fetch_ohlcv(&client, &cfg, &args.pool, &args.timeframe, now.timestamp())
+        .await
+        .context("fetch_ohlcv")?;
+    if rows.is_empty() {
+        println!("gt-ohlcv: rows_added=0 (empty response)");
+        return Ok(());
+    }
+    let ds = Dataset::new(&args.dataset);
+    let stats = ds
+        .write::<geckoterminal_ohlcv::v1::Bar>(&args.venue, Some(&args.pool), &rows)
+        .context("Dataset::write")?;
+    println!(
+        "gt-ohlcv: pool={} timeframe={} rows_added={} rows_deduped={} partitions_written={}",
+        args.pool, args.timeframe, stats.rows_added, stats.rows_deduped, stats.partitions_written
+    );
+    Ok(())
+}
