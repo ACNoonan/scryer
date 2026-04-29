@@ -66,6 +66,7 @@ pub mod venue {
     pub const DRIFT: &str = "drift";
     pub const SOLANA: &str = "solana";
     pub const MANGO_V4: &str = "mango_v4";
+    pub const DERIBIT: &str = "deribit";
     pub const CEX_PERP_FUNDING: &str = "cex_perp_funding";
     pub const GECKOTERMINAL: &str = "geckoterminal";
     pub const JITO: &str = "jito";

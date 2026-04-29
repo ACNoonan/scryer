@@ -22,6 +22,7 @@ mod kamino_obligations_cmd;
 mod kamino_reserves_cmd;
 mod cex_funding_cmd;
 mod databento_cmd;
+mod deribit_cmd;
 mod dex_xstock_swaps_cmd;
 mod drift_liquidations_cmd;
 mod equities_cmd;
@@ -78,6 +79,10 @@ enum Command {
     /// Databento Historical API — CME futures 1-minute OHLCV bars.
     /// Pay-as-you-go against the operator's $125 signup credit.
     Databento(DatabentoCmd),
+    /// Deribit DVOL — BTC/ETH volatility-index fetcher (the
+    /// crypto equivalent of CBOE's VIX). Public REST, no auth.
+    /// Writes to dataset/deribit/dvol/v1/underlying={X}/year=YYYY.parquet.
+    Deribit(DeribitCmd),
     /// Multi-venue perp-futures funding-rate fetcher (OKX, Coinbase
     /// International, Hyperliquid, dYdX v4). Public REST per venue;
     /// no auth, no proxy. Writes one row per (exchange, symbol,
@@ -171,6 +176,20 @@ struct FredCmd {
 struct DatabentoCmd {
     #[command(subcommand)]
     target: DatabentoTarget,
+}
+
+#[derive(Parser, Debug)]
+struct DeribitCmd {
+    #[command(subcommand)]
+    target: DeribitTarget,
+}
+
+#[derive(Subcommand, Debug)]
+enum DeribitTarget {
+    /// Pull DVOL closes for the configured currencies over the
+    /// lookback window. Writes one
+    /// `deribit_iv.v1::DvolBar` row per (currency, ts) pair.
+    Dvol(deribit_cmd::DvolArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -433,6 +452,9 @@ async fn main() -> Result<()> {
         Command::Databento(c) => match c.target {
             DatabentoTarget::Intraday1m(a) => databento_cmd::run_intraday(a).await,
             DatabentoTarget::EquitiesDaily(a) => databento_cmd::run_equities_daily(a).await,
+        },
+        Command::Deribit(c) => match c.target {
+            DeribitTarget::Dvol(a) => deribit_cmd::run_dvol(a).await,
         },
         Command::CexFunding(c) => match c.target {
             CexFundingTarget::Multi(a) => cex_funding_cmd::run_multi(a).await,

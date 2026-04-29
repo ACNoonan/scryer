@@ -1367,7 +1367,7 @@ _dedup_key        string  (= date + horizon)
 
 **Effort.** ~1 hour (yfinance import path).
 
-### 31. `deribit_iv.v1` — Deribit BTC / ETH options IV (DVOL) forward  `[methodology-entry-needed]`
+### 31. `deribit_iv.v1` — Deribit BTC / ETH options IV (DVOL) forward  `[done — phase 46]`
 
 **What.** Daily Deribit DVOL index for BTC and ETH (their VIX-
 equivalent). Real options-implied vol signal for crypto-correlated

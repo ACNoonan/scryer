@@ -22,6 +22,7 @@
 pub mod backed;
 pub mod cex_perp_funding_multi;
 pub mod cme_intraday_1m;
+pub mod deribit_iv;
 pub mod dex_xstock_swaps;
 pub mod drift_liquidation;
 pub mod earnings;

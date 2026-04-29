@@ -15,6 +15,7 @@ members = [
     "crates/scryer-fetch-rss",
     "crates/scryer-fetch-fred",
     "crates/scryer-fetch-databento",
+    "crates/scryer-fetch-deribit",
     "crates/scryer-schema",
     "crates/scryer-store",
     "crates/scryer-portal",

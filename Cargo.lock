@@ -4849,6 +4849,7 @@ dependencies = [
  "reqwest 0.12.28",
  "scryer-fetch-cex-perps",
  "scryer-fetch-databento",
+ "scryer-fetch-deribit",
  "scryer-fetch-dexagg",
  "scryer-fetch-equities",
  "scryer-fetch-fred",
@@ -4899,6 +4900,19 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
  "time",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "scryer-fetch-deribit"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "scryer-schema",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
 ]
