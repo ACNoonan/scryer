@@ -1392,7 +1392,24 @@ _dedup_key        string  (= underlying + ts)
 
 **Effort.** ~1-2 hours.
 
-### 32. `intl_session_etfs.v1` — overnight-session ETF proxies  `[methodology-entry-needed]`
+### 32. `intl_session_etfs.v1` — overnight-session ETF proxies  `[done — existing equities CLI; no new schema]`
+
+**Status (2026-04-29).** Shipped via the existing `yahoo.v1::Bar`
+schema and `scry equities bars` CLI — the row shape is identical
+(symbol, date, OHLCV) to the proposed schema, and the existing
+Stooq-backed CLI accepts any ETF symbol that Stooq lists. No new
+schema needed; no code change required.
+
+**Stooq coverage (probed 2026-04-29).** EWJ ✅ (Japan), EWG ✅
+(Germany), FXI ✅ (China), EWQ ✅ (France). EWU ❌ (UK — returns
+"No data" from `stooq.com/q/d/l/?s=ewu.us`; no alternative
+upstream identified for now, defer or substitute via Databento
+DBEQ.BASIC `EWU` if equity-bars need it).
+
+**Pattern.** `scry equities bars --symbols EWJ,EWG,FXI,EWQ
+--start DATE --end DATE`. Live-validated 2026-04-29: 320 rows
+(4 symbols × ~80 trading days in 2026 YTD). Schedule via launchd
+weekly.
 
 **What.** Daily forward bars for ETFs that proxy Asian / European
 session signals: EWJ (Japan), EWG (Germany), EWU (UK), FXI (China),
@@ -1400,7 +1417,8 @@ EWQ (France). Sunday-evening Asian session is a real signal for
 Monday US open; F1_emp_regime currently ignores it. Candidate v2
 regressor.
 
-**Source.** yfinance.
+**Source.** Stooq via existing `scry equities bars` (replaces the
+original yfinance proposal).
 
 **Schema** (proposed `intl_session_etfs.v1`):
 ```
