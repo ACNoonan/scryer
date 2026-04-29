@@ -1882,7 +1882,7 @@ disclosure.
 
 ---
 
-### 44. `soothsayer-pyth-poster` daemon — bring Pyth equity feeds onto Solana  `[methodology-entry-needed]`
+### 44. `soothsayer-pyth-poster` daemon — bring Pyth equity feeds onto Solana  `[methodology locked 2026-04-28]`
 
 **What.** Off-chain daemon that fetches Hermes price-update VAAs for a
 configured equity feed-id set (SPY, QQQ, AAPL, GOOGL, NVDA, TSLA, HOOD,
@@ -2078,7 +2078,7 @@ Added 2026-04-28 (Priority 1.5 / 2.5 / 3-extension / 4):
 - `mango_v4_market_tape.v1` (item 39; added 2026-04-28 for Layer 0 router)
 - `streams_relay_update.v1` (item 42; on-chain Anchor account; soothsayer-side schema lock recorded in `soothsayer/reports/methodology_history.md` 2026-04-29 (afternoon); cross-listed here for visibility)
 - `chainlink_streams_relay_tape.v1` (item 43; scryer-side mirror tape; methodology entry needed pre-implementation per scryer hard rule #1)
-- `pyth_poster_post.v1` (item 44; mirror tape for the Pyth equity-feed poster daemon; daemon-only, NO new on-chain program; methodology entry needed)
+- `pyth_poster_post.v1` (item 44; mirror tape for the Pyth equity-feed poster daemon; daemon-only, NO new on-chain program; methodology locked 2026-04-28 in scryer's `methodology_log.md` "Write-side daemon schemas" section)
 - `raydium_pool_metadata.v1` (item 40; added 2026-04-28 with the LVR v0.7 cutover)
 - `geckoterminal_ohlcv.v1` (item 41; added 2026-04-28 with the LVR v0.7 cutover)
 

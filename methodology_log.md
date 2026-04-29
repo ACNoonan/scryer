@@ -916,6 +916,272 @@ The operator can:
 
 ---
 
+## Write-side daemons — 2026-04-28 (locked)
+
+Until now every scryer fetcher has been read-side: pull from upstream,
+decode, write parquet. Items 43 (`chainlink_streams_relay_tape.v1`) and 44
+(`pyth_poster_post.v1`) introduce a new daemon class that **also submits
+Solana transactions** with a soothsayer-controlled keypair (calling
+`post_relay_update` on the streams-relay program for 43; calling Pyth's
+receiver `post_update` for 44). This is methodologically distinct: it
+requires a hot signing key on the scryer host, expands the threat model,
+and adds a tx-submission path that is the wrong shape for the proxy's
+read-side retry conventions. This section locks the rules for **all**
+write-side daemons; new members reference this entry and do not
+relitigate.
+
+### Scope
+
+Applies to any scryer crate or `bin/scry` subcommand that signs a Solana
+tx with a soothsayer-controlled keypair. Initial members: items 43 + 44.
+Future members: a RedStone relay daemon if needed (per soothsayer
+methodology 2026-04-29 (evening)); any other Option-C-shape relay. Does
+**not** apply to read-side fetchers — those keep following the proxy +
+retry conventions in the "Provider abstraction" pre-flight section.
+
+### Two modes, chosen at boot
+
+Write-side daemons run in one of two modes via `--mode dev|prod`
+(default `dev`). Mode is captured in the mirror tape's `_source` column
+(e.g. `chainlink-streams-relay/dev` vs `chainlink-streams-relay/prod`)
+so consumers can audit mode at row precision. Mode swap requires a
+process restart — no live flip.
+
+**Dev mode — acceptable for v0.1, devnet-only.**
+
+1. **Keypair: file at** `~/Library/Application Support/scryer/keys/<daemon>.json`,
+   mode `0600`, generated via `solana-keygen new`. Daemon checks file
+   mode at boot and fails fast if not `0600`. Path overridable via
+   `--signer-keypair PATH`.
+2. **RPC: devnet only.** `--rpc-url` must contain `devnet` or
+   `localhost`; daemon refuses to start otherwise. The same constraint
+   blocks accidental mainnet posts during development.
+3. **Verifier-CPI policy:** the relay program's `verifier_cpi_required`
+   flag may be `0` per the soothsayer 2026-04-29 (afternoon) entry.
+   Mirror tape captures `signature_verified` so consumers can downgrade
+   trust on dev rows.
+4. **Mirror tape always written, including failures.** Submission
+   failures still produce a row with `posting_signature: null` and an
+   error-class column populated. Skipping the audit row on failure
+   breaks reproducibility — non-negotiable.
+
+**Prod mode — required before any mainnet daemon deploy.**
+
+1. **Keypair: hardware-backed via macOS Keychain Secure Enclave.** Hot
+   key never leaves the chip; daemon signs via the `security` framework
+   through a small SecKey-wrapper helper. File-on-disk fallback is
+   **prohibited** in prod mode — daemon fails fast if the Keychain item
+   is absent or unreadable. Cloud-KMS rejected (external trust +
+   latency); Ledger rejected (USB latency at 60s cadence + physical-
+   presence requirements for unattended reboot).
+2. **`verifier_cpi_required == 1` mandatory** (per O11 soothsayer
+   methodology §2). Daemon refuses to start in prod mode against a
+   relay program whose `RelayConfig` reports `0`. Pyth-side: the Pyth
+   receiver does Wormhole-guardian verification natively, so this
+   requirement is structural for item 44.
+3. **RPC: mainnet from `providers.json`,** same registry as read-side
+   fetchers.
+4. **Priority-fee policy:** read latest `jito_tip_floor.v1` 75th-pct
+   from scryer parquet at boot, refresh every 5 minutes; set
+   `ComputeBudgetInstruction::SetComputeUnitPrice` accordingly. Hard
+   floor of 1000 µ-lamports/CU if the tape is stale > 1 hour. Captured
+   in mirror tape per row.
+5. **No-position attestation:** the daemon's writer pubkey must be
+   registered in soothsayer's on-chain attestation account (per O12).
+   Daemon refuses to start in prod mode if attestation lookup fails.
+6. **Multi-writer is a v1 gate, not v0.** v0 ships single-writer per
+   O10. v1 must rotate to ≥2 writers in `writer_set` so a single-key
+   compromise → revoke without daemon downtime. Tracked separately;
+   not in scope for the initial 43/44 implementation.
+7. **Alerting:** submission failure rate > 5% over 15 min, or post
+   staleness > (cadence × 3) for any feed, opens an incident. Alert
+   configuration lives soothsayer-side; scryer emits structured logs.
+
+### Tx submission semantics (both modes)
+
+Independent of `scryer-proxy`'s read-side retry, which is designed for
+`getX`-shape JSON-RPC and is wrong for `sendTransaction`.
+
+1. **No retry on `RpcError::TransactionError`.** A rejected tx is
+   malformed or upstream-rejected; retrying with the same blockhash
+   just re-fails. Log + skip + audit-row.
+2. **Retry on network error,** up to 3 attempts with exponential
+   backoff (250 ms / 1 s / 4 s). Each attempt rebuilds the tx with a
+   fresh blockhash.
+3. **Commitment level:** `confirmed` for v0 via `getSignatureStatuses`
+   polling (250 ms / 60 s timeout). Upgrade to `finalized` only if
+   reorgs become measurable in production (O-write-1 below).
+4. **Per-feed cadence guard.** If the last successful post for feed X
+   was < `(cadence_secs × 0.9)` ago, skip this iteration. Prevents
+   back-to-back submissions racing a process restart.
+5. **`skip_if_similar` (item 44 only).** Pre-read the existing
+   `PriceUpdateV2` PDA; if the fresh Hermes value is within
+   `skip_if_similar_bps` of the on-chain value AND on-chain
+   `publish_time` is within `staleness_skip_threshold_secs`, skip.
+   Mirror-tape row still written, `skipped_reason: "similar"`.
+
+### Threat-model deltas
+
+1. **A compromised scryer host can write to soothsayer-controlled
+   PDAs.** Containment: prod-mode key never leaves Secure Enclave;
+   single-writer means a revoke fully cuts off the compromised host
+   (at the cost of downtime until v1 multi-writer).
+2. **Writer pubkey is publicly observable on-chain in perpetuity.** No-
+   position attestation (O12) is the counter-mitigation.
+3. **Daemon downtime is now a router liveness incident, not just a
+   data gap.** Router-side staleness filter is the consumer defense;
+   daemon-side alerting is the operator defense.
+
+### Methodology-entry contract for daemon members
+
+Each new write-side daemon adds:
+1. Its own per-schema methodology entry (mirror-tape schema + feed-
+   allowlist + failure-mode disclosure), **referencing this section
+   for keypair / tx mechanics — not duplicating them**.
+2. A row in the Decision log.
+3. A line in `wishlist.md`'s methodology-list moved out of
+   `[methodology-entry-needed]`.
+
+### Open questions
+
+- **O-write-1.** `confirmed` vs `finalized` commitment in prod. Decide
+  after 30 days of mainnet observation; reorg rate determines.
+- **O-write-2.** Multi-writer rotation choreography (synchronized
+  fleet startup + per-feed handoff). Block on v1 timeline.
+- **O-write-3.** Whether to factor Keychain wrapper + tx-submission
+  helper into a shared `scryer-tx-submit` crate or duplicate per-daemon.
+  Decide when item 44 lands; one daemon doesn't justify a shared crate.
+- **O-write-4.** Post-and-die reconciliation. Daemon resume reads the
+  destination PDA's `publish_time`; if ≥ latest upstream observation,
+  skip — same code path as `skip_if_similar`. No additional mechanism
+  needed unless production observation contradicts.
+
+---
+
+## Write-side daemon schemas — 2026-04-28 (locked)
+
+Per the contract in "Write-side daemons — 2026-04-28 (locked)", every
+write-side daemon schema lands here before its implementation phase.
+Each subsection covers schema columns + feed-allowlist + failure-mode
+disclosure for one daemon. Keypair/tx mechanics are not duplicated —
+see the parent write-side daemons section.
+
+### pyth_poster_post.v1 (item 44)
+
+**Purpose.** Mirror tape for the `soothsayer-pyth-poster` daemon. Every
+attempt to post a Pyth equity Hermes VAA to Solana mainnet/devnet
+produces one row, regardless of outcome (posted / skipped /
+submission-failed). Consumers read the parquet to audit posting
+cadence, attribution, cost, and skip-decisions; soothsayer's router
+reads the on-chain `PriceUpdateV2` PDA the receiver writes (no parquet
+involvement on the live path).
+
+**Source.** Pyth Hermes (`https://hermes.pyth.network/v2/`) for the VAA
+fetch; Pyth receiver program (mainnet
+`rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ`) for the on-chain post.
+Hermes is auth-free; no provider abstraction needed (single canonical
+endpoint per Pyth's published architecture).
+
+**Schema columns.**
+
+```
+feed_id_hex                       string       // 32-byte Hermes feed id
+underlier_symbol                  string       // 'SPY' | 'QQQ' | ...
+result_class                      string       // 'posted' | 'skipped_similar' | 'submit_failed'
+posting_signature                 string nullable  // null on skip / fail
+posted_pda                        string       // PriceUpdateV2 PDA address
+hermes_update_id                  string nullable
+hermes_publish_time               i64          // unix seconds
+hermes_price                      i64          // VAA-reported price
+hermes_exponent                   i8
+onchain_publish_time_pre          i64 nullable // PDA time read pre-post (skip-if-similar)
+onchain_price_pre                 i64 nullable
+similarity_bps                    i64 nullable // |hermes - onchain| / onchain * 10000
+solana_post_ts                    i64 nullable // null on skip / fail
+solana_post_slot                  u64 nullable
+priority_fee_micro_lamports_per_cu u64 nullable // null on skip
+post_lamports                     u64 nullable // tx fee paid; null on skip
+verification_level                string nullable  // 'full' | 'partial' (from receiver)
+error_class                       string nullable  // populated on submit_failed
+error_detail                      string nullable
+_schema_version                   string       // 'pyth_poster_post.v1'
+_fetched_at                       i64
+_source                           string       // 'pyth-poster/dev' | 'pyth-poster/prod'
+_dedup_key                        string       // = feed_id_hex + ':' + hermes_publish_time
+```
+
+`result_class` is the load-bearing column for analysis. Skipped rows
+have `posting_signature: null` per the parent methodology's "mirror
+tape always written, including failures" rule. `verification_level`
+is the receiver's own report — `partial` is acceptable for posts the
+receiver accepts with sub-quorum guardian sigs (rare; flagged for
+audit).
+
+**Feed-allowlist policy.**
+
+- **Pilot.** SPY only at v0 launch. Single feed proves out the daemon
+  end-to-end against minimum cost surface.
+- **Expansion.** Adding a feed requires (a) explicit design-partner
+  ask or methodology-driven need, (b) a row in the Decision log
+  noting the feed + rationale, (c) entry in
+  `~/Library/Application Support/scryer/config/pyth_poster_feeds.toml`.
+  No silent expansion via daemon config without methodology trace.
+- **Closed list at v0.1.** SPY, QQQ, AAPL, GOOGL, NVDA, TSLA, HOOD,
+  MSTR, GLD, TLT — these are the underliers soothsayer's router
+  consumes. Anything outside this list requires a methodology entry
+  before the config flag is added.
+
+**Cadence + skip-if-similar policy.**
+
+- `open_hours_cadence_secs: 60` — NYSE regular hours
+  (Mon-Fri 14:30-21:00 UTC EST / 13:30-20:00 UTC EDT). Default.
+- `closed_hours_cadence_secs: 900` — outside regular weekday hours.
+  Set `null` to skip entirely (acceptable when soothsayer-band
+  authoritatively handles closed regime).
+- `weekend_cadence_secs: null` — skip weekends entirely. Default.
+- `skip_if_similar_bps: 5` — pre-read PDA; skip if Hermes value is
+  within 5 bps and on-chain `publish_time` is within
+  `staleness_skip_threshold_secs`.
+- `staleness_skip_threshold_secs: 300`.
+
+These are config-knobs but the defaults are locked here and overrides
+require a Decision-log row.
+
+**Failure-mode disclosure.**
+
+| Failure | Outcome | Mirror-tape `result_class` | `error_class` |
+|---|---|---|---|
+| Hermes endpoint unreachable | retry w/ backoff (250ms/1s/4s); on 3rd fail, log + skip iteration | not written (no Hermes data to record) | n/a |
+| Hermes returns malformed VAA | log + skip | not written | n/a |
+| `sendTransaction` returns `RpcError::TransactionError` | no retry per parent §"Tx submission semantics #1" | `submit_failed` | `tx_error:<reason>` |
+| `sendTransaction` network error | retry up to 3× with fresh blockhash; on 3rd fail | `submit_failed` | `network_after_retries` |
+| Post lands but confirmation polling times out (60s) | log; capture sig but no slot | `submit_failed` | `confirmation_timeout` |
+| Skip-if-similar threshold satisfied | per skip-if-similar policy | `skipped_similar` | n/a |
+| Cadence guard fires (last post < 0.9 × cadence) | skip iteration; structured-log only, **not written to tape** (daemon-internal control flow with no upstream observation attached) | n/a | n/a |
+| Keychain unreachable in prod mode | daemon fails fast at boot | n/a | n/a |
+| `--rpc-url` lacks `devnet`/`localhost` in dev mode | daemon refuses to start | n/a | n/a |
+
+The "not written" cases for upstream-Hermes failures are the only
+exceptions to the mirror-tape-always-written rule, and only because
+there is literally no observation to record (no `hermes_publish_time`,
+no `feed_id_hex` from a successful Hermes call). Hermes-failure
+metrics surface via structured logs + alerting, not the parquet tape.
+
+**Storage.** `dataset/pyth_poster/posts/v1/year=YYYY/month=MM/day=DD.parquet`
+— no partition key, daily, event-stream pattern. venue =
+`"pyth_poster"`, data_type = `"posts"`, granularity = Daily.
+
+**CLI.** `scry pyth-poster --mode dev|prod --feeds SPY[,QQQ,...] [--once] --rpc-url URL [--signer-keypair PATH]`. `--mode` defaults to `dev`. `--once` runs a single iteration per feed and exits (useful for cron-style operation in dev; prod runs as a long-lived launchd-managed daemon).
+
+**Daemon location.** New crate `crates/scryer-fetch-pyth-poster/`
+(separate from read-side `scryer-fetch-pyth` to keep the write-side
+threat model isolated by crate boundary). CLI lives in `bin/scry`.
+
+**Keypair / tx mechanics.** See "Write-side daemons — 2026-04-28
+(locked)" — not duplicated here.
+
+---
+
 ## Decision log
 
 Append every architectural decision with its date and reason. The honest

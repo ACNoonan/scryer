@@ -26,7 +26,7 @@ use scryer_schema::{
     jito_bundles, jito_tip_floor, jupiter_lend_liquidation, kamino_liquidation, kamino_obligation,
     kamino_obligation_position, kamino_reserve, kamino_scope, kraken_funding, loopscale_loan,
     loopscale_loan_collateral, mango_v4_liquidation, mango_v4_oracle_config, nasdaq_halts,
-    oracle_context, pool_snapshot, pyth, pyth_publisher,
+    oracle_context, pool_snapshot, pyth, pyth_poster_post, pyth_publisher,
     raydium_pool_metadata, redstone, solana_priority_fees, swap, trade, v5_tape, xstock_holders, yahoo, FromArrowError,
 };
 
@@ -903,5 +903,27 @@ impl DatasetSchema for v5_tape::v1::Reading {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         v5_tape::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for pyth_poster_post::v1::Post {
+    const DATA_TYPE: &'static str = "posts";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        // Partition by Hermes observation time, not daemon iteration
+        // time — keeps the tape "per upstream observation" semantics
+        // and lets re-runs over a window land in the right day-files.
+        self.hermes_publish_time
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        pyth_poster_post::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        pyth_poster_post::v1::from_record_batch(batch)
     }
 }

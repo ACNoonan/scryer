@@ -1,0 +1,22 @@
+[package]
+name = "scryer-fetch-pyth-poster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pyth equity Hermes-VAA poster daemon (write-side). Fetches signed Pyth price updates and posts them to Solana's Pyth receiver program. Mirror tape: pyth_poster_post.v1. Methodology: scryer methodology_log.md 'Write-side daemons' + 'Write-side daemon schemas'."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+scryer-schema = { path = "../scryer-schema" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tempfile = "3"
