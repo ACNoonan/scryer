@@ -1214,32 +1214,53 @@ but Kraken perp funding is useful as a vol proxy).
 
 ## cme_intraday_1m.v1
 
-**Status.** proposed — methodology entry needed; **deferred** in v0.1
-because Databento registration requires payment info even for the free
-$125 credit (scryer is currently a $0-spend project). Re-open when
-budget allows.
+**Status.** locked — phases 38 + 39 (schema + fetcher + GC continuous-
+contract `.v.0` fix) + phase 63 (full 2018-01-01 → 2026-04-28
+historical backfill: 11.51M 1m bars / 10,367 partitions / 302MB,
+within the $125 Databento credit).
 
 **Source.** Databento Historical API. Dataset `GLBX.MDP3`, schema
-`ohlcv-1m`, symbols `ES.c.0` / `NQ.c.0` / `GC.c.0` / `ZN.c.0`
-(continuous front-month). API key required.
+`ohlcv-1m`, symbols `ES.v.0` / `NQ.v.0` / `GC.v.0` / `ZN.v.0`
+(volume-rolled front-month continuous). `.v.0` is the canonical
+mapping per phase 39 — `.c.0` calendar-rolled returned 2 records
+for COMEX Gold and was abandoned. API key from `DATABENTO_API_KEY`
+env var.
 
 ```
-symbol           string  // 'ES=F', 'NQ=F', 'GC=F', 'ZN=F'
-ts               i64     // minute timestamp, UTC
+symbol           string  // 'ES=F', 'NQ=F', 'GC=F', 'ZN=F' (yfinance convention)
+ts               i64     // minute timestamp, UTC seconds
 open             f64
 high             f64
 low              f64
-close             f64
-volume           u64 nullable
+close            f64
+volume           u64
 ```
 
-**Dedup.** `_dedup_key = symbol + ':' + ts`.
+**Dedup.** `_dedup_key = "cme_intraday_1m:{symbol}:{ts}"`.
 
-**CLI.** `scry databento intraday-1m
---symbols ES.c.0,NQ.c.0,GC.c.0,ZN.c.0 --start DATE --end DATE`.
+**Storage.** `dataset/cme/intraday_1m/v1/symbol={X}/year=Y/month=M/day=D.parquet`
+(daily, symbol-keyed). Per-symbol partition count after the phase-63
+backfill: 2,589-2,593 daily partitions × 4 symbols = ~10,367 total
+across 2018-2026.
 
-**Crate.** New `scryer-fetch-databento` (REST against
-`client.timeseries.get_range`, `DATABENTO_API_KEY` env var).
+**CLI.**
+- One-shot: `scry databento intraday1m --start YYYY-MM-DD
+  --end YYYY-MM-DD [--symbols ES=F,NQ=F,GC=F,ZN=F]`. The CLI maps
+  yfinance-style `XX=F` to Databento's `XX.v.0` automatically.
+- Yearly-chunk historical backfill: bash loop calling the one-shot
+  per year (see phase 63 for the script shape). Chunks dedup on
+  re-run via `_dedup_key`.
+
+**Operational caveat — recent-data embargo.** Databento's
+`GLBX.MDP3` historical access has a rolling **~8-hour embargo** on
+the most recent data (real-time access requires a separate license).
+A request whose `--end` is past `now - 8h` returns HTTP 422 with
+"try again with end time before {NOW-8h-ish}". For daily/incremental
+forward polls, set `--end` to `today` (CLI parses to UTC midnight,
+which is well past the embargo) rather than `tomorrow`.
+
+**Crate.** `scryer-fetch-databento` (wraps the official `databento`
+Rust SDK 0.48; `HistoricalClient::timeseries::get_range`).
 
 Yahoo `/v8/finance/chart?interval=1m` ruled out: same bot-detection
 throttle that broke item 14 (yfinance issue tracker #2128, #2288,

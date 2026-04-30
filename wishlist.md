@@ -40,7 +40,7 @@ don't re-propose.
 | 18–20 | Done (phase 50, n/a, phase 52) |
 | 21, 22 | **Retracted** — see below |
 | 23–35 | Done (phases 37, 36, 38, 40, 42+43, 44, 41, 47, 46, n/a, 47, 51, 45) |
-| 25 (CME 1m) | **Deferred** — Databento credit blocked on $0-spend (see below) |
+| 25 (CME 1m) | Done — phase 38 + 39 (schema + fetcher + GC fix), phase 63 (2018-2026 historical backfill) |
 | 36, 38 | **Priority 4 — gated** on multi-class-scope decision, see below |
 | 37 | Done — phase 59 (`backed_nav_strikes.v1`) |
 | 39 | **Retracted** — see below |
@@ -122,15 +122,14 @@ on Solana. Three real-coverage oracle providers for xStock equities
 exist (Pyth, Chainlink Data Streams, RedStone), not four. See
 `docs/schemas.md` "switchboard_ondemand_tape.v1 — RETRACTED".
 
-## 25. `cme_intraday_1m.v1` — DEFERRED
+## 25. `cme_intraday_1m.v1` — DONE (phases 38 + 39)
 
-Methodology-entry-needed; deferred in v0.1 because Databento
-registration requires payment info even for the free $125 credit
-(scryer is currently a $0-spend project). Re-open when budget allows.
-
-Schema spec + Databento endpoint: `docs/schemas.md#cme_intraday_1mv1`.
-
-**Effort.** ~3 hours once API key exists.
+Schema + fetcher landed phase 38, GC continuous-contract `.v.0` fix
+landed phase 39, full 2018-01-01 → 2026-04-30 historical backfill
+landed phase 63 (~12M 1m bars across ES=F / NQ=F / GC=F / ZN=F,
+within the $125 Databento credit). Schema spec:
+`docs/schemas.md#cme_intraday_1mv1`. Phase rows:
+`docs/phase_log.md` v0.1-phase-38, v0.1-phase-39, v0.1-phase-63.
 
 ---
 
@@ -324,8 +323,7 @@ Per hard rule #1, every new schema needs a pre-flight entry in
 - `chainlink_streams_relay_tape.v1` (item 43; scryer-side mirror
   tape; methodology entry needed pre-implementation per scryer hard
   rule #1)
-- `cme_intraday_1m.v1` (item 25, deferred until Databento credit
-  available)
+(All previously-listed methodology-entry-needed items are now landed.)
 
 (Already-locked schemas — `kamino_liquidation.v1`,
 `jupiter_lend_liquidation.v1`, `fluid_vault_config.v1`,
