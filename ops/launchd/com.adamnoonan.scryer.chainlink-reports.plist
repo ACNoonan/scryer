@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.chainlink-reports</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin/scry</string>
+        <string>solana</string>
+        <string>chainlink-reports</string>
+        <string>--once</string>
+        <string>--lookback-secs</string>
+        <string>120</string>
+        <string>--use-get-transaction</string>
+        <string>--source</string>
+        <string>chainlink:data-streams:launchd</string>
+        <string>--dataset</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/dataset</string>
+        <!--
+            Cadence: 60s tick + 120s lookback. Mirrors v5-tape.
+
+            Stage 2 routing: --use-get-transaction goes through the local
+            scryer-proxy on 127.0.0.1:8899 (multi-provider failover) so
+            the chainlink tape stays alive even when Helius's daily quota
+            is exhausted. The phase-60 smoke run validated this exact
+            path: 258 sigs / 258 reports / 0 failures in 60s while
+            Helius was 100% throttled.
+
+            All schemas (3, 7, 8, 9, 10, 11) are decoded; non-xStock
+            feeds emit symbol="". Consumers filter by feed_id allowlist
+            or symbol IS NOT NULL.
+
+            24/7 by design — no calendar gating. Chainlink Data Streams
+            DON cadence is independent of US market hours; v10 (xStocks)
+            publishes the 24/7 tokenized_price field at all times,
+            v11 publishes only during US cash hours. Both observed.
+        -->
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/chainlink-reports.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/chainlink-reports.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SCRY_LOG</key>
+        <string>info</string>
+        <!--
+            HELIUS_API_KEY is read by the chainlink-reports CLI for the
+            stage-2 parseTransactions URL even when --use-get-transaction
+            is set (the URL is built but unused). Set this in your
+            ~/.zshenv or pass via launchctl setenv.
+        -->
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>

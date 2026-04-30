@@ -3,7 +3,7 @@
 Forward-looking work log for scryer fetchers, schemas, and daemons.
 "What's next, what's blocked, what's gated."
 
-Last updated: 2026-04-29 (afternoon — added items 46, 47, 48).
+Last updated: 2026-04-29 (evening — added item 49 + phase 66 cadence audit + chainlink launchd plist).
 
 ## How this file relates to the others
 
@@ -21,7 +21,7 @@ Last updated: 2026-04-29 (afternoon — added items 46, 47, 48).
   `methodology_log.md`. Hard rule #1 in `CLAUDE.md` says new schemas
   need a methodology entry before code lands.
 
-## Status of items 1–48 — short index
+## Status of items 1–49 — short index
 
 For full per-phase detail of shipped items, see
 `docs/phase_log.md#done--shipped-in-v01`. Outstanding items have full
@@ -51,6 +51,7 @@ don't re-propose.
 | 45 (Phemex OHLCV) | **Blocked on US-IP geo-block** — see below |
 | 46, 47 | Locked, **not yet shipped** — Priority 0 paper-3 event-source (full entries below) |
 | 48 | Locked, **not yet shipped** — Priority 1 chainlink v11 fix (full entry below) |
+| 49 | First slice shipped — phase 66 (cadence audit + chainlink launchd plist + CLI `--once`); sub-items 49a (Pyth Hermes ≥90d) / 49b (Kamino Scope ≥90d) / 49c (RedStone permaweb ≥90d) / 49d (chainlink ≥90d run + soothsayer consumer cutover) outstanding (full entry below) |
 
 ---
 
@@ -167,6 +168,93 @@ landed phase 63 (~12M 1m bars across ES=F / NQ=F / GC=F / ZN=F,
 within the $125 Databento credit). Schema spec:
 `docs/schemas.md#cme_intraday_1mv1`. Phase rows:
 `docs/phase_log.md` v0.1-phase-38, v0.1-phase-39, v0.1-phase-63.
+
+## 49. Paper-1 oracle coverage-inversion historical backfill panel
+
+Bundles four ≥90-day historical backfills (one per oracle leg of the
+Paper-1 weekend-vs-weeknight-overnight regime decomposition) plus the
+chainlink launchd plist that closes the forward-coverage gap.
+
+**Forward captures since 2026-04-24+ confirmed three off-hours regimes
+are quantitatively distinct.** Chainlink-tokenized-mark moves at
+~4.6 bp/std on weekends but ~26.5 bp/std on weeknight-overnight
+Asia/Europe sessions; the calibration table at the depth Paper-1 needs
+(~10+ weekends, comparable count of weeknight-overnight events)
+requires the backfill panel below. Symbol universe: AAPL, GOOGL, HOOD,
+MSTR, NVDA, QQQ, SPY, TSLA — RedStone is constrained to SPY/QQQ/MSTR.
+
+**Phase 66 ships the cadence audit + chainlink launchd plist + CLI
+extension** (the forward-coverage half of item 49). Sub-items
+49a/b/c/d remain for subsequent phases.
+
+**Operator authorization (2026-04-29):** for the on-chain backfills
+(49b, 49d), if Helius free-tier RPC retention truncates below 90
+days, escalate to paid Helius tier rather than silently truncating.
+Same applies to any other RPC where retention is the bottleneck.
+
+### 49a. Pyth Hermes ≥90d historical backfill `[methodology-entry-needed]`
+
+Extend `pyth/oracle_tape/v1` backwards via Hermes
+`/v2/updates/price/{publish_time}` benchmarks endpoint. Hermes
+typically retains ~6 months. New `scry pyth backfill --start --end
+[--symbols ALL]` subcommand in `bin/scry/src/pyth_cmd.rs`; underlying
+fetcher is REST-only and the existing `scryer-fetch-pyth::poll_once`
+already has the right per-feed shape — backfill iterates publish_time
+stamps at the 60s native cadence. Schema unchanged (`pyth.v1`);
+`_source = "pyth:hermes:benchmarks"` distinguishes from the live
+`pyth:hermes:launchd` rows.
+
+**Effort.** ~half-day.
+
+### 49b. Kamino Scope ≥90d historical backfill `[methodology-entry-needed]`
+
+On-chain account history backfill of the shared Scope feed PDA for
+all 8 xStocks (chain-index differentiation in one PDA). Today's daemon
+is forward-only (`getAccountInfo` 1×/min). Backfill = tx-replay:
+`getSignaturesForAddress(SCOPE_PROGRAM)` over the 90d window + decode
+each Scope-update tx + emit one `kamino_scope.v1::Reading` row per
+(symbol, slot). New mode in `scryer-fetch-solana::kamino_scope_tape`.
+**RPC retention is the binding constraint** — Helius free tier ~14d;
+paid tier required for 90d (operator authorized 2026-04-29 to
+escalate). Schema unchanged; `_source = "kamino:scope:replay"`.
+
+**Effort.** ~1–2 days.
+
+### 49c. RedStone permaweb ≥90d historical backfill `[methodology-entry-needed]`
+
+Live REST is hard-capped at 30d (already pulled to that limit; rows
+exist at `dataset/redstone/oracle_tape/v1/`). Extend via Arweave
+permaweb tx replay using each existing row's `permaweb_tx` as a
+starting point; walk Arweave GraphQL for the 90d window of
+RedStone-signer txs and decode each. New fetcher path distinct from
+the Live API one (`scryer-fetch-redstone::permaweb` mod). Symbols:
+SPY/QQQ/MSTR (no SPL xStocks). Schema unchanged (`redstone.v1`);
+`_source = "redstone:arweave:permaweb"`.
+
+**Effort.** ~1–2 days.
+
+### 49d. Chainlink Data Streams ≥90d historical backfill (operator-run)
+
+Existing `scry solana chainlink-reports --start DATE --end DATE
+--use-get-transaction --source chainlink:data-streams:backfill:<window>`
+CLI (phase 60 + phase 66 cleanup) is sufficient — operator runs it
+for each calendar day in the 90d window. Same RPC-retention
+constraint as 49b (Helius paid tier likely needed; phase-60 row
+counts suggest ~258 reports/60s × xStock filter is manageable). The
+existing CLI's `--source` flag (added in phase 66) lets backfill
+rows carry `chainlink:data-streams:backfill:<window>` distinct from
+the launchd-driven `chainlink:data-streams:launchd` rows so consumers
+can scope queries cleanly.
+
+Plus the **soothsayer-side consumer cutover**: `cl_*` columns in
+`soothsayer_v5/tape/v1` should switch from in-process Chainlink
+fetch to reading scryer's `chainlink/data_streams/v1/` parquet
+directly (the join becomes a left-join on
+`(symbol, observation_ts)` instead of a fresh per-tick fetcher
+call). Soothsayer-side, not scryer-side.
+
+**Effort.** ~half-day for the run + ~half-day for the consumer
+cutover.
 
 ---
 
