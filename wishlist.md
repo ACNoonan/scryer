@@ -3,7 +3,7 @@
 Forward-looking work log for scryer fetchers, schemas, and daemons.
 "What's next, what's blocked, what's gated."
 
-Last updated: 2026-04-29.
+Last updated: 2026-04-29 (afternoon — added items 46, 47, 48).
 
 ## How this file relates to the others
 
@@ -21,7 +21,7 @@ Last updated: 2026-04-29.
   `methodology_log.md`. Hard rule #1 in `CLAUDE.md` says new schemas
   need a methodology entry before code lands.
 
-## Status of items 1–45 — short index
+## Status of items 1–48 — short index
 
 For full per-phase detail of shipped items, see
 `docs/phase_log.md#done--shipped-in-v01`. Outstanding items have full
@@ -30,7 +30,7 @@ don't re-propose.
 
 | Range | Status |
 |-------|--------|
-| 1–3 | Locked, **not yet shipped** — Priority 0 trilogy-blocker (full entries below) |
+| 1–3 | Done — phases 17 / 18 / 19 (`kamino_liquidation.v1`, `jupiter_lend_liquidation.v1`, `fluid_vault_config.v1`; original Priority-0 trilogy-blockers, schemas locked 2026-04-28, shipped same week) |
 | 4–8 | Done (phases 28b, 31, 32, 29, 30) |
 | 9–13 | Done — soothsayer daemon migrations (phases 14–21, 26) |
 | 14–16 | Done (phases 33–35) |
@@ -46,56 +46,93 @@ don't re-propose.
 | 39 | **Retracted** — see below |
 | 40–41 | Done — quant-work consumer support (phases 48, 49) |
 | 42, 43 | **Soothsayer-side, in flight** — see below |
-| 44 | Done — phases 52–54 (Pyth equity-feed poster) |
+| 44 | Done — phases 52–54 + 64 + 65 (Pyth equity-feed poster; slice 2c-3 fully shipped — `RealStagedSubmitter` + `pyth_poster_tx.v1` per-stage tape + CLI `--no-dry-run`; funded devnet smoke remains operator-side per phase 65 prose) |
 | 45 (tape + OHLCV) | Done — phases 55–58 (cex-stock-perp 11 venues) |
 | 45 (Phemex OHLCV) | **Blocked on US-IP geo-block** — see below |
+| 46, 47 | Locked, **not yet shipped** — Priority 0 paper-3 event-source (full entries below) |
+| 48 | Locked, **not yet shipped** — Priority 1 chainlink v11 fix (full entry below) |
 
 ---
 
-# Priority 0 — trilogy-blocking (do these first)
+# Priority 0 — trilogy-blocking
 
-These three are gating the soothsayer trilogy's empirical content.
-Schemas locked 2026-04-28 in `methodology_log.md`. Implementation
-phases 17 / 18 / 19 still pending. Full schema spec for each is in
-`docs/schemas.md`.
+The original 2026-04-28 trilogy-blockers (items 1, 2, 3 — Kamino
+liquidations, Jupiter Lend liquidations, Fluid vault config) all
+shipped at phases 17 / 18 / 19. Schema specs remain in
+`docs/schemas.md` (`#kamino_liquidationv1`,
+`#jupiter_lend_liquidationv1`, `#fluid_vault_configv1`); per-phase
+detail is in `docs/phase_log.md`.
 
-## 1. `kamino_liquidation.v1` — Klend liquidation event panel
+The current Priority-0 work (items 46, 47, added 2026-04-29
+afternoon after the Kamino-xStocks 30-day liquidation scan
+returned 0 events) is **MarginFi-v2** — the dominant on-chain
+source of liquidation events for any xStock-adjacent panel. Schemas
+locked 2026-04-29 in `methodology_log.md` "MarginFi-v2 schemas".
 
-Phase 17. Per-liquidation-event row decoded from Kamino Klend
-transactions. Reference: soothsayer's
-`scripts/scan_kamino_liquidations.py` — port into scryer with proper
-schema versioning and proxy-routed retry.
+## 46. `marginfi_reserve.v1` — MarginFi-v2 per-Bank snapshot
 
-Schema + source detail: `docs/schemas.md#kamino_liquidationv1`.
+Phase TBD-A. Counterpart to `kamino_reserve.v1` (item 4) for the
+soothsayer paper-3 cross-protocol parameter table. Locked-load-bearing
+per soothsayer `docs/sources/lending/marginfi.md` §6 open-question
+gating: the Kamino-xStocks 30-day liquidation scan returned 0 events,
+making MarginFi the dominant on-chain source of liquidation events
+for any xStock-adjacent event-panel build. Methodology entry:
+`methodology_log.md` "MarginFi-v2 schemas — 2026-04-29 (locked)".
+
+Schema + source detail: `docs/schemas.md#marginfi_reservev1`.
 
 **Notes.**
-- Today's Helius free tier intermittently 429s on
-  `getSignaturesForAddress` for hot programs; pin pagination through
-  `scryer-proxy` so the proxy's hedging handles failover.
-- Soothsayer's Python scanner saw 5.4 sigs/sec on dual-provider, 13.7
-  sigs/sec on single-provider rpcfast when Helius was throttling.
-- `--all-markets` (already shipped, item 19) is useful for the
-  cross-asset Paper 2 leg.
+- Mainnet program ID `MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA`
+  (verified on-chain 2026-04-29 — the soothsayer-doc-cited
+  `MFv2hWf31Z4i1g2AhULZWnuwvvfuBQg4P4HFcXyFZi5` does not exist on
+  mainnet; soothsayer §6 #1 should be closed with the verified
+  address).
+- `bank.config.oracle_keys` is a **multi-account list per Bank** —
+  capture verbatim with order preserved; downstream consumers
+  dispatch by oracle program owner (Switchboard / Pyth / Fixed).
+- IDL is not committed in the marginfi-v2 repo; fetch via either
+  `anchor idl fetch <PROGRAM_ID> --provider.cluster mainnet` (iff
+  marginfi published the IDL on-chain at deploy) or `anchor build`
+  against `github.com/0dotxyz/marginfi-v2` (note: 301-redirect from
+  `mrgnlabs/marginfi-v2`).
+- Switchboard-wired Banks have crank-cadence-dependent staleness —
+  `oracle_setup` is the correct segment column for downstream
+  weekend-staleness analysis (soothsayer §1.2 / §6 #4).
 
-**Effort.** ~2–3 hours.
+**Effort.** ~3–4 hours (snapshot fetcher + IDL-driven decode +
+multi-oracle-key handling).
 
-## 2. `jupiter_lend_liquidation.v1` — Fluid Vaults liquidation panel
+## 47. `marginfi_liquidation.v1` — MarginFi-v2 event panel
 
-Phase 18. Reference: soothsayer's
-`scripts/scan_jupiter_lend_liquidations.py`.
+Phase TBD-B. Per-liquidation-event row decoded from MarginFi-v2
+program logs / Anchor events. Mirrors `kamino_liquidation.v1` (item 1)
+shape with two MarginFi-specific additions: pre/post `(P, conf)` per
+Bank's oracle_keys at trigger time, and the
+`lending_account_liquidate` fee splits (liquidator fee + insurance
+fund fee, both Bank-config-derived). Methodology entry:
+`methodology_log.md` "MarginFi-v2 schemas — 2026-04-29 (locked)".
 
-Schema + source detail: `docs/schemas.md#jupiter_lend_liquidationv1`.
+Schema + source detail: `docs/schemas.md#marginfi_liquidationv1`.
 
-**Effort.** ~2–3 hours.
+**Notes.**
+- Provisionally confirmed by inference (~$88.5M Q1 2025 fees, ~9
+  active liquidators per the marginfi-v2 grant retrospective) that
+  MarginFi has non-zero event rate while Kamino-xStocks 30-day scan
+  returned 0; direct measurement gates on this schema landing.
+- Bundle-join key (`signature` / `fee_payer`) lets Paper-3 OEV
+  analysis cross to `jito_bundles.v1` once both panels are in scryer.
+- For the conf-haircut empirical rule (assets `P − conf` /
+  liabilities `P + conf`), the row carries both the published
+  `(P, conf)` and the marginfi-effective price at event time so the
+  haircut can be verified per-event without re-decoding.
+- Liquidations on MarginFi are partial-by-default (minimum-seizure-
+  to-restore-health) — `pre_health` / `post_health` are
+  event-emitted and load-bearing for the soothsayer §3 reconciliation
+  rows.
 
-## 3. `fluid_vault_config.v1` — Jupiter Lend xStock vault parameter snapshot
-
-Phase 19. One-shot snapshot companion to Kamino's reserve snapshot
-(item 4). Used in Paper 3's cross-protocol parameter table.
-
-Schema + source detail: `docs/schemas.md#fluid_vault_configv1`.
-
-**Effort.** ~1 hour.
+**Effort.** ~4–5 hours (more involved than Kamino's because of the
+event-emitted field set and the multi-oracle-key conf-haircut
+capture).
 
 ---
 
@@ -148,6 +185,60 @@ Phase 45's `cex_stock_perp_tape.v1` and Phase 59's
 
 Schema spec + byte-layout table: `docs/schemas.md#chainlink_data_streamsv1`.
 Phase row: `docs/phase_log.md` v0.1-phase-60.
+
+## 48. `chainlink_data_streams.v1` — v11 layout decoder + capture daemon
+
+Phases TBD-D + TBD-E. Three coupled deliverables, all required to
+unblock soothsayer's `reports/v11_cadence_verification.md` from
+per-session manual re-runs of `verify_v11_cadence.py`. Methodology
+entry: `methodology_log.md` "Chainlink v11 layout decode + capture
+cadence — 2026-04-29 (locked)".
+
+(a) **`decode_v11`** in `crates/scryer-fetch-solana/src/chainlink.rs`
+alongside the existing `decode_v10`. v11 wire layout already verified
+empirically by soothsayer's classifier
+(`scripts/verify_v11_cadence.py`): `bid` / `ask` / `mid` /
+`last_traded` plus `market_status` (6-class: 0=unknown, 1=pre-mkt,
+2=regular, 3=post-mkt, 4=overnight, 5=closed/weekend — note:
+different semantics from v10's 3-class).
+
+(b) **Additive nullable columns on `chainlink_data_streams.v1`**:
+`bid_price` (Float64, nullable), `ask_price` (Float64, nullable),
+`mid_price` (Float64, nullable), `last_traded_price` (Float64,
+nullable). Per the locked schema versioning policy (additive
+nullable = same major version), no v2 bump. v10 rows leave the new
+columns null; v11 rows leave `price` / `tokenized_price` /
+`current_multiplier` null. Document the cross-schema `market_status`
+semantics footgun (see methodology entry table) in the schema
+docstring AND in the `docs/schemas.md` row.
+
+(c) **`com.adamnoonan.scryer.chainlink-reports.plist`** added to
+`ops/launchd/`, modelled on `v5-tape.plist`: 60s `StartInterval`,
+`--lookback-secs 120`, `--use-get-transaction` for quota-resilience,
+writing into `dataset/chainlink/data_streams/v1/...`. With this
+running, soothsayer's `verify_v11_cadence.py` v3 can swap from
+Verifier-sig pagination to a `pd.read_parquet` against the scryer
+mirror; the four missing market_status windows fill in via launchd
+cadence accumulating across the trading week, no per-session manual
+re-runs.
+
+**Why now.** The phase-60 schema docstring's claim that v11 is *"not
+yet in production"* is empirically false as of soothsayer's
+2026-04-26 verification scan, which decoded **26 v11 reports out of
+3000 Verifier sigs** scanned. v11 IS in production on Solana, just
+at lower frequency than v10 (~0.87% of scanned reports). The
+docstring fix lands at methodology-lock time (small documentation
+correction); the decoder + plist work lands across phases TBD-D and
+TBD-E.
+
+**Stale-claim cleanup.** The phase-60 row in `docs/phase_log.md`
+also has the *"v11 was zero in this window — its US-cash-hours-only
+cadence either hasn't rolled out on Solana yet"* claim; the second
+clause (60s sampling rate is below v11's cadence) is the right
+diagnosis, but the first clause is wrong. Cleanup happens at phase
+TBD-D land time as a footnote on the existing row.
+
+**Effort.** ~4–6 hours for (a) + (b) + tests; ~30 minutes for (c).
 
 ---
 
@@ -329,9 +420,14 @@ Per hard rule #1, every new schema needs a pre-flight entry in
 `jupiter_lend_liquidation.v1`, `fluid_vault_config.v1`,
 `pyth_poster_post.v1`, `backed_nav_strikes.v1`,
 `yahoo_corp_actions.v1` (phase 61), `chainlink_data_streams.v1`,
-plus the `nasdaq_halts.v1` Wayback-backfill design (phase 62) —
-have decision-log rows in `docs/phase_log.md`; their wishlist
-entries above just point at `docs/schemas.md`.)
+plus the `nasdaq_halts.v1` Wayback-backfill design (phase 62), plus
+`marginfi_reserve.v1` + `marginfi_liquidation.v1` (items 46 + 47,
+methodology entry "MarginFi-v2 schemas — 2026-04-29 (locked)"), plus
+the chainlink v11 fix (item 48, methodology entry "Chainlink v11
+layout decode + capture cadence — 2026-04-29 (locked)") — have
+decision-log rows in `docs/phase_log.md` or methodology entries in
+`methodology_log.md`; their wishlist entries above just point at
+`docs/schemas.md`.)
 
 ---
 
