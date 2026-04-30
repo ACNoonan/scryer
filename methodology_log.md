@@ -1260,11 +1260,15 @@ shape. The schema delta is in
 
 ### Decision-log row
 
-Lands with phase 59 (the contract correction + schema delta;
-the staged state-machine implementation lands in the same
-phase or a tightly-following phase). The phase row should
-record the upstream commit sha pinned above and the six new
-schema columns by name.
+Lands with phase 64 (the contract correction + schema delta
++ staged state-machine implementation; phase 64 was claimed
+after a parallel-agent commit took phase 63 for an unrelated
+`cme_intraday_1m.v1` backfill). The phase row records the
+upstream commit sha pinned above and the six new schema columns
+by name. Note: the part-1 commit message says "phase 63 part 1"
+because the collision was detected only after that commit
+landed; phase 64 is the authoritative number going forward
+(including for what part-1 actually shipped).
 
 ---
 

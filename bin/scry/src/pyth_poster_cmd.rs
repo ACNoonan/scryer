@@ -22,8 +22,12 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use scryer_fetch_pyth_poster::{
-    daemon::{Daemon, IterationInputs, IterationOutcome, SkipIfSimilarConfig},
-    pda::{parse_feed_id_hex, price_update_pda},
+    daemon::{Daemon, IterationInputs, IterationOutcome, SkipIfSimilarConfig, StagedFlowConfig},
+    pda::{
+        parse_feed_id_hex, price_update_pda, receiver_config_pda, receiver_treasury_pda,
+        wormhole_core_program_id,
+    },
+    staged_submitter::{DryRunStagedSubmitter, StagedSubmitter},
     DevKeypair, DryRunSubmitter, FeedConfig, FeedDefaults, HermesClient, RunMode, TxSubmitter,
 };
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -134,11 +138,12 @@ pub async fn run_pyth_poster(args: PythPosterArgs) -> Result<()> {
     if !args.dry_run {
         return Err(anyhow!(
             "real on-chain submit not yet implemented — pass --dry-run for now. \
-             Slice 2c-2 lands the real submitter (push-oracle update_price_feed \
-             instruction encoding + 3-attempt retry + confirmation polling). \
-             Slice 2c-1 (current) wires the on-chain skip-if-similar pre-read + \
-             real PriceUpdateV2 PDA derivation; the only remaining piece is the \
-             tx submission itself."
+             Phase 63 part 2 (current) ships the staged push-oracle flow + \
+             would-have-sent dry-run trace + MockSubmitter coverage; the \
+             RealStagedSubmitter (signs + sends via solana-client with the \
+             locked retry/confirmation semantics) and the funded-devnet smoke \
+             land in phase 63 part 3. See methodology_log.md \
+             \"pyth-poster posting flow — 2026-04-29 (locked)\"."
         ));
     }
 
@@ -194,7 +199,13 @@ pub async fn run_pyth_poster(args: PythPosterArgs) -> Result<()> {
     let feeds = resolve_feed_ids(&http_client, &hermes, &tickers).await?;
 
     let _defaults = FeedDefaults::default();
+    // Legacy single-shot DryRunSubmitter is kept on the field but
+    // ignored when `staged_flow = Some(...)`. Phase 63 part 2 (this
+    // commit) routes --dry-run through the new staged dry-run so the
+    // operator gets a per-stage would-have-sent trace.
     let submitter: Arc<dyn TxSubmitter> = Arc::new(DryRunSubmitter);
+    let staged_dry_run: Arc<DryRunStagedSubmitter> = Arc::new(DryRunStagedSubmitter::new());
+    let staged_dry_run_for_trait: Arc<dyn StagedSubmitter> = staged_dry_run.clone();
 
     // Derive priority fee per the methodology lock. `tape` reads
     // `jito_tip_floor.v1` from the dataset and falls back to the
@@ -269,6 +280,50 @@ pub async fn run_pyth_poster(args: PythPosterArgs) -> Result<()> {
         pda_resolver: &pda_resolver,
     });
 
+    // Staged-flow dry-run wiring. The PDA resolvers below derive the
+    // canonical receiver config + treasury PDAs and hand-derive the
+    // Wormhole core `GuardianSet` PDA from the VAA's guardian-set
+    // index header byte. All values are accurate enough for the
+    // dry-run trace to surface real on-chain addresses; the
+    // RealStagedSubmitter (part 3) consumes the same shape.
+    let (receiver_config_addr, _) = receiver_config_pda();
+    let treasury_id = 0u8; // Pyth's CLI rotates randomly; dry-run pins 0.
+    let (receiver_treasury_addr, _) = receiver_treasury_pda(treasury_id);
+    let pf_resolver_for_staged = |feed_id_hex: &str| -> solana_sdk::pubkey::Pubkey {
+        match parse_feed_id_hex(feed_id_hex) {
+            Ok(feed_id) => price_update_pda(&feed_id, shard_id).0,
+            Err(_) => solana_sdk::pubkey::Pubkey::default(),
+        }
+    };
+    let guardian_set_resolver = |vaa: &[u8]| -> solana_sdk::pubkey::Pubkey {
+        // VAA v1 layout: byte 0 = version (0x01), bytes 1..5 = u32 BE
+        // guardian_set_index. Wormhole core PDA seeds:
+        // [b"GuardianSet", &guardian_set_index.to_be_bytes()].
+        let gsi: u32 = if vaa.len() >= 5 {
+            u32::from_be_bytes([vaa[1], vaa[2], vaa[3], vaa[4]])
+        } else {
+            0
+        };
+        let (pda, _bump) = solana_sdk::pubkey::Pubkey::find_program_address(
+            &[b"GuardianSet", &gsi.to_be_bytes()],
+            &wormhole_core_program_id(),
+        );
+        pda
+    };
+    let staged_flow_cfg = StagedFlowConfig {
+        submitter: staged_dry_run_for_trait.clone(),
+        shard_id,
+        treasury_id,
+        compute_unit_limit: 600_000,
+        payer: solana_sdk::pubkey::Pubkey::from(kp.pubkey_bytes()),
+        receiver_config: receiver_config_addr,
+        receiver_treasury: receiver_treasury_addr,
+        guardian_set_resolver: &guardian_set_resolver,
+        price_feed_pda_resolver: &pf_resolver_for_staged,
+        encoded_vaa_account_lamports: 2_000_000, // ~rent-exempt for ~1 KB VAA + header
+        priority_fee_micro_lamports_per_cu: priority_fee,
+    };
+
     let inputs = IterationInputs {
         mode,
         feeds: &feeds,
@@ -279,12 +334,35 @@ pub async fn run_pyth_poster(args: PythPosterArgs) -> Result<()> {
         dataset_root: &args.dataset,
         posted_pda_resolver: &posted_pda_resolver,
         skip_gate: skip_gate.as_ref(),
+        staged_flow: Some(&staged_flow_cfg),
     };
 
     let outcomes = Daemon::run_once(inputs)
         .await
         .map_err(|e| anyhow!(e))
         .context("Daemon::run_once")?;
+
+    // Drain + log the dry-run trace per stage so the operator can
+    // audit exactly what bytes would have hit the chain. Each stage
+    // entry shows the program_id + ix-data length for every
+    // instruction the stage would have submitted.
+    let trace = staged_dry_run.drain_trace();
+    if !trace.is_empty() {
+        tracing::info!(stages = trace.len(), "pyth-poster dry-run staged trace");
+        for (i, entry) in trace.iter().enumerate() {
+            for (j, ix) in entry.instructions.iter().enumerate() {
+                tracing::info!(
+                    stage_idx = i,
+                    stage = ?entry.stage,
+                    ix_idx = j,
+                    program_id = %ix.program_id,
+                    accounts = ix.accounts.len(),
+                    data_len = ix.data.len(),
+                    "would-have-sent"
+                );
+            }
+        }
+    }
 
     print_summary(&outcomes, mode);
     Ok(())

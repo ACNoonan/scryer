@@ -22,6 +22,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
 use scryer_schema::pyth_poster_post::v1::{result_class, Post};
 use scryer_schema::Meta;
 use scryer_store::Dataset;
@@ -31,6 +32,7 @@ use tracing::{info, warn};
 use crate::config::FeedConfig;
 use crate::hermes::{HermesClient, HermesError, PriceUpdate};
 use crate::mode::RunMode;
+use crate::staged_submitter::{FlowInputs, Stage, StageError, StageOutcome, StagedSubmitter};
 use crate::tx::{SubmitError, SubmitInputs, SubmitOutcome, TxSubmitter};
 
 /// Output venue under `dataset/`. Lined up with the
@@ -90,6 +92,52 @@ pub struct SkipIfSimilarConfig<'a> {
     pub pda_resolver: &'a dyn Fn(&str) -> solana_sdk::pubkey::Pubkey,
 }
 
+/// Optional staged-flow context. When `Some`, the daemon drives the
+/// multi-stage push-oracle posting flow per `methodology_log.md`
+/// "pyth-poster posting flow — 2026-04-29 (locked)" instead of the
+/// legacy single-shot `TxSubmitter` path. The flow's per-stage
+/// outcomes populate the row's flow-level columns
+/// (`posting_path`, `flow_tx_count`, `vaa_write_tx_count`,
+/// `flow_total_lamports`, `failed_stage`, `encoded_vaa_account`).
+///
+/// `compute_unit_limit` defaults to 600,000 per the reference CLI
+/// flow at `target_chains/solana/cli/src/main.rs:630`. Callers can
+/// override per `cfg.compute_unit_limit_override` if needed.
+pub struct StagedFlowConfig<'a> {
+    pub submitter: Arc<dyn StagedSubmitter>,
+    /// Push-oracle shard id (default 0 per methodology lock).
+    pub shard_id: u16,
+    /// Receiver treasury id. Pyth's CLI rotates per-post; keep
+    /// per-iteration stable.
+    pub treasury_id: u8,
+    /// Compute-unit limit for Tx B (the bundled
+    /// write-remainder + verify + update_price_feed tx). Default 600k.
+    pub compute_unit_limit: u32,
+    /// Daemon payer pubkey (the keypair that signs every stage).
+    pub payer: solana_sdk::pubkey::Pubkey,
+    /// Receiver `config` PDA — `pda::receiver_config_pda().0`.
+    pub receiver_config: solana_sdk::pubkey::Pubkey,
+    /// Receiver `treasury` PDA — `pda::receiver_treasury_pda(treasury_id).0`.
+    pub receiver_treasury: solana_sdk::pubkey::Pubkey,
+    /// Wormhole core `guardian_set` PDA. Resolver takes the VAA
+    /// bytes (so it can parse the guardian-set index from the
+    /// header) and returns the PDA.
+    pub guardian_set_resolver: &'a dyn Fn(&[u8]) -> solana_sdk::pubkey::Pubkey,
+    /// Resolver for the destination push-oracle `price_feed_account`
+    /// PDA. Takes the feed_id_hex string + the shard_id and returns
+    /// the PDA. Same shape as `SkipIfSimilarConfig::pda_resolver`.
+    pub price_feed_pda_resolver: &'a dyn Fn(&str) -> solana_sdk::pubkey::Pubkey,
+    /// Lamports to fund encoded-VAA account creation. Real daemons
+    /// query `getMinimumBalanceForRentExemption` once at startup;
+    /// dry-run / mock tests can pass a fixed estimate (typical:
+    /// 0.002 SOL = 2_000_000 lamports for a ~1 KB VAA).
+    pub encoded_vaa_account_lamports: u64,
+    /// Priority-fee unit price (micro-lamports per CU) for Tx B's
+    /// ComputeBudget instruction. Derived upstream from
+    /// `jito_tip_floor.v1` p75 + hard floor (phase 54).
+    pub priority_fee_micro_lamports_per_cu: u64,
+}
+
 /// All inputs the daemon needs for one `run_once` invocation. Held
 /// outside the Daemon struct so the CLI can build it from clap args
 /// and pass it in.
@@ -115,6 +163,12 @@ pub struct IterationInputs<'a> {
     /// When `Some`, daemon performs the skip-if-similar pre-read.
     /// `None` skips the gate (matches slice-2/2c-1 dry-run behavior).
     pub skip_gate: Option<&'a SkipIfSimilarConfig<'a>>,
+    /// When `Some`, the daemon drives the staged push-oracle flow
+    /// per `methodology_log.md` "pyth-poster posting flow —
+    /// 2026-04-29 (locked)" instead of the legacy single-shot
+    /// `TxSubmitter`. The legacy `submitter` field is ignored in
+    /// this case.
+    pub staged_flow: Option<&'a StagedFlowConfig<'a>>,
 }
 
 pub struct Daemon;
@@ -218,24 +272,37 @@ impl Daemon {
                 continue;
             }
 
-            let submit_inputs = SubmitInputs {
-                feed_id_hex: cfg.feed_id_hex.clone(),
-                vaa_base64: update.vaa_base64.clone(),
-                priority_fee_micro_lamports_per_cu: inputs.priority_fee_micro_lamports_per_cu,
+            let (row, iter_outcome) = if let Some(staged) = inputs.staged_flow {
+                run_staged_flow_for_observation(
+                    cfg,
+                    &update,
+                    staged,
+                    &posted_pda,
+                    onchain_state.as_ref(),
+                    &source_label,
+                    now_ts,
+                )
+                .await
+            } else {
+                let submit_inputs = SubmitInputs {
+                    feed_id_hex: cfg.feed_id_hex.clone(),
+                    vaa_base64: update.vaa_base64.clone(),
+                    priority_fee_micro_lamports_per_cu: inputs.priority_fee_micro_lamports_per_cu,
+                };
+
+                let outcome = inputs.submitter.submit_post_update(&submit_inputs).await;
+
+                build_tape_row(
+                    cfg,
+                    &update,
+                    outcome,
+                    &posted_pda,
+                    inputs.priority_fee_micro_lamports_per_cu,
+                    onchain_state.as_ref(),
+                    &source_label,
+                    now_ts,
+                )
             };
-
-            let outcome = inputs.submitter.submit_post_update(&submit_inputs).await;
-
-            let (row, iter_outcome) = build_tape_row(
-                cfg,
-                &update,
-                outcome,
-                &posted_pda,
-                inputs.priority_fee_micro_lamports_per_cu,
-                onchain_state.as_ref(),
-                &source_label,
-                now_ts,
-            );
 
             match &iter_outcome {
                 IterationOutcome::Posted { signature, .. } => {
@@ -300,7 +367,7 @@ fn build_tape_row(
 
     // Common fields — populated for every outcome class. Flow-level
     // fields beyond `posting_path` stay `None` until the staged
-    // submitter lands (slice 2c-3 state machine, phase 63 second
+    // submitter lands (slice 2c-3 state machine, phase 64 second
     // commit); the methodology lock at "pyth-poster posting flow —
     // 2026-04-29 (locked)" pins push-oracle non-atomic as the only
     // path the daemon ever attempts.
@@ -446,6 +513,350 @@ fn build_tape_row_skipped(
 fn clamp_exponent(exponent: i32) -> i8 {
     exponent.clamp(i8::MIN as i32, i8::MAX as i32) as i8
 }
+
+/// Drive the multi-stage push-oracle flow for one observation. Per
+/// `methodology_log.md` "pyth-poster posting flow — 2026-04-29
+/// (locked) §The locked staged contract":
+///
+///   init_encoded_vaa  →  submit_tx_b (verify + update_price_feed)  →  await_confirmation
+///
+/// Each stage is its own submit call; the daemon halts on the first
+/// `StageOutcome::Err` and writes a `submit_failed` row with the
+/// failing stage's label in `failed_stage`. On success the row
+/// records the terminal-tx fields from `submit_tx_b` plus the
+/// flow-level totals.
+async fn run_staged_flow_for_observation(
+    cfg: &FeedConfig,
+    update: &PriceUpdate,
+    staged: &StagedFlowConfig<'_>,
+    posted_pda: &str,
+    onchain_state: Option<&crate::onchain::OnchainPriceState>,
+    source_label: &str,
+    now_ts: i64,
+) -> (Post, IterationOutcome) {
+    let (onchain_publish_time_pre, onchain_price_pre, similarity_bps) = match onchain_state {
+        Some(s) => (
+            Some(s.publish_time),
+            Some(s.price),
+            crate::onchain::similarity_bps(update.price, s.price),
+        ),
+        None => (None, None, None),
+    };
+
+    // Decode + parse the Hermes accumulator blob. Failure here is
+    // an upstream-malformed-VAA condition — log + degrade to a
+    // submit_failed row before any chain stage runs.
+    let blob_bytes = match base64::engine::general_purpose::STANDARD
+        .decode(update.vaa_base64.as_bytes())
+    {
+        Ok(b) => b,
+        Err(e) => {
+            return staged_failure_row(
+                cfg,
+                update,
+                posted_pda,
+                onchain_publish_time_pre,
+                onchain_price_pre,
+                similarity_bps,
+                source_label,
+                now_ts,
+                StageError {
+                    stage: Stage::InitEncodedVaa,
+                    class: "tx_error".into(),
+                    detail: format!("hermes vaa base64 decode failed: {e}"),
+                },
+                None, // no encoded-VAA acct yet (couldn't get past blob decode)
+                0,
+                0,
+                0,
+            );
+        }
+    };
+    let blob = match crate::accumulator_blob::parse_accumulator_update(&blob_bytes) {
+        Ok(b) => b,
+        Err(e) => {
+            return staged_failure_row(
+                cfg,
+                update,
+                posted_pda,
+                onchain_publish_time_pre,
+                onchain_price_pre,
+                similarity_bps,
+                source_label,
+                now_ts,
+                StageError {
+                    stage: Stage::InitEncodedVaa,
+                    class: "tx_error".into(),
+                    detail: format!("accumulator blob parse failed: {e}"),
+                },
+                None,
+                0,
+                0,
+                0,
+            );
+        }
+    };
+    let merkle_price_update = match blob.updates.into_iter().next() {
+        Some(u) => u,
+        None => {
+            return staged_failure_row(
+                cfg,
+                update,
+                posted_pda,
+                onchain_publish_time_pre,
+                onchain_price_pre,
+                similarity_bps,
+                source_label,
+                now_ts,
+                StageError {
+                    stage: Stage::InitEncodedVaa,
+                    class: "tx_error".into(),
+                    detail: "accumulator blob carried zero merkle updates".into(),
+                },
+                None,
+                0,
+                0,
+                0,
+            );
+        }
+    };
+
+    // Resolve PDAs + ephemeral encoded-VAA pubkey.
+    let feed_id_arr = match crate::pda::parse_feed_id_hex(&cfg.feed_id_hex) {
+        Ok(a) => a,
+        Err(e) => {
+            return staged_failure_row(
+                cfg,
+                update,
+                posted_pda,
+                onchain_publish_time_pre,
+                onchain_price_pre,
+                similarity_bps,
+                source_label,
+                now_ts,
+                StageError {
+                    stage: Stage::InitEncodedVaa,
+                    class: "tx_error".into(),
+                    detail: format!("feed_id parse failed: {e}"),
+                },
+                None,
+                0,
+                0,
+                0,
+            );
+        }
+    };
+    let price_feed_account = (staged.price_feed_pda_resolver)(&cfg.feed_id_hex);
+    let guardian_set = (staged.guardian_set_resolver)(&blob.vaa);
+    // Fresh ephemeral keypair per observation. The dry-run + mock
+    // submitters only need the pubkey here; the real submitter (part
+    // 3) will own the keypair so it can sign Tx A's create_account +
+    // init_encoded_vaa instructions on its behalf.
+    use solana_sdk::signer::Signer as _;
+    let encoded_vaa = solana_sdk::signature::Keypair::new().pubkey();
+
+    let inputs = FlowInputs {
+        feed_id: feed_id_arr,
+        feed_id_hex: cfg.feed_id_hex.clone(),
+        shard_id: staged.shard_id,
+        treasury_id: staged.treasury_id,
+        vaa: blob.vaa,
+        merkle_price_update,
+        price_feed_account,
+        encoded_vaa,
+        receiver_config: staged.receiver_config,
+        receiver_treasury: staged.receiver_treasury,
+        guardian_set,
+        payer: staged.payer,
+        priority_fee_micro_lamports_per_cu: staged.priority_fee_micro_lamports_per_cu,
+        compute_unit_limit: staged.compute_unit_limit,
+        encoded_vaa_account_lamports: staged.encoded_vaa_account_lamports,
+    };
+
+    // Stage 1: init_encoded_vaa (Tx A).
+    let init = staged.submitter.submit_init_encoded_vaa(&inputs).await;
+    let init_lamports = match init {
+        StageOutcome::Ok { lamports_paid, .. } => lamports_paid,
+        StageOutcome::Err(e) => {
+            return staged_failure_row(
+                cfg,
+                update,
+                posted_pda,
+                onchain_publish_time_pre,
+                onchain_price_pre,
+                similarity_bps,
+                source_label,
+                now_ts,
+                e,
+                Some(inputs.encoded_vaa.to_string()),
+                0,    // no successful txs
+                0,    // no successful writes
+                0,    // no lamports moved (init failed before settling)
+            );
+        }
+    };
+
+    // Stage 2: submit_tx_b (write_remainder + verify + update_price_feed).
+    let tx_b = staged.submitter.submit_tx_b(&inputs).await;
+    let (terminal_sig, terminal_lamports, verification_level) = match tx_b {
+        StageOutcome::Ok {
+            signature,
+            lamports_paid,
+            verification_level,
+            ..
+        } => (signature, lamports_paid, verification_level),
+        StageOutcome::Err(e) => {
+            // We made it past init (1 successful tx), so flow_tx_count
+            // == 1 and vaa_write_tx_count == 1 (the write inside Tx A).
+            return staged_failure_row(
+                cfg,
+                update,
+                posted_pda,
+                onchain_publish_time_pre,
+                onchain_price_pre,
+                similarity_bps,
+                source_label,
+                now_ts,
+                e,
+                Some(inputs.encoded_vaa.to_string()),
+                1,
+                1,
+                init_lamports,
+            );
+        }
+    };
+
+    // Stage 3: await_confirmation on the terminal tx's signature.
+    let confirm_sig = terminal_sig.clone().unwrap_or_default();
+    let confirm = staged.submitter.await_confirmation(&confirm_sig).await;
+    let (final_sig, final_slot, final_confirmed_at) = match confirm {
+        StageOutcome::Ok {
+            signature,
+            slot,
+            confirmed_at_unix,
+            ..
+        } => (signature, slot, confirmed_at_unix),
+        StageOutcome::Err(e) => {
+            // Confirmation timed out / failed. We still got past Tx
+            // B, so flow_tx_count == 2, vaa_write_tx_count == 2 (one
+            // in Tx A, one in Tx B).
+            return staged_failure_row(
+                cfg,
+                update,
+                posted_pda,
+                onchain_publish_time_pre,
+                onchain_price_pre,
+                similarity_bps,
+                source_label,
+                now_ts,
+                e,
+                Some(inputs.encoded_vaa.to_string()),
+                2,
+                2,
+                init_lamports + terminal_lamports,
+            );
+        }
+    };
+
+    // Successful flow.
+    let row = Post {
+        feed_id_hex: cfg.feed_id_hex.clone(),
+        underlier_symbol: cfg.underlier_symbol.clone(),
+        result_class: result_class::POSTED.to_string(),
+        posting_signature: final_sig.clone(),
+        posted_pda: posted_pda.to_string(),
+        hermes_update_id: update.update_id.clone(),
+        hermes_publish_time: update.publish_time,
+        hermes_price: update.price,
+        hermes_exponent: clamp_exponent(update.exponent),
+        onchain_publish_time_pre,
+        onchain_price_pre,
+        similarity_bps,
+        solana_post_ts: final_confirmed_at,
+        solana_post_slot: final_slot,
+        priority_fee_micro_lamports_per_cu: Some(inputs.priority_fee_micro_lamports_per_cu),
+        post_lamports: Some(terminal_lamports),
+        verification_level,
+        error_class: None,
+        error_detail: None,
+        posting_path: Some(
+            scryer_schema::pyth_poster_post::v1::posting_path::PUSH_ORACLE_NON_ATOMIC.to_string(),
+        ),
+        encoded_vaa_account: Some(inputs.encoded_vaa.to_string()),
+        flow_tx_count: Some(2),       // Tx A + Tx B
+        vaa_write_tx_count: Some(2),  // chunk in A + remainder in B
+        flow_total_lamports: Some(init_lamports + terminal_lamports),
+        failed_stage: None,
+        meta: Meta::new(
+            scryer_schema::pyth_poster_post::v1::SCHEMA_VERSION,
+            now_ts,
+            source_label,
+        ),
+    };
+    let iter_outcome = IterationOutcome::Posted {
+        feed_symbol: cfg.underlier_symbol.clone(),
+        signature: final_sig.unwrap_or_default(),
+    };
+    (row, iter_outcome)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn staged_failure_row(
+    cfg: &FeedConfig,
+    update: &PriceUpdate,
+    posted_pda: &str,
+    onchain_publish_time_pre: Option<i64>,
+    onchain_price_pre: Option<i64>,
+    similarity_bps: Option<i64>,
+    source_label: &str,
+    now_ts: i64,
+    err: StageError,
+    encoded_vaa_account: Option<String>,
+    flow_tx_count: i64,
+    vaa_write_tx_count: i64,
+    flow_total_lamports: u64,
+) -> (Post, IterationOutcome) {
+    let row = Post {
+        feed_id_hex: cfg.feed_id_hex.clone(),
+        underlier_symbol: cfg.underlier_symbol.clone(),
+        result_class: result_class::SUBMIT_FAILED.to_string(),
+        posting_signature: None,
+        posted_pda: posted_pda.to_string(),
+        hermes_update_id: update.update_id.clone(),
+        hermes_publish_time: update.publish_time,
+        hermes_price: update.price,
+        hermes_exponent: clamp_exponent(update.exponent),
+        onchain_publish_time_pre,
+        onchain_price_pre,
+        similarity_bps,
+        solana_post_ts: None,
+        solana_post_slot: None,
+        priority_fee_micro_lamports_per_cu: None,
+        post_lamports: None,
+        verification_level: None,
+        error_class: Some(err.class.clone()),
+        error_detail: Some(truncate_detail(err.detail.clone())),
+        posting_path: Some(
+            scryer_schema::pyth_poster_post::v1::posting_path::PUSH_ORACLE_NON_ATOMIC.to_string(),
+        ),
+        encoded_vaa_account,
+        flow_tx_count: Some(flow_tx_count),
+        vaa_write_tx_count: Some(vaa_write_tx_count),
+        flow_total_lamports: Some(flow_total_lamports),
+        failed_stage: Some(err.stage.as_failed_stage_label().to_string()),
+        meta: Meta::new(
+            scryer_schema::pyth_poster_post::v1::SCHEMA_VERSION,
+            now_ts,
+            source_label,
+        ),
+    };
+    let iter_outcome = IterationOutcome::Failed {
+        feed_symbol: cfg.underlier_symbol.clone(),
+        error_class: err.class,
+    };
+    (row, iter_outcome)
+}
+
 
 fn truncate_detail(s: String) -> String {
     if s.len() <= ERROR_DETAIL_MAX_LEN {
@@ -719,5 +1130,302 @@ mod tests {
     fn assert_mock_is_dyn_submitter() {
         let mock = MockSubmitter::new([]);
         let _: Arc<dyn TxSubmitter> = Arc::new(mock);
+    }
+
+    // ----- Staged-flow tests (phase 64 part 2) ---------------------------
+    //
+    // Each test drives `run_staged_flow_for_observation` against a
+    // `MockStagedSubmitter` programmed with synthetic outcomes for
+    // every stage. The accumulator-blob parser is real (the test
+    // builds a synthetic blob and base64-encodes it), so the daemon
+    // exercises the same decode path it would in production.
+
+    use crate::accumulator_blob::ACCUMULATOR_UPDATE_MAGIC;
+    use crate::staged_submitter::{MockStagedSubmitter, StageError};
+    use base64::Engine as _;
+
+    /// Build a synthetic accumulator blob carrying `vaa_len` bytes of
+    /// VAA + one zero-proof merkle update with `msg_len` bytes of
+    /// message. Returns the base64-encoded blob string.
+    fn synthetic_blob_b64(vaa_len: usize, msg_len: usize) -> String {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&ACCUMULATOR_UPDATE_MAGIC);
+        blob.push(1); // major
+        blob.push(0); // minor
+        blob.push(0); // trailing length
+        blob.push(0); // proof_type WormholeMerkle
+        blob.extend_from_slice(&(vaa_len as u16).to_be_bytes());
+        blob.extend_from_slice(&vec![0xaau8; vaa_len]);
+        blob.push(1); // updates length
+        blob.extend_from_slice(&(msg_len as u16).to_be_bytes());
+        blob.extend_from_slice(&vec![0xbbu8; msg_len]);
+        blob.push(0); // zero proof depth
+        base64::engine::general_purpose::STANDARD.encode(&blob)
+    }
+
+    fn staged_update(feed: &FeedConfig, publish_time: i64) -> PriceUpdate {
+        let mut u = sample_update(feed, publish_time);
+        u.vaa_base64 = synthetic_blob_b64(800, 85);
+        u
+    }
+
+    fn staged_config<'a>(
+        submitter: Arc<dyn StagedSubmitter>,
+        gs_resolver: &'a dyn Fn(&[u8]) -> solana_sdk::pubkey::Pubkey,
+        pf_resolver: &'a dyn Fn(&str) -> solana_sdk::pubkey::Pubkey,
+    ) -> StagedFlowConfig<'a> {
+        StagedFlowConfig {
+            submitter,
+            shard_id: 0,
+            treasury_id: 0,
+            compute_unit_limit: 600_000,
+            payer: solana_sdk::pubkey::Pubkey::new_unique(),
+            receiver_config: solana_sdk::pubkey::Pubkey::new_unique(),
+            receiver_treasury: solana_sdk::pubkey::Pubkey::new_unique(),
+            guardian_set_resolver: gs_resolver,
+            price_feed_pda_resolver: pf_resolver,
+            encoded_vaa_account_lamports: 2_000_000,
+            priority_fee_micro_lamports_per_cu: 2_500,
+        }
+    }
+
+    #[tokio::test]
+    async fn staged_flow_happy_path_writes_posted_row_with_flow_fields() {
+        let cfg = sample_feed();
+        let update = staged_update(&cfg, 1_777_400_000);
+
+        let mock = Arc::new(MockStagedSubmitter::new());
+        // Outcomes are popped LIFO, so push in reverse order of
+        // expected pop: confirm → tx_b → init.
+        mock.queue_confirm(StageOutcome::Ok {
+            signature: Some("sig-tx-b".into()),
+            slot: Some(415_581_004),
+            confirmed_at_unix: Some(1_777_400_010),
+            lamports_paid: 0,
+            verification_level: Some("full".into()),
+        });
+        mock.queue_tx_b(StageOutcome::Ok {
+            signature: Some("sig-tx-b".into()),
+            slot: Some(415_581_004),
+            confirmed_at_unix: None,
+            lamports_paid: 7_500,
+            verification_level: Some("full".into()),
+        });
+        mock.queue_init(StageOutcome::Ok {
+            signature: Some("sig-init".into()),
+            slot: None,
+            confirmed_at_unix: None,
+            lamports_paid: 2_005_000, // rent + base fee
+            verification_level: None,
+        });
+
+        let pf = solana_sdk::pubkey::Pubkey::new_unique();
+        let gs = solana_sdk::pubkey::Pubkey::new_unique();
+        let pf_resolver = |_h: &str| pf;
+        let gs_resolver = |_v: &[u8]| gs;
+        let cfg_staged = staged_config(mock.clone() as Arc<dyn StagedSubmitter>, &gs_resolver, &pf_resolver);
+
+        let (row, outcome) = run_staged_flow_for_observation(
+            &cfg,
+            &update,
+            &cfg_staged,
+            "POSTEDPDA111",
+            None,
+            "pyth-poster/dev",
+            1_777_400_002,
+        )
+        .await;
+
+        assert_eq!(row.result_class, result_class::POSTED);
+        assert_eq!(row.posting_signature.as_deref(), Some("sig-tx-b"));
+        assert_eq!(row.solana_post_slot, Some(415_581_004));
+        assert_eq!(row.solana_post_ts, Some(1_777_400_010));
+        assert_eq!(row.post_lamports, Some(7_500));
+        assert_eq!(row.verification_level.as_deref(), Some("full"));
+        // Flow-level columns
+        assert_eq!(
+            row.posting_path.as_deref(),
+            Some("push_oracle_non_atomic")
+        );
+        assert!(row.encoded_vaa_account.is_some());
+        assert_eq!(row.flow_tx_count, Some(2));
+        assert_eq!(row.vaa_write_tx_count, Some(2));
+        assert_eq!(row.flow_total_lamports, Some(2_005_000 + 7_500));
+        assert_eq!(row.failed_stage, None);
+        assert!(matches!(outcome, IterationOutcome::Posted { .. }));
+
+        // Submitter call sequence pinned.
+        assert_eq!(mock.recorded_init_count(), 1);
+        assert_eq!(mock.recorded_tx_b_count(), 1);
+        assert_eq!(mock.recorded_confirms(), vec!["sig-tx-b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn staged_flow_init_failure_writes_submit_failed_with_init_stage() {
+        let cfg = sample_feed();
+        let update = staged_update(&cfg, 1_777_400_060);
+
+        let mock = Arc::new(MockStagedSubmitter::new());
+        mock.queue_init(StageOutcome::Err(StageError {
+            stage: Stage::InitEncodedVaa,
+            class: "tx_error".into(),
+            detail: "preflight: account already in use".into(),
+        }));
+
+        let pf = solana_sdk::pubkey::Pubkey::new_unique();
+        let gs = solana_sdk::pubkey::Pubkey::new_unique();
+        let pf_resolver = |_h: &str| pf;
+        let gs_resolver = |_v: &[u8]| gs;
+        let cfg_staged = staged_config(mock.clone() as Arc<dyn StagedSubmitter>, &gs_resolver, &pf_resolver);
+
+        let (row, outcome) = run_staged_flow_for_observation(
+            &cfg,
+            &update,
+            &cfg_staged,
+            "POSTEDPDA111",
+            None,
+            "pyth-poster/dev",
+            1_777_400_062,
+        )
+        .await;
+
+        assert_eq!(row.result_class, result_class::SUBMIT_FAILED);
+        assert_eq!(row.posting_signature, None);
+        assert_eq!(row.failed_stage.as_deref(), Some("init_encoded_vaa"));
+        assert_eq!(row.error_class.as_deref(), Some("tx_error"));
+        assert_eq!(row.flow_tx_count, Some(0));
+        assert_eq!(row.flow_total_lamports, Some(0));
+        // tx_b + confirm should not have been invoked.
+        assert_eq!(mock.recorded_tx_b_count(), 0);
+        assert!(mock.recorded_confirms().is_empty());
+        assert!(matches!(outcome, IterationOutcome::Failed { .. }));
+    }
+
+    #[tokio::test]
+    async fn staged_flow_tx_b_failure_charges_init_lamports_and_records_update_price_feed_stage() {
+        let cfg = sample_feed();
+        let update = staged_update(&cfg, 1_777_400_120);
+
+        let mock = Arc::new(MockStagedSubmitter::new());
+        mock.queue_tx_b(StageOutcome::Err(StageError {
+            stage: Stage::UpdatePriceFeed,
+            class: "tx_error".into(),
+            detail: "PriceFeedMessageMismatch".into(),
+        }));
+        mock.queue_init(StageOutcome::Ok {
+            signature: Some("sig-init".into()),
+            slot: None,
+            confirmed_at_unix: None,
+            lamports_paid: 2_005_000,
+            verification_level: None,
+        });
+
+        let pf = solana_sdk::pubkey::Pubkey::new_unique();
+        let gs = solana_sdk::pubkey::Pubkey::new_unique();
+        let pf_resolver = |_h: &str| pf;
+        let gs_resolver = |_v: &[u8]| gs;
+        let cfg_staged = staged_config(mock.clone() as Arc<dyn StagedSubmitter>, &gs_resolver, &pf_resolver);
+
+        let (row, _) = run_staged_flow_for_observation(
+            &cfg,
+            &update,
+            &cfg_staged,
+            "POSTEDPDA111",
+            None,
+            "pyth-poster/dev",
+            1_777_400_122,
+        )
+        .await;
+
+        assert_eq!(row.result_class, result_class::SUBMIT_FAILED);
+        assert_eq!(row.failed_stage.as_deref(), Some("update_price_feed"));
+        assert_eq!(row.flow_tx_count, Some(1));
+        // Lamports already paid for Tx A's encoded-VAA rent reflected
+        // even though the flow failed at Tx B.
+        assert_eq!(row.flow_total_lamports, Some(2_005_000));
+        assert!(mock.recorded_confirms().is_empty());
+    }
+
+    #[tokio::test]
+    async fn staged_flow_confirm_timeout_marks_failed_stage_confirm() {
+        let cfg = sample_feed();
+        let update = staged_update(&cfg, 1_777_400_180);
+
+        let mock = Arc::new(MockStagedSubmitter::new());
+        mock.queue_confirm(StageOutcome::Err(StageError {
+            stage: Stage::Confirm,
+            class: "confirmation_timeout".into(),
+            detail: "signature=sig-tx-b".into(),
+        }));
+        mock.queue_tx_b(StageOutcome::Ok {
+            signature: Some("sig-tx-b".into()),
+            slot: Some(415_581_010),
+            confirmed_at_unix: None,
+            lamports_paid: 7_500,
+            verification_level: Some("full".into()),
+        });
+        mock.queue_init(StageOutcome::Ok {
+            signature: Some("sig-init".into()),
+            slot: None,
+            confirmed_at_unix: None,
+            lamports_paid: 2_005_000,
+            verification_level: None,
+        });
+
+        let pf = solana_sdk::pubkey::Pubkey::new_unique();
+        let gs = solana_sdk::pubkey::Pubkey::new_unique();
+        let pf_resolver = |_h: &str| pf;
+        let gs_resolver = |_v: &[u8]| gs;
+        let cfg_staged = staged_config(mock.clone() as Arc<dyn StagedSubmitter>, &gs_resolver, &pf_resolver);
+
+        let (row, _) = run_staged_flow_for_observation(
+            &cfg,
+            &update,
+            &cfg_staged,
+            "POSTEDPDA111",
+            None,
+            "pyth-poster/dev",
+            1_777_400_182,
+        )
+        .await;
+
+        assert_eq!(row.result_class, result_class::SUBMIT_FAILED);
+        assert_eq!(row.failed_stage.as_deref(), Some("confirm"));
+        assert_eq!(row.flow_tx_count, Some(2));
+        assert_eq!(row.flow_total_lamports, Some(2_005_000 + 7_500));
+        assert_eq!(mock.recorded_confirms(), vec!["sig-tx-b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn staged_flow_malformed_blob_short_circuits_to_init_stage_failure() {
+        let cfg = sample_feed();
+        let mut update = staged_update(&cfg, 1_777_400_240);
+        // Replace with non-base64 garbage that won't decode.
+        update.vaa_base64 = "&&&".to_string();
+
+        let mock = Arc::new(MockStagedSubmitter::new()); // queues empty — must NOT be invoked
+        let pf = solana_sdk::pubkey::Pubkey::new_unique();
+        let gs = solana_sdk::pubkey::Pubkey::new_unique();
+        let pf_resolver = |_h: &str| pf;
+        let gs_resolver = |_v: &[u8]| gs;
+        let cfg_staged = staged_config(mock.clone() as Arc<dyn StagedSubmitter>, &gs_resolver, &pf_resolver);
+
+        let (row, _) = run_staged_flow_for_observation(
+            &cfg,
+            &update,
+            &cfg_staged,
+            "POSTEDPDA111",
+            None,
+            "pyth-poster/dev",
+            1_777_400_242,
+        )
+        .await;
+
+        assert_eq!(row.result_class, result_class::SUBMIT_FAILED);
+        assert_eq!(row.failed_stage.as_deref(), Some("init_encoded_vaa"));
+        assert_eq!(row.flow_tx_count, Some(0));
+        assert_eq!(row.flow_total_lamports, Some(0));
+        // Submitter was never called.
+        assert_eq!(mock.recorded_init_count(), 0);
     }
 }

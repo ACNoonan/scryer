@@ -20,15 +20,29 @@
 //! off-chain plumbing is wired through `scry pyth-poster --once
 //! --dry-run`.
 
+pub mod accumulator_blob;
 pub mod config;
 pub mod daemon;
 pub mod hermes;
+pub mod instruction;
 pub mod keys;
 pub mod mode;
 pub mod onchain;
 pub mod pda;
 pub mod priority_fee;
+pub mod staged_submitter;
 pub mod tx;
+pub mod wormhole_core;
+
+/// Canonical Solana System Program ID (`11111111111111111111111111111111`,
+/// all-zero 32-byte address). Hand-defined here to avoid the
+/// `solana_sdk::system_program` deprecation warning that recommends
+/// the `solana-system-interface` crate (which is itself a thin
+/// wrapper). The ID is a hard protocol constant; it cannot change.
+pub mod system_program {
+    use solana_sdk::pubkey::Pubkey;
+    pub const ID: Pubkey = Pubkey::new_from_array([0u8; 32]);
+}
 
 pub use config::{FeedConfig, FeedDefaults, PosterConfig};
 pub use daemon::{Daemon, DaemonError, IterationInputs, IterationOutcome, VENUE};

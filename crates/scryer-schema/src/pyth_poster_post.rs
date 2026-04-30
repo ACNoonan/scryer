@@ -29,7 +29,7 @@
 //! (locked)" for the schema lock + feed-allowlist + failure-mode
 //! disclosure, and the parent "Write-side daemons — 2026-04-28
 //! (locked)" section for keypair / tx mechanics. The 6 nullable
-//! flow-level fields were added 2026-04-29 (phase 63) per the
+//! flow-level fields were added 2026-04-29 (phase 64) per the
 //! "pyth-poster posting flow — 2026-04-29 (locked)" methodology
 //! entry; older parquet files written before that delta read
 //! cleanly with these columns absent (decoded as `None`).
@@ -155,17 +155,17 @@ pub mod v1 {
         /// Free-form failure detail string. Truncated by the daemon
         /// to a fixed cap; not meant for machine-parsing.
         pub error_detail: Option<String>,
-        /// **Flow-level (added 2026-04-29 phase 63).** Posting-path
+        /// **Flow-level (added 2026-04-29 phase 64).** Posting-path
         /// label; today always `push_oracle_non_atomic` for
         /// successful and failed observations alike. `None` on
         /// `skipped_similar` rows (no flow ran) and on rows from
-        /// before phase 63 that didn't carry the column.
+        /// before phase 64 that didn't carry the column.
         pub posting_path: Option<String>,
         /// **Flow-level.** Base58 address of the encoded-VAA account
         /// the flow created on the Wormhole core bridge during the
         /// `init_encoded_vaa` stage. `None` on `skipped_similar`,
         /// on flows that never reached `init_encoded_vaa`, and on
-        /// rows from before phase 63.
+        /// rows from before phase 64.
         pub encoded_vaa_account: Option<String>,
         /// **Flow-level.** Total number of Solana txs the daemon
         /// actually submitted for this observation. Typically 2 for
@@ -173,14 +173,14 @@ pub mod v1 {
         /// rest+verify+update_price_feed); higher when the VAA
         /// required more chunked writes; smaller when the flow
         /// failed early. `0` on `skipped_similar`. `None` on rows
-        /// from before phase 63.
+        /// from before phase 64.
         pub flow_tx_count: Option<i64>,
         /// **Flow-level.** Number of `write_encoded_vaa` instructions
         /// the daemon emitted across the flow. Typically 2 (one in
         /// Tx A, one in Tx B); `1` if the VAA fits in a single chunk;
         /// `>2` for unusually large VAAs. `0` on `skipped_similar`
         /// or on flows that failed before any write. `None` on rows
-        /// from before phase 63.
+        /// from before phase 64.
         pub vaa_write_tx_count: Option<i64>,
         /// **Flow-level.** Total lamports paid across the entire
         /// flow (every successful tx's fee, including encoded-VAA
@@ -188,13 +188,13 @@ pub mod v1 {
         /// fee). On `submit_failed` rows reflects whatever was paid
         /// before the failed stage rejected — an abandoned encoded
         /// VAA still consumed rent. `0` on `skipped_similar`.
-        /// `None` on rows from before phase 63. The terminal-tx
+        /// `None` on rows from before phase 64. The terminal-tx
         /// fee alone is recorded in `post_lamports`.
         pub flow_total_lamports: Option<u64>,
         /// **Flow-level.** Stage at which the flow failed, when
         /// `result_class == submit_failed`. One of the
         /// `failed_stage::*` constants. `None` on `posted`,
-        /// `skipped_similar`, and on rows from before phase 63.
+        /// `skipped_similar`, and on rows from before phase 64.
         pub failed_stage: Option<String>,
         #[serde(flatten)]
         pub meta: Meta,
@@ -219,9 +219,9 @@ pub mod v1 {
 
     pub fn arrow_schema() -> Schema {
         // Append-only within v1. Six flow-level fields appended
-        // 2026-04-29 (phase 63) per "pyth-poster posting flow —
+        // 2026-04-29 (phase 64) per "pyth-poster posting flow —
         // 2026-04-29 (locked)" in `methodology_log.md`. All six are
-        // nullable; older parquet files from before phase 63 read
+        // nullable; older parquet files from before phase 64 read
         // cleanly with these columns absent (decoded as `None` by
         // `from_record_batch`'s tolerant column lookup).
         Schema::new(vec![
@@ -244,7 +244,7 @@ pub mod v1 {
             Field::new("verification_level", DataType::LargeUtf8, true),
             Field::new("error_class", DataType::LargeUtf8, true),
             Field::new("error_detail", DataType::LargeUtf8, true),
-            // Flow-level (phase 63 append). Order is significant — these
+            // Flow-level (phase 64 append). Order is significant — these
             // sit between `error_detail` and the `_meta` columns so the
             // `_meta` columns stay at the tail (consistent with every
             // other schema in this crate).
@@ -299,7 +299,7 @@ pub mod v1 {
             LargeStringArray::from_iter(rows.iter().map(|r| r.error_class.as_deref()));
         let error_detail =
             LargeStringArray::from_iter(rows.iter().map(|r| r.error_detail.as_deref()));
-        // Flow-level columns (phase 63).
+        // Flow-level columns (phase 64).
         let posting_path =
             LargeStringArray::from_iter(rows.iter().map(|r| r.posting_path.as_deref()));
         let encoded_vaa_account =
@@ -396,8 +396,8 @@ pub mod v1 {
         let verification_level = downcast_column::<LargeStringArray>(batch, "verification_level")?;
         let error_class = downcast_column::<LargeStringArray>(batch, "error_class")?;
         let error_detail = downcast_column::<LargeStringArray>(batch, "error_detail")?;
-        // Flow-level columns appended in phase 63 (2026-04-29). Tolerant
-        // lookup so older parquet files (written before phase 63) read
+        // Flow-level columns appended in phase 64 (2026-04-29). Tolerant
+        // lookup so older parquet files (written before phase 64) read
         // cleanly with these fields decoded as `None`.
         let posting_path = try_downcast_column::<LargeStringArray>(batch, "posting_path")?;
         let encoded_vaa_account =
@@ -582,7 +582,7 @@ pub mod v1 {
             let batch = to_record_batch(&rows).expect("encode");
             assert_eq!(batch.num_rows(), 3);
             // 23 original columns + 6 flow-level columns appended in
-            // phase 63 (posting_path, encoded_vaa_account,
+            // phase 64 (posting_path, encoded_vaa_account,
             // flow_tx_count, vaa_write_tx_count, flow_total_lamports,
             // failed_stage) = 29.
             assert_eq!(batch.num_columns(), 29);
@@ -592,7 +592,7 @@ pub mod v1 {
 
         #[test]
         fn decodes_pre_phase_63_batch_with_flow_columns_absent() {
-            // Construct a record batch using the pre-phase-63 column
+            // Construct a record batch using the pre-phase-64 column
             // set (no flow-level columns) and verify decode treats
             // every flow-level field as `None`. This is the
             // back-compat lifeline for parquet files written by
@@ -602,7 +602,7 @@ pub mod v1 {
 
             let pre = sample_posted();
             let pre = Post {
-                // Match the all-null shape of pre-phase-63 rows.
+                // Match the all-null shape of pre-phase-64 rows.
                 posting_path: None,
                 encoded_vaa_account: None,
                 flow_tx_count: None,
@@ -673,9 +673,9 @@ pub mod v1 {
             ];
 
             let old_batch = RecordBatch::try_new(Arc::new(old_schema), arrays).unwrap();
-            let recovered = from_record_batch(&old_batch).expect("decode pre-phase-63 batch");
+            let recovered = from_record_batch(&old_batch).expect("decode pre-phase-64 batch");
             assert_eq!(recovered.len(), 1);
-            // Round-trip equality: a pre-phase-63 row decodes to the
+            // Round-trip equality: a pre-phase-64 row decodes to the
             // same logical Post (with flow-level fields all None) we
             // constructed.
             assert_eq!(recovered[0], pre);

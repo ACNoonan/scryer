@@ -917,8 +917,8 @@ jito_tip_max_lamports         i64 nullable
 ## pyth_poster_post.v1
 
 **Status.** locked 2026-04-28; row-unit + flow-level columns appended
-2026-04-29 (phase 63). Phases 52 + 53 + 54 shipped the original
-single-tx framing (item 44 slices 1 + 2 + 2c-2); phase 63 tightens
+2026-04-29 (phase 64). Phases 52 + 53 + 54 shipped the original
+single-tx framing (item 44 slices 1 + 2 + 2c-2); phase 64 tightens
 the contract for the push-oracle non-atomic multi-stage flow per
 `methodology_log.md` "pyth-poster posting flow — 2026-04-29
 (locked)". Mirror tape for the `soothsayer-pyth-poster` daemon.
@@ -964,7 +964,7 @@ post_lamports                     u64 nullable // terminal-tx fee in lamports; n
 verification_level                string nullable  // 'full' | 'partial' (from receiver)
 error_class                       string nullable  // populated on submit_failed
 error_detail                      string nullable
-posting_path                      string nullable  // 'push_oracle_non_atomic' (locked); null only on pre-phase-63 rows
+posting_path                      string nullable  // 'push_oracle_non_atomic' (locked); null only on pre-phase-64 rows
 encoded_vaa_account               string nullable  // base58 encoded-VAA account; null on skip / pre-flow failure
 flow_tx_count                     u16 nullable     // total Solana txs submitted for this observation; 0 on skip
 vaa_write_tx_count                u16 nullable     // # of write_encoded_vaa instructions across the flow
