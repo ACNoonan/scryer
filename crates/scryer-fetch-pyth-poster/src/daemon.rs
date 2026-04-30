@@ -24,6 +24,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use scryer_schema::pyth_poster_post::v1::{result_class, Post};
+use scryer_schema::pyth_poster_tx::v1::{
+    error_class as tx_error_class, stage as tx_stage, TxRecord,
+};
 use scryer_schema::Meta;
 use scryer_store::Dataset;
 use thiserror::Error;
@@ -212,6 +215,11 @@ impl Daemon {
 
         let mut outcomes = Vec::with_capacity(inputs.feeds.len());
         let mut tape_rows: Vec<Post> = Vec::with_capacity(inputs.feeds.len());
+        // Per-stage tx detail rows accumulate across feeds and write
+        // in one bulk call after the post-row write. The staged-flow
+        // path appends 0..=2 rows per observation; the legacy
+        // single-shot path appends none.
+        let mut tape_tx_rows: Vec<TxRecord> = Vec::with_capacity(inputs.feeds.len() * 2);
 
         for (cfg, update) in inputs.feeds.iter().zip(updates.into_iter()) {
             let posted_pda = (inputs.posted_pda_resolver)(&cfg.feed_id_hex);
@@ -272,7 +280,7 @@ impl Daemon {
                 continue;
             }
 
-            let (row, iter_outcome) = if let Some(staged) = inputs.staged_flow {
+            let (row, iter_outcome, mut staged_tx_rows) = if let Some(staged) = inputs.staged_flow {
                 run_staged_flow_for_observation(
                     cfg,
                     &update,
@@ -292,7 +300,7 @@ impl Daemon {
 
                 let outcome = inputs.submitter.submit_post_update(&submit_inputs).await;
 
-                build_tape_row(
+                let (row, outc) = build_tape_row(
                     cfg,
                     &update,
                     outcome,
@@ -301,8 +309,12 @@ impl Daemon {
                     onchain_state.as_ref(),
                     &source_label,
                     now_ts,
-                )
+                );
+                // Legacy single-shot path doesn't produce per-stage tx
+                // rows (it has no concept of stages).
+                (row, outc, Vec::new())
             };
+            tape_tx_rows.append(&mut staged_tx_rows);
 
             match &iter_outcome {
                 IterationOutcome::Posted { signature, .. } => {
@@ -339,6 +351,14 @@ impl Daemon {
         if !tape_rows.is_empty() {
             dataset
                 .write::<Post>(VENUE, None, &tape_rows)
+                .map_err(|e: scryer_store::StoreError| DaemonError::Store(e.to_string()))?;
+        }
+        // Per-stage tx detail tape — written after the post tape so
+        // joins by `(feed_id_hex, hermes_publish_time)` see both
+        // sides at the same on-disk-state moment.
+        if !tape_tx_rows.is_empty() {
+            dataset
+                .write::<TxRecord>(VENUE, None, &tape_tx_rows)
                 .map_err(|e: scryer_store::StoreError| DaemonError::Store(e.to_string()))?;
         }
 
@@ -533,7 +553,7 @@ async fn run_staged_flow_for_observation(
     onchain_state: Option<&crate::onchain::OnchainPriceState>,
     source_label: &str,
     now_ts: i64,
-) -> (Post, IterationOutcome) {
+) -> (Post, IterationOutcome, Vec<TxRecord>) {
     let (onchain_publish_time_pre, onchain_price_pre, similarity_bps) = match onchain_state {
         Some(s) => (
             Some(s.publish_time),
@@ -569,6 +589,7 @@ async fn run_staged_flow_for_observation(
                 0,
                 0,
                 0,
+                Vec::new(), // 0 tx rows: no signature, nothing sent
             );
         }
     };
@@ -593,6 +614,7 @@ async fn run_staged_flow_for_observation(
                 0,
                 0,
                 0,
+                Vec::new(),
             );
         }
     };
@@ -617,6 +639,7 @@ async fn run_staged_flow_for_observation(
                 0,
                 0,
                 0,
+                Vec::new(),
             );
         }
     };
@@ -643,17 +666,20 @@ async fn run_staged_flow_for_observation(
                 0,
                 0,
                 0,
+                Vec::new(),
             );
         }
     };
     let price_feed_account = (staged.price_feed_pda_resolver)(&cfg.feed_id_hex);
     let guardian_set = (staged.guardian_set_resolver)(&blob.vaa);
     // Fresh ephemeral keypair per observation. The dry-run + mock
-    // submitters only need the pubkey here; the real submitter (part
-    // 3) will own the keypair so it can sign Tx A's create_account +
-    // init_encoded_vaa instructions on its behalf.
+    // submitters only need the pubkey; the real submitter (phase 65
+    // part 3) reconstructs the Keypair from the bytes to sign Tx A's
+    // create_account + init_encoded_vaa instructions on its behalf.
     use solana_sdk::signer::Signer as _;
-    let encoded_vaa = solana_sdk::signature::Keypair::new().pubkey();
+    let ephemeral_kp = solana_sdk::signature::Keypair::new();
+    let encoded_vaa = ephemeral_kp.pubkey();
+    let encoded_vaa_keypair_bytes = ephemeral_kp.to_bytes();
 
     let inputs = FlowInputs {
         feed_id: feed_id_arr,
@@ -664,6 +690,7 @@ async fn run_staged_flow_for_observation(
         merkle_price_update,
         price_feed_account,
         encoded_vaa,
+        encoded_vaa_keypair_bytes,
         receiver_config: staged.receiver_config,
         receiver_treasury: staged.receiver_treasury,
         guardian_set,
@@ -673,11 +700,52 @@ async fn run_staged_flow_for_observation(
         encoded_vaa_account_lamports: staged.encoded_vaa_account_lamports,
     };
 
+    // Per-stage tx detail rows accumulate as each stage's
+    // `sendTransaction` returns a signature. Per the methodology
+    // entry "pyth_poster_tx.v1 detail tape — 2026-04-29 (locked)
+    // §When a row is written", send-side failures (`tx_error`,
+    // `network_after_retries`) write 0 tx rows; only Ok outcomes
+    // and confirmation-timeout post-Tx-B-Ok produce rows.
+    let mut tx_rows: Vec<TxRecord> = Vec::with_capacity(2);
+    let encoded_vaa_str = inputs.encoded_vaa.to_string();
+    let needs_remainder_write = inputs.vaa.len() > VAA_SPLIT_INDEX_FOR_DAEMON;
+
     // Stage 1: init_encoded_vaa (Tx A).
     let init = staged.submitter.submit_init_encoded_vaa(&inputs).await;
-    let init_lamports = match init {
-        StageOutcome::Ok { lamports_paid, .. } => lamports_paid,
+    let (init_lamports, init_signature) = match init {
+        StageOutcome::Ok {
+            signature,
+            lamports_paid,
+            ..
+        } => {
+            // Record Tx A's row immediately (we have a sig). Slot +
+            // confirmed_at remain null for now — they'd only be
+            // meaningful if we ran a per-stage await_confirmation,
+            // which the methodology doesn't require for intermediate
+            // stages.
+            if let Some(sig) = signature.clone() {
+                tx_rows.push(make_tx_record(
+                    &inputs,
+                    update,
+                    sig,
+                    Stage::InitEncodedVaa,
+                    1,
+                    init_instruction_count(),
+                    None,
+                    None,
+                    Some(lamports_paid as i64),
+                    true,
+                    None,
+                    None,
+                    source_label,
+                    now_ts,
+                ));
+            }
+            (lamports_paid, signature)
+        }
         StageOutcome::Err(e) => {
+            // No tx row written (no signature). Post row's failed_stage
+            // carries the diagnosis.
             return staged_failure_row(
                 cfg,
                 update,
@@ -688,13 +756,15 @@ async fn run_staged_flow_for_observation(
                 source_label,
                 now_ts,
                 e,
-                Some(inputs.encoded_vaa.to_string()),
-                0,    // no successful txs
-                0,    // no successful writes
-                0,    // no lamports moved (init failed before settling)
+                Some(encoded_vaa_str),
+                0,
+                0,
+                0,
+                tx_rows,
             );
         }
     };
+    let _ = init_signature; // currently informational; kept for future tracing
 
     // Stage 2: submit_tx_b (write_remainder + verify + update_price_feed).
     let tx_b = staged.submitter.submit_tx_b(&inputs).await;
@@ -704,10 +774,29 @@ async fn run_staged_flow_for_observation(
             lamports_paid,
             verification_level,
             ..
-        } => (signature, lamports_paid, verification_level),
+        } => {
+            if let Some(sig) = signature.clone() {
+                tx_rows.push(make_tx_record(
+                    &inputs,
+                    update,
+                    sig,
+                    Stage::UpdatePriceFeed,
+                    2,
+                    tx_b_instruction_count(needs_remainder_write),
+                    None,
+                    None,
+                    Some(lamports_paid as i64),
+                    true,
+                    None,
+                    None,
+                    source_label,
+                    now_ts,
+                ));
+            }
+            (signature, lamports_paid, verification_level)
+        }
         StageOutcome::Err(e) => {
-            // We made it past init (1 successful tx), so flow_tx_count
-            // == 1 and vaa_write_tx_count == 1 (the write inside Tx A).
+            // Tx B send failed → no second tx row. Tx A's row stays.
             return staged_failure_row(
                 cfg,
                 update,
@@ -718,10 +807,11 @@ async fn run_staged_flow_for_observation(
                 source_label,
                 now_ts,
                 e,
-                Some(inputs.encoded_vaa.to_string()),
+                Some(encoded_vaa_str),
                 1,
                 1,
                 init_lamports,
+                tx_rows,
             );
         }
     };
@@ -735,11 +825,26 @@ async fn run_staged_flow_for_observation(
             slot,
             confirmed_at_unix,
             ..
-        } => (signature, slot, confirmed_at_unix),
+        } => {
+            // Backfill Tx B's row with slot + confirmed_at now that
+            // we observed `confirmed`.
+            if let Some(last) = tx_rows.last_mut() {
+                last.slot = slot.map(|n| n as i64);
+                last.confirmed_at_unix = confirmed_at_unix;
+            }
+            (signature, slot, confirmed_at_unix)
+        }
         StageOutcome::Err(e) => {
-            // Confirmation timed out / failed. We still got past Tx
-            // B, so flow_tx_count == 2, vaa_write_tx_count == 2 (one
-            // in Tx A, one in Tx B).
+            // Confirmation timed out. The cluster accepted Tx B
+            // (we have a sig + made it past sendTransaction) so the
+            // existing Tx B row stays `success=true` but gets
+            // `error_class=confirmation_timeout` populated. The post
+            // row's `failed_stage=confirm` distinguishes timeout from
+            // a clean post.
+            if let Some(last) = tx_rows.last_mut() {
+                last.error_class = Some(tx_error_class::CONFIRMATION_TIMEOUT.to_string());
+                last.error_detail = Some(truncate_detail(e.detail.clone()));
+            }
             return staged_failure_row(
                 cfg,
                 update,
@@ -750,10 +855,11 @@ async fn run_staged_flow_for_observation(
                 source_label,
                 now_ts,
                 e,
-                Some(inputs.encoded_vaa.to_string()),
+                Some(encoded_vaa_str),
                 2,
                 2,
                 init_lamports + terminal_lamports,
+                tx_rows,
             );
         }
     };
@@ -782,7 +888,7 @@ async fn run_staged_flow_for_observation(
         posting_path: Some(
             scryer_schema::pyth_poster_post::v1::posting_path::PUSH_ORACLE_NON_ATOMIC.to_string(),
         ),
-        encoded_vaa_account: Some(inputs.encoded_vaa.to_string()),
+        encoded_vaa_account: Some(encoded_vaa_str),
         flow_tx_count: Some(2),       // Tx A + Tx B
         vaa_write_tx_count: Some(2),  // chunk in A + remainder in B
         flow_total_lamports: Some(init_lamports + terminal_lamports),
@@ -797,7 +903,78 @@ async fn run_staged_flow_for_observation(
         feed_symbol: cfg.underlier_symbol.clone(),
         signature: final_sig.unwrap_or_default(),
     };
-    (row, iter_outcome)
+    (row, iter_outcome, tx_rows)
+}
+
+/// Mirror of `crate::wormhole_core::VAA_SPLIT_INDEX` re-exposed here
+/// without an extra import (avoids touching the daemon's import
+/// list when the constant moves).
+const VAA_SPLIT_INDEX_FOR_DAEMON: usize = crate::wormhole_core::VAA_SPLIT_INDEX;
+
+/// Tx A always packs 3 instructions: `system_program::create_account`
+/// + `init_encoded_vaa` + `write_encoded_vaa(idx=0)`.
+fn init_instruction_count() -> i32 {
+    3
+}
+
+/// Tx B packs 4 or 5 instructions depending on whether the VAA fit
+/// in the Tx-A first chunk:
+///   - `set_compute_unit_limit` + `set_compute_unit_price` + (optional
+///     `write_encoded_vaa(remainder)`) + `verify_encoded_vaa_v1` +
+///     `update_price_feed`.
+fn tx_b_instruction_count(needs_remainder_write: bool) -> i32 {
+    if needs_remainder_write {
+        5
+    } else {
+        4
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_tx_record(
+    inputs: &FlowInputs,
+    update: &PriceUpdate,
+    signature: String,
+    stage: Stage,
+    tx_index_in_flow: i32,
+    instruction_count_in_tx: i32,
+    slot: Option<i64>,
+    confirmed_at_unix: Option<i64>,
+    lamports_paid: Option<i64>,
+    success: bool,
+    error_class: Option<String>,
+    error_detail: Option<String>,
+    source_label: &str,
+    now_ts: i64,
+) -> TxRecord {
+    let stage_label = match stage {
+        Stage::InitEncodedVaa => tx_stage::INIT_ENCODED_VAA,
+        Stage::WriteEncodedVaa => tx_stage::WRITE_ENCODED_VAA,
+        Stage::VerifyEncodedVaa => tx_stage::VERIFY_ENCODED_VAA,
+        Stage::UpdatePriceFeed => tx_stage::UPDATE_PRICE_FEED,
+        // `Confirm` doesn't submit a tx, so it can't reach here.
+        Stage::Confirm => panic!("Stage::Confirm should never produce a tx record"),
+    };
+    TxRecord {
+        feed_id_hex: inputs.feed_id_hex.clone(),
+        hermes_publish_time: update.publish_time,
+        encoded_vaa_account: inputs.encoded_vaa.to_string(),
+        stage: stage_label.to_string(),
+        tx_index_in_flow,
+        signature,
+        slot,
+        confirmed_at_unix,
+        lamports_paid,
+        success,
+        error_class,
+        error_detail,
+        instruction_count_in_tx,
+        meta: Meta::new(
+            scryer_schema::pyth_poster_tx::v1::SCHEMA_VERSION,
+            now_ts,
+            source_label,
+        ),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -815,7 +992,8 @@ fn staged_failure_row(
     flow_tx_count: i64,
     vaa_write_tx_count: i64,
     flow_total_lamports: u64,
-) -> (Post, IterationOutcome) {
+    tx_rows: Vec<TxRecord>,
+) -> (Post, IterationOutcome, Vec<TxRecord>) {
     let row = Post {
         feed_id_hex: cfg.feed_id_hex.clone(),
         underlier_symbol: cfg.underlier_symbol.clone(),
@@ -854,7 +1032,7 @@ fn staged_failure_row(
         feed_symbol: cfg.underlier_symbol.clone(),
         error_class: err.class,
     };
-    (row, iter_outcome)
+    (row, iter_outcome, tx_rows)
 }
 
 
@@ -1142,7 +1320,6 @@ mod tests {
 
     use crate::accumulator_blob::ACCUMULATOR_UPDATE_MAGIC;
     use crate::staged_submitter::{MockStagedSubmitter, StageError};
-    use base64::Engine as _;
 
     /// Build a synthetic accumulator blob carrying `vaa_len` bytes of
     /// VAA + one zero-proof merkle update with `msg_len` bytes of
@@ -1225,7 +1402,7 @@ mod tests {
         let gs_resolver = |_v: &[u8]| gs;
         let cfg_staged = staged_config(mock.clone() as Arc<dyn StagedSubmitter>, &gs_resolver, &pf_resolver);
 
-        let (row, outcome) = run_staged_flow_for_observation(
+        let (row, outcome, tx_rows) = run_staged_flow_for_observation(
             &cfg,
             &update,
             &cfg_staged,
@@ -1258,6 +1435,35 @@ mod tests {
         assert_eq!(mock.recorded_init_count(), 1);
         assert_eq!(mock.recorded_tx_b_count(), 1);
         assert_eq!(mock.recorded_confirms(), vec!["sig-tx-b".to_string()]);
+
+        // Per-stage tx tape: 2 rows for the typical 2-tx happy path.
+        assert_eq!(tx_rows.len(), 2);
+        let tx_a = &tx_rows[0];
+        assert_eq!(tx_a.signature, "sig-init");
+        assert_eq!(tx_a.stage, "init_encoded_vaa");
+        assert_eq!(tx_a.tx_index_in_flow, 1);
+        assert_eq!(tx_a.instruction_count_in_tx, 3);
+        assert!(tx_a.success);
+        assert_eq!(tx_a.lamports_paid, Some(2_005_000));
+        // Init's row stays slot/confirmed_at-null (we only confirm
+        // the terminal tx in this slice).
+        assert_eq!(tx_a.slot, None);
+        assert_eq!(tx_a.confirmed_at_unix, None);
+
+        let tx_b = &tx_rows[1];
+        assert_eq!(tx_b.signature, "sig-tx-b");
+        assert_eq!(tx_b.stage, "update_price_feed");
+        assert_eq!(tx_b.tx_index_in_flow, 2);
+        // 800-byte VAA exceeds VAA_SPLIT_INDEX=755 so Tx B has the
+        // remainder write → 5 instructions (CB+CB+write+verify+update).
+        assert_eq!(tx_b.instruction_count_in_tx, 5);
+        assert!(tx_b.success);
+        assert_eq!(tx_b.lamports_paid, Some(7_500));
+        assert_eq!(tx_b.slot, Some(415_581_004));
+        assert_eq!(tx_b.confirmed_at_unix, Some(1_777_400_010));
+        assert_eq!(tx_b.error_class, None);
+        // Both rows reference the same encoded-VAA account (correlation key).
+        assert_eq!(tx_a.encoded_vaa_account, tx_b.encoded_vaa_account);
     }
 
     #[tokio::test]
@@ -1278,7 +1484,7 @@ mod tests {
         let gs_resolver = |_v: &[u8]| gs;
         let cfg_staged = staged_config(mock.clone() as Arc<dyn StagedSubmitter>, &gs_resolver, &pf_resolver);
 
-        let (row, outcome) = run_staged_flow_for_observation(
+        let (row, outcome, tx_rows) = run_staged_flow_for_observation(
             &cfg,
             &update,
             &cfg_staged,
@@ -1299,6 +1505,9 @@ mod tests {
         assert_eq!(mock.recorded_tx_b_count(), 0);
         assert!(mock.recorded_confirms().is_empty());
         assert!(matches!(outcome, IterationOutcome::Failed { .. }));
+        // Send-side failures write 0 tx rows per the methodology
+        // entry — no signature received from the RPC.
+        assert!(tx_rows.is_empty());
     }
 
     #[tokio::test]
@@ -1326,7 +1535,7 @@ mod tests {
         let gs_resolver = |_v: &[u8]| gs;
         let cfg_staged = staged_config(mock.clone() as Arc<dyn StagedSubmitter>, &gs_resolver, &pf_resolver);
 
-        let (row, _) = run_staged_flow_for_observation(
+        let (row, _, tx_rows) = run_staged_flow_for_observation(
             &cfg,
             &update,
             &cfg_staged,
@@ -1344,6 +1553,12 @@ mod tests {
         // even though the flow failed at Tx B.
         assert_eq!(row.flow_total_lamports, Some(2_005_000));
         assert!(mock.recorded_confirms().is_empty());
+        // Tx A wrote a row (success=true); Tx B failed at sendTransaction
+        // with no signature returned, so 0 row for Tx B.
+        assert_eq!(tx_rows.len(), 1);
+        assert_eq!(tx_rows[0].signature, "sig-init");
+        assert_eq!(tx_rows[0].stage, "init_encoded_vaa");
+        assert!(tx_rows[0].success);
     }
 
     #[tokio::test]
@@ -1378,7 +1593,7 @@ mod tests {
         let gs_resolver = |_v: &[u8]| gs;
         let cfg_staged = staged_config(mock.clone() as Arc<dyn StagedSubmitter>, &gs_resolver, &pf_resolver);
 
-        let (row, _) = run_staged_flow_for_observation(
+        let (row, _, tx_rows) = run_staged_flow_for_observation(
             &cfg,
             &update,
             &cfg_staged,
@@ -1394,6 +1609,21 @@ mod tests {
         assert_eq!(row.flow_tx_count, Some(2));
         assert_eq!(row.flow_total_lamports, Some(2_005_000 + 7_500));
         assert_eq!(mock.recorded_confirms(), vec!["sig-tx-b".to_string()]);
+        // Both txs were sent + acknowledged (we have signatures).
+        // Tx B's row stays success=true (the cluster accepted it)
+        // but gets error_class=confirmation_timeout populated; slot
+        // and confirmed_at_unix stay null because we never observed
+        // `confirmed`.
+        assert_eq!(tx_rows.len(), 2);
+        let tx_b = &tx_rows[1];
+        assert_eq!(tx_b.signature, "sig-tx-b");
+        assert!(tx_b.success);
+        assert_eq!(
+            tx_b.error_class.as_deref(),
+            Some("confirmation_timeout")
+        );
+        assert_eq!(tx_b.slot, None);
+        assert_eq!(tx_b.confirmed_at_unix, None);
     }
 
     #[tokio::test]
@@ -1410,7 +1640,7 @@ mod tests {
         let gs_resolver = |_v: &[u8]| gs;
         let cfg_staged = staged_config(mock.clone() as Arc<dyn StagedSubmitter>, &gs_resolver, &pf_resolver);
 
-        let (row, _) = run_staged_flow_for_observation(
+        let (row, _, tx_rows) = run_staged_flow_for_observation(
             &cfg,
             &update,
             &cfg_staged,
@@ -1427,5 +1657,7 @@ mod tests {
         assert_eq!(row.flow_total_lamports, Some(0));
         // Submitter was never called.
         assert_eq!(mock.recorded_init_count(), 0);
+        // Pre-send failure → 0 tx rows.
+        assert!(tx_rows.is_empty());
     }
 }

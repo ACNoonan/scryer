@@ -1049,6 +1049,82 @@ model isolated by crate boundary). CLI lives in `bin/scry`.
 
 ---
 
+## pyth_poster_tx.v1
+
+**Status.** locked + shipped 2026-04-29 (phase 65, item 44 slice
+2c-3 part 3). Companion detail tape to `pyth_poster_post.v1`.
+Mirror tape for the `soothsayer-pyth-poster` daemon's per-Solana-tx
+detail. See `methodology_log.md` "pyth_poster_tx.v1 detail tape —
+2026-04-29 (locked)" for the full row-unit contract + when-to-write
+rules + stage taxonomy.
+
+**Row unit.** **One row per Solana tx the cluster acknowledged.**
+A row exists if and only if the daemon **received a signature
+back** from `sendTransaction`. Pre-send failures (Hermes-blob
+decode, encoder errors, keypair reconstruct failures) and
+send-side failures (`tx_error` preflight rejection,
+`network_after_retries`) write **0 tx rows** — the parent post
+row's `failed_stage` + `error_class` carry the diagnosis.
+Posted observations write 2 tx rows for the typical 2-tx flow
+(Tx A: init+write, Tx B: write_remainder + verify +
+update_price_feed). Confirmation timeouts write 2 rows: Tx A
+`success=true`, Tx B `success=true` with
+`error_class=confirmation_timeout` (the cluster accepted preflight;
+we just didn't see `confirmed` within 60s) — the parent post row's
+`failed_stage=confirm` distinguishes "we sent it but don't know
+the on-chain status" from a clean post. See `methodology_log.md`
+"pyth_poster_tx.v1 detail tape — 2026-04-29 (locked) §When a row
+is written" for the full taxonomy.
+
+**Source.** Solana mainnet/devnet RPC.
+`signature` from `sendTransaction`; `slot` + `confirmed_at_unix`
+from `getSignatureStatuses`; `lamports_paid` from `getTransaction`
+post-confirm. Quota-tight RPC environments may fall back to
+synthetic fee math (base 5000 + priority_fee × CU_limit / 1e6),
+documented in `_source` (`pyth-poster/dev:fee-rpc` vs
+`pyth-poster/dev:fee-synthetic`).
+
+```
+feed_id_hex                       string       // ties back to pyth_poster_post.v1
+hermes_publish_time               i64          // ties back to pyth_poster_post.v1
+encoded_vaa_account               string       // base58 ephemeral encoded-VAA pubkey for this flow
+stage                             string       // 'init_encoded_vaa' | 'write_encoded_vaa' | 'verify_encoded_vaa' | 'update_price_feed'
+                                               //   (no 'confirm' — confirm doesn't submit a tx)
+tx_index_in_flow                  i32          // 1 = Tx A, 2 = Tx B; strictly increasing per observation
+signature                         string       // base58, globally unique on Solana, dedup key
+slot                              i64 nullable // null on confirmation timeout
+confirmed_at_unix                 i64 nullable // null on confirmation timeout
+lamports_paid                     i64 nullable // total lamports for this tx; null on timeout
+success                           bool         // true = cluster accepted preflight; false = TransactionError
+error_class                       string nullable // 'tx_error' | 'network_after_retries' | 'confirmation_timeout' | null
+error_detail                      string nullable
+instruction_count_in_tx           i32          // # of ixs in this tx; typical 3 for Tx A, 5 for Tx B
+```
+
+**Dedup.** `_dedup_key = pyth_poster_tx:{signature}`. Solana
+signatures are globally unique cryptographic hashes; collisions
+imply a true re-submission of the identical tx (rare; the
+store's existing-row-wins semantics handles it correctly).
+
+**Storage.** `dataset/pyth_poster/txs/v1/year=Y/month=M/day=D.parquet`.
+Daily, no key partition. Venue `pyth_poster`, data_type `txs`.
+Partitioned by the parent observation's `hermes_publish_time` (NOT
+the tx's `confirmed_at_unix`) so consumers join post + tx tapes
+by `(feed_id_hex, hermes_publish_time)` and the day-partitions
+line up.
+
+**Why a separate tape, not v2 of pyth_poster_post.** The post
+tape's row unit is one Hermes observation; this tape's row unit
+is one Solana tx. Folding tx-level fields into the post schema
+would either require nested arrays (not in the v0 parquet
+dialect), attempt-shape the dedup_key (breaking the
+observation-shaped semantics), or produce one post row per tx
+(breaking the post tape contract). Two tapes keep both grains
+clean. Per the user's 2026-04-29 contract recommendation under
+the "pyth-poster posting flow" methodology lock.
+
+---
+
 # CEX perps
 
 ## cex_perp_funding_multi.v1

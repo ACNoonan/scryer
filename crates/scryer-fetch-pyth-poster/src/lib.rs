@@ -30,6 +30,7 @@ pub mod mode;
 pub mod onchain;
 pub mod pda;
 pub mod priority_fee;
+pub mod real_submitter;
 pub mod staged_submitter;
 pub mod tx;
 pub mod wormhole_core;

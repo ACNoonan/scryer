@@ -1272,6 +1272,151 @@ landed; phase 64 is the authoritative number going forward
 
 ---
 
+## pyth_poster_tx.v1 detail tape — 2026-04-29 (locked)
+
+Companion to `pyth_poster_post.v1` (see "Write-side daemon
+schemas — 2026-04-28 (locked)" + "pyth-poster posting flow —
+2026-04-29 (locked)"). The post tape captures **one row per
+upstream Hermes observation**; this tape captures **one row per
+Solana tx the daemon actually submitted**. Together they let
+consumers answer "did this observation post?" via the post tape
+and "what bytes hit the chain when it did?" via the tx tape,
+without overloading the post tape's observation-shaped grain.
+
+### When a row is written
+
+A row in `pyth_poster_tx.v1` exists if and only if the daemon
+**received a signature back** from `sendTransaction` for that tx
+(i.e., the cluster acknowledged accepting the bytes). Concretely:
+
+- **Posted observations** write 2 tx rows (Tx A: init+write,
+  Tx B: write_remainder+verify+update_price_feed) for the
+  typical 2-tx flow. Larger VAAs requiring extra chunked writes
+  (Tx C / D) would write more rows — the daemon's `tx_count`
+  for an observation matches the parent post row's `flow_tx_count`.
+- **Pre-send failures** (Hermes-blob decode failure, instruction
+  encoder error, keypair reconstruct failure, feed-id parse failure)
+  write **0 tx rows** — no tx was ever signed or sent. The parent
+  post row's `failed_stage` carries the diagnosis.
+- **Send-side failures** (`RpcError::TransactionError` —
+  preflight rejection — and `network_after_retries` — transport
+  exhausted before any sig was returned) also write **0 tx rows**.
+  We never received a signature from the RPC, so there is no
+  on-chain identifier to dedup against and a synthetic sig would
+  be misleading. The parent post row's `failed_stage` +
+  `error_class` carry the diagnosis.
+- **Tx B failures after Init succeeded** write 1 tx row (Tx A
+  `success=true`); Tx B's row is omitted per the rule above.
+- **Confirmation timeouts** write 2 rows: Tx A `success=true`,
+  Tx B `success=true` (the cluster accepted the tx; we just
+  didn't observe `confirmed` within the timeout) with
+  `error_class=confirmation_timeout` and
+  `slot`/`confirmed_at_unix`/`lamports_paid` left null. The parent
+  post row's `failed_stage=confirm` distinguishes "we sent it but
+  don't know the on-chain status" from a clean post.
+
+The "send-side failures write 0 tx rows" rule is a load-bearing
+design choice: it keeps the tx tape's signature-uniqueness
+invariant intact (a true re-submission of a previously-rejected
+tx with a fresh blockhash is a new sig, distinct row) and avoids
+introducing synthetic-signature placeholders that would corrupt
+SQL joins. Operators who need send-side failure diagnostics read
+the post tape's `failed_stage` + `error_class` columns; the tx
+tape is for accepted-by-cluster txs only.
+
+### Schema columns
+
+```
+feed_id_hex                       string       // ties back to pyth_poster_post.v1
+hermes_publish_time               i64          // ties back to pyth_poster_post.v1
+encoded_vaa_account               string       // base58 — the ephemeral encoded-VAA pubkey for this flow
+stage                             string       // 'init_encoded_vaa' | 'write_encoded_vaa' | 'verify_encoded_vaa' | 'update_price_feed'
+                                               //   (no 'confirm' — confirm doesn't submit a tx)
+tx_index_in_flow                  i32          // 1 = Tx A, 2 = Tx B (for typical 2-tx flow); strictly increasing per observation
+signature                         string       // base58 — globally unique on Solana, used as the dedup key
+slot                              i64 nullable // confirmed slot; null on confirmation timeout
+confirmed_at_unix                 i64 nullable // null on confirmation timeout
+lamports_paid                     i64 nullable // total lamports paid for this tx; null on timeout (getTransaction not yet observed)
+success                           bool         // true = cluster accepted (preflight passed); false = TransactionError
+error_class                       string nullable // 'tx_error' | 'network_after_retries' | 'confirmation_timeout'; null on success
+error_detail                      string nullable // truncated free-form string; not for machine parsing
+instruction_count_in_tx           i32          // # of ixs packed into this tx; e.g. 5 for Tx B happy-path
+_schema_version                   string       // 'pyth_poster_tx.v1'
+_fetched_at                       i64
+_source                           string       // 'pyth-poster/dev' | 'pyth-poster/prod'
+_dedup_key                        string       // = pyth_poster_tx:{signature}
+```
+
+### Stage taxonomy
+
+Stage values mirror `pyth_poster_post::v1::failed_stage::*` constants
+**minus `confirm`**, since confirm does not submit a tx (it polls
+`getSignatureStatuses`). Today the typical 2-tx flow produces two
+distinct stage values:
+
+- Tx A → `stage=init_encoded_vaa` (covers create_account +
+  init_encoded_vaa + write_encoded_vaa(idx=0) bundled in one tx).
+- Tx B → `stage=update_price_feed` (covers ComputeBudget x2 +
+  write_encoded_vaa(remainder) + verify_encoded_vaa_v1 +
+  update_price_feed bundled in one tx).
+
+If a future enhancement splits the flow into more granular txs
+(e.g. for very large VAAs requiring a third tx of pure
+write_encoded_vaa), the stage values `write_encoded_vaa` and
+`verify_encoded_vaa` become possible — the schema accommodates
+this without bumping.
+
+### Dedup
+
+`_dedup_key = pyth_poster_tx:{signature}`. Solana signatures are
+globally unique (cryptographic 64-byte hash of the tx bytes), so
+re-runs against the same observation cannot collide with prior
+rows; a true re-submission of the same tx (rare but possible if
+the daemon resumes mid-flow) would dedup correctly.
+
+### Storage
+
+`dataset/pyth_poster/txs/v1/year=Y/month=M/day=D.parquet`. Daily,
+no key partition (consistent with `pyth_poster_post.v1`'s shape).
+Venue `pyth_poster`, data_type `txs`.
+
+### Source
+
+Solana mainnet/devnet RPC. Specifically: signatures + slots from
+`sendTransaction` + `getSignatureStatuses` + `getTransaction`.
+Lamports-paid resolved via `getTransaction` post-confirm; on
+quota-tight RPC environments the daemon may fall back to synthetic
+fee math (base 5000 + priority fee × CU limit / 1e6) and document
+that in `_source` (`pyth-poster/dev:fee-synthetic` vs
+`pyth-poster/dev:fee-rpc`). Synthetic-fee fallback is operational,
+not architectural — both paths produce semantically the same row.
+
+### Why a separate tape and not v2 of pyth_poster_post
+
+Per the user's 2026-04-29 contract recommendation:
+
+> If you later decide you need tx-level analytics, add a separate
+> detail tape like pyth_poster_tx.v1 instead of overloading the
+> mirror tape.
+
+The post tape's row unit is **one Hermes observation**; the tx
+tape's row unit is **one Solana tx**. Folding tx-level fields
+into the post schema would either (a) require nested arrays on
+the post row (not supported by the parquet dialect locked at v0,
+which uses LargeUtf8 + Int64/Float64), (b) attempt-shape the
+dedup_key (breaking the observation-shaped semantics), or (c)
+produce one post row per tx (breaking the post tape's "one row
+per observation the daemon chose to act on" contract). Two tapes
+keep both grains clean.
+
+### Decision-log row
+
+Lands with phase 65 (the RealStagedSubmitter + this tape's
+implementation; funded devnet smoke deferred to operator-side
+post-merge run).
+
+---
+
 ## Backed NAV strike tape — 2026-04-29 (locked)
 
 ### Purpose

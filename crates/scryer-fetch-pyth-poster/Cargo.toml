@@ -24,6 +24,7 @@ sha2 = "0.10"
 borsh = { version = "1", features = ["derive"] }
 solana-sdk = "2"
 solana-client = "2"
+solana-transaction-status = "2"
 pyth-min = "0.1"
 
 [features]

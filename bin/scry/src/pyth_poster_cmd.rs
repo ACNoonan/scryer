@@ -1,20 +1,26 @@
 //! `scry pyth-poster` — write-side daemon for Pyth equity feeds.
 //!
-//! Slice 2 scope: `--once` end-to-end works in `--mode dev --dry-run`.
+//! Phase-65 scope: `--once` end-to-end works in `--mode dev` for both
+//! `--dry-run` (DryRunStagedSubmitter — emits a per-stage
+//! would-have-sent trace, no signing, no RPC writes) and the real
+//! path (RealStagedSubmitter — signs Tx A + Tx B with the loaded
+//! dev keypair and submits via solana-client per the locked
+//! retry/confirmation semantics).
+//!
 //! Each invocation:
 //!
 //! 1. Validates `--mode` + `--rpc-url` per the methodology lock.
-//! 2. Loads the dev keypair (file at `0o600`) just to fail-fast on
-//!    misconfigured credentials — even in dry-run, since prod-mode
-//!    deploys go through the same path.
+//! 2. Loads the dev keypair (file at `0o600`).
 //! 3. Fetches the latest signed Hermes update for each configured
 //!    feed.
-//! 4. With `--dry-run`, captures `submit_failed` rows with
-//!    `error_class=dry_run`. Without `--dry-run`, slice 2c adds the
-//!    real Solana submit; slice 2 currently rejects this with a
-//!    clear error.
-//! 5. Writes the mirror tape to
-//!    `dataset/pyth_poster/posts/v1/year=Y/month=M/day=D.parquet`.
+//! 4. Runs the multi-stage push-oracle flow per
+//!    `methodology_log.md` "pyth-poster posting flow — 2026-04-29
+//!    (locked)" via the picked submitter.
+//! 5. Writes `pyth_poster_post.v1` to
+//!    `dataset/pyth_poster/posts/v1/year=Y/month=M/day=D.parquet`
+//!    + `pyth_poster_tx.v1` to
+//!    `dataset/pyth_poster/txs/v1/year=Y/month=M/day=D.parquet`
+//!    (one row per cluster-acknowledged Solana tx).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,6 +33,7 @@ use scryer_fetch_pyth_poster::{
         parse_feed_id_hex, price_update_pda, receiver_config_pda, receiver_treasury_pda,
         wormhole_core_program_id,
     },
+    real_submitter::{FeeMode, RealRpcOps, RealStagedSubmitter, RealStagedSubmitterConfig, RpcOps},
     staged_submitter::{DryRunStagedSubmitter, StagedSubmitter},
     DevKeypair, DryRunSubmitter, FeedConfig, FeedDefaults, HermesClient, RunMode, TxSubmitter,
 };
@@ -71,12 +78,27 @@ pub struct PythPosterArgs {
     #[arg(long, default_value_t = true)]
     once: bool,
 
-    /// Skip the actual on-chain submit; record `submit_failed` rows
-    /// with `error_class=dry_run`. Required while slice 2c is
-    /// outstanding — non-dry-run runs are rejected with an error
-    /// pointing at the Decision-log row that lands the real submitter.
+    /// Run through the staged dry-run path (no signing, no RPC
+    /// writes) and emit a per-stage would-have-sent trace.
+    /// **Default ON** — the safer default for a write-side daemon.
+    /// Pass `--no-dry-run` to opt INTO the real
+    /// `RealStagedSubmitter` path that signs + sends via
+    /// solana-client per the locked retry/confirmation semantics.
+    /// **Funded-devnet validation of the real path is the operator's
+    /// responsibility** — Claude (the agent that wrote the code)
+    /// cannot fund a keypair, so the first end-to-end real-path
+    /// success has to come from a human-run smoke against devnet
+    /// with a funded keypair.
     #[arg(long, default_value_t = false)]
     dry_run: bool,
+
+    /// Opt INTO the real `RealStagedSubmitter` path. Disjoint from
+    /// `--dry-run`. If neither flag is set, the daemon runs the
+    /// staged dry-run path (safer default for a write-side daemon).
+    /// Setting `--no-dry-run` REQUIRES the operator to have funded
+    /// the dev keypair on the target cluster.
+    #[arg(long, default_value_t = false)]
+    no_dry_run: bool,
 
     /// Source for the priority-fee unit price. `tape` derives from
     /// the latest `jito_tip_floor.v1` 75th-pct in the dataset (per
@@ -117,6 +139,24 @@ pub struct PythPosterArgs {
     /// register a custom shard later via a methodology entry.
     #[arg(long, default_value_t = 0)]
     push_oracle_shard_id: u16,
+
+    /// Lamports-paid resolution mode for the per-tx detail tape's
+    /// `lamports_paid` column. `rpc` (default, most accurate) calls
+    /// `getTransaction` once per stage post-confirm; `synthetic`
+    /// computes from priority-fee × CU-limit (zero RPC overhead).
+    /// Surfaced in `_source` as `pyth-poster/<env>:fee-rpc` or
+    /// `:fee-synthetic`. Pick `synthetic` when the operator's RPC
+    /// quota is tight.
+    #[arg(long, default_value = "rpc")]
+    fee_mode: String,
+
+    /// Encoded-VAA account rent-exempt funding in lamports. Real
+    /// daemons should call `getMinimumBalanceForRentExemption` once
+    /// at startup against the cluster; the static default
+    /// (2_000_000 lamports = 0.002 SOL) is sized for ~1 KB Pyth
+    /// equity VAAs and is conservative.
+    #[arg(long, default_value_t = 2_000_000)]
+    encoded_vaa_account_lamports: u64,
 }
 
 pub async fn run_pyth_poster(args: PythPosterArgs) -> Result<()> {
@@ -135,17 +175,25 @@ pub async fn run_pyth_poster(args: PythPosterArgs) -> Result<()> {
         ));
     }
 
-    if !args.dry_run {
+    let fee_mode = match args.fee_mode.as_str() {
+        "rpc" => FeeMode::Rpc,
+        "synthetic" => FeeMode::Synthetic,
+        other => {
+            return Err(anyhow!(
+                "--fee-mode must be `rpc` or `synthetic`, got `{other}`"
+            ));
+        }
+    };
+
+    if args.dry_run && args.no_dry_run {
         return Err(anyhow!(
-            "real on-chain submit not yet implemented — pass --dry-run for now. \
-             Phase 63 part 2 (current) ships the staged push-oracle flow + \
-             would-have-sent dry-run trace + MockSubmitter coverage; the \
-             RealStagedSubmitter (signs + sends via solana-client with the \
-             locked retry/confirmation semantics) and the funded-devnet smoke \
-             land in phase 63 part 3. See methodology_log.md \
-             \"pyth-poster posting flow — 2026-04-29 (locked)\"."
+            "--dry-run and --no-dry-run are disjoint; pass at most one. \
+             Default (neither set) is the staged dry-run path."
         ));
     }
+    // Resolved mode: real iff `--no-dry-run` was set; dry-run otherwise
+    // (whether `--dry-run` was set explicitly or omitted).
+    let run_real = args.no_dry_run;
 
     // Load + validate the keypair even in dry-run, so misconfig fails
     // at the same place it would in a real run.
@@ -200,10 +248,11 @@ pub async fn run_pyth_poster(args: PythPosterArgs) -> Result<()> {
 
     let _defaults = FeedDefaults::default();
     // Legacy single-shot DryRunSubmitter is kept on the field but
-    // ignored when `staged_flow = Some(...)`. Phase 63 part 2 (this
-    // commit) routes --dry-run through the new staged dry-run so the
-    // operator gets a per-stage would-have-sent trace.
+    // ignored when `staged_flow = Some(...)`.
     let submitter: Arc<dyn TxSubmitter> = Arc::new(DryRunSubmitter);
+    // Both staged paths are constructed up front so the lifetime
+    // bookkeeping for `&staged_flow_cfg` below is simple. Only one
+    // of them gets used per iteration; the other is dropped.
     let staged_dry_run: Arc<DryRunStagedSubmitter> = Arc::new(DryRunStagedSubmitter::new());
     let staged_dry_run_for_trait: Arc<dyn StagedSubmitter> = staged_dry_run.clone();
 
@@ -310,8 +359,36 @@ pub async fn run_pyth_poster(args: PythPosterArgs) -> Result<()> {
         );
         pda
     };
+    // Build the right staged submitter for the run. --dry-run uses
+    // `DryRunStagedSubmitter` (no signing, no RPC); --no-dry-run
+    // uses `RealStagedSubmitter` wired to a real
+    // `solana_client::nonblocking::rpc_client::RpcClient`.
+    let staged_submitter: Arc<dyn StagedSubmitter> = if !run_real {
+        staged_dry_run_for_trait.clone()
+    } else {
+        // Reconstruct a `solana_sdk::Keypair` from the loaded
+        // dev-keypair's 64-byte secret bytes. The `DevKeypair` only
+        // exposes the bytes (it's deliberately solana-sdk-free); the
+        // RealStagedSubmitter holds the full Keypair for signing.
+        let payer_kp = solana_sdk::signature::Keypair::try_from(&kp.secret_bytes()[..])
+            .map_err(|e| anyhow!("payer keypair reconstruct failed: {e}"))?;
+        let payer = Arc::new(payer_kp);
+        let real_rpc_client = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new(
+            args.rpc_url.clone(),
+        ));
+        let rpc_ops: Arc<dyn RpcOps> = Arc::new(RealRpcOps::new(
+            real_rpc_client,
+            solana_sdk::commitment_config::CommitmentConfig::confirmed(),
+        ));
+        let mut real_cfg = RealStagedSubmitterConfig::default();
+        real_cfg.fee_mode = fee_mode;
+        let real = Arc::new(RealStagedSubmitter::new(payer, rpc_ops, real_cfg));
+        let real_for_trait: Arc<dyn StagedSubmitter> = real;
+        real_for_trait
+    };
+
     let staged_flow_cfg = StagedFlowConfig {
-        submitter: staged_dry_run_for_trait.clone(),
+        submitter: staged_submitter.clone(),
         shard_id,
         treasury_id,
         compute_unit_limit: 600_000,
@@ -320,7 +397,7 @@ pub async fn run_pyth_poster(args: PythPosterArgs) -> Result<()> {
         receiver_treasury: receiver_treasury_addr,
         guardian_set_resolver: &guardian_set_resolver,
         price_feed_pda_resolver: &pf_resolver_for_staged,
-        encoded_vaa_account_lamports: 2_000_000, // ~rent-exempt for ~1 KB VAA + header
+        encoded_vaa_account_lamports: args.encoded_vaa_account_lamports,
         priority_fee_micro_lamports_per_cu: priority_fee,
     };
 
@@ -343,23 +420,25 @@ pub async fn run_pyth_poster(args: PythPosterArgs) -> Result<()> {
         .context("Daemon::run_once")?;
 
     // Drain + log the dry-run trace per stage so the operator can
-    // audit exactly what bytes would have hit the chain. Each stage
-    // entry shows the program_id + ix-data length for every
-    // instruction the stage would have submitted.
-    let trace = staged_dry_run.drain_trace();
-    if !trace.is_empty() {
-        tracing::info!(stages = trace.len(), "pyth-poster dry-run staged trace");
-        for (i, entry) in trace.iter().enumerate() {
-            for (j, ix) in entry.instructions.iter().enumerate() {
-                tracing::info!(
-                    stage_idx = i,
-                    stage = ?entry.stage,
-                    ix_idx = j,
-                    program_id = %ix.program_id,
-                    accounts = ix.accounts.len(),
-                    data_len = ix.data.len(),
-                    "would-have-sent"
-                );
+    // audit exactly what bytes would have hit the chain. The real
+    // submitter doesn't populate the trace (it actually sent the
+    // bytes), so this is a no-op on --no-dry-run.
+    if !run_real {
+        let trace = staged_dry_run.drain_trace();
+        if !trace.is_empty() {
+            tracing::info!(stages = trace.len(), "pyth-poster dry-run staged trace");
+            for (i, entry) in trace.iter().enumerate() {
+                for (j, ix) in entry.instructions.iter().enumerate() {
+                    tracing::info!(
+                        stage_idx = i,
+                        stage = ?entry.stage,
+                        ix_idx = j,
+                        program_id = %ix.program_id,
+                        accounts = ix.accounts.len(),
+                        data_len = ix.data.len(),
+                        "would-have-sent"
+                    );
+                }
             }
         }
     }

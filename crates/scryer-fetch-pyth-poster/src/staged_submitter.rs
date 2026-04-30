@@ -118,9 +118,21 @@ pub struct FlowInputs {
     pub price_feed_account: Pubkey,
     /// Encoded-VAA account the flow writes the VAA into. The
     /// daemon generates a fresh ephemeral keypair per observation;
-    /// only the pubkey crosses the trait boundary here so the
-    /// non-real impls don't need keypair access.
+    /// `encoded_vaa` is the pubkey + `encoded_vaa_keypair_bytes` is
+    /// the secret-key bytes (raw 64-byte ed25519 expanded format,
+    /// the same shape `solana_sdk::signature::Keypair::to_bytes`
+    /// emits). DryRun + Mock impls only consume the pubkey; the
+    /// real impl reconstructs the Keypair from the bytes to sign
+    /// Tx A's `create_account` instruction (the new account must
+    /// sign its own creation).
     pub encoded_vaa: Pubkey,
+    /// 64-byte ed25519 expanded secret key for the ephemeral
+    /// encoded-VAA keypair. DryRun + Mock impls ignore this; the
+    /// real impl reconstructs the Keypair via
+    /// `Keypair::from_bytes(&encoded_vaa_keypair_bytes)`. Owned
+    /// (not borrowed) so the trait boundary doesn't need a
+    /// lifetime parameter.
+    pub encoded_vaa_keypair_bytes: [u8; 64],
     /// Receiver `config` PDA (`[b"config"]`).
     pub receiver_config: Pubkey,
     /// Receiver `treasury` PDA (`[b"treasury", &[treasury_id]]`).
@@ -600,6 +612,10 @@ mod tests {
             },
             price_feed_account: Pubkey::new_unique(),
             encoded_vaa: Pubkey::new_unique(),
+            // Synthetic 64-byte placeholder; the DryRun + Mock impls
+            // never decode it. RealStagedSubmitter tests use a
+            // freshly-generated keypair via `helpers::fresh_flow_inputs`.
+            encoded_vaa_keypair_bytes: [0u8; 64],
             receiver_config: Pubkey::new_unique(),
             receiver_treasury: Pubkey::new_unique(),
             guardian_set: Pubkey::new_unique(),
