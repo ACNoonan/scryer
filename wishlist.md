@@ -3,7 +3,7 @@
 Forward-looking work log for scryer fetchers, schemas, and daemons.
 "What's next, what's blocked, what's gated."
 
-Last updated: 2026-04-29 (evening — added item 49 + phase 66 cadence audit + chainlink launchd plist).
+Last updated: 2026-05-01 (item 49a code shipped phase 71 — Pyth Benchmarks backfill; ≥90d operator-side run pending).
 
 ## How this file relates to the others
 
@@ -52,7 +52,7 @@ don't re-propose.
 | 46 | Done — phase 69 (`marginfi_reserve.v1` schema + fetcher + `scry solana marginfi-reserves` CLI; 422 mainnet Banks live-validated; zero direct xStock Banks today — xStock exposure routes via Kamino-position banks) |
 | 47 | Locked, **not yet shipped** — Priority 0 paper-3 event panel (full entry below) |
 | 48 | Done — phase 67 (`decode_v11` + nullable `bid_price`/`ask_price`/`mid_price`/`last_traded_price` columns on `chainlink_data_streams.v1`; v11 reports now fully decode rather than landing as cadence-only stubs) |
-| 49 | First slice shipped — phase 66 (cadence audit + chainlink launchd plist + CLI `--once`); sub-items 49a (Pyth Hermes ≥90d) / 49b (Kamino Scope ≥90d) / 49c (RedStone permaweb ≥90d) / 49d (chainlink ≥90d run + soothsayer consumer cutover) outstanding (full entry below) |
+| 49 | First slice shipped — phase 66 (cadence audit + chainlink launchd plist + CLI `--once`); 49a code shipped phase 71 (Pyth Benchmarks backfill, ≥90d run pending operator-side); sub-items 49b (Kamino Scope ≥90d) / 49c (RedStone permaweb ≥90d) / 49d (chainlink ≥90d run + soothsayer consumer cutover) outstanding (full entry below) |
 
 ---
 
@@ -179,19 +179,46 @@ extension** (the forward-coverage half of item 49). Sub-items
 days, escalate to paid Helius tier rather than silently truncating.
 Same applies to any other RPC where retention is the bottleneck.
 
-### 49a. Pyth Hermes ≥90d historical backfill `[methodology-entry-needed]`
+### 49a. Pyth Hermes ≥90d historical backfill — code shipped phase 71
 
-Extend `pyth/oracle_tape/v1` backwards via Hermes
-`/v2/updates/price/{publish_time}` benchmarks endpoint. Hermes
-typically retains ~6 months. New `scry pyth backfill --start --end
-[--symbols ALL]` subcommand in `bin/scry/src/pyth_cmd.rs`; underlying
-fetcher is REST-only and the existing `scryer-fetch-pyth::poll_once`
-already has the right per-feed shape — backfill iterates publish_time
-stamps at the 60s native cadence. Schema unchanged (`pyth.v1`);
-`_source = "pyth:hermes:benchmarks"` distinguishes from the live
-`pyth:hermes:launchd` rows.
+**Code: shipped 2026-05-01 (phase 71).** Methodology entry "Pyth
+Benchmarks historical backfill — 2026-05-01 (locked)" pins the
+audit findings + endpoint choice + bucket-alignment design + 4 req/s
+sustained rate-ceiling. New `scry pyth backfill --start --end
+[--feeds] [--rate-limit-ms] [--source]` subcommand + new
+`poll_window` async fn in `scryer-fetch-pyth` with retry-on-429
+exponential backoff. **Empirical reframe**: the wishlist's stated
+plan ("Hermes typically retains 6 months") was wrong on every front
+— Hermes single-ts 404s, single-ts Benchmarks 404s, Pythnet RPC
+retention is 22h (not 90d), TradingView shim covers regular session
+only. The actual viable path is `benchmarks.pyth.network/v1/updates/
+price/{ts}/{interval}` (range form, interval up to 60s) with all 32
+feed_ids batched in one call. Retention ≥365 days verified.
 
-**Effort.** ~half-day.
+**Run pending (operator-side).** ~9h wall-clock at the locked 4 req/s
+ceiling × 32 feeds × ~129K buckets. Operator triggers via:
+
+```text
+scry pyth backfill --start <90d-ago-utc-midnight> \
+                   --end <yesterday-utc-midnight> \
+                   --rate-limit-ms 250
+```
+
+Re-running over an already-backfilled window dedups cleanly on
+`pyth:{symbol}:{session}:{poll_ts}`.
+
+**Coverage shape (locked 2026-05-01)**: Pyth's 4-session-feed design
+constrains historical depth — Sat 04:00 - Sun 23:00 ET is empty on
+Pyth (intrinsic gap, not a backfill artifact; same for forward
+poll). Active windows: `regular` Mon-Fri 09:30-16:00 ET, `pre`
+04:00-09:30, `post` 16:00-20:00, `on` 20:00-04:00 + Sun 23:00-Mon
+04:00. Paper-1 weekend regime on Pyth covers only Sat-overnight +
+Sun-overnight slices.
+
+Schema unchanged (`pyth.v1`); `_source = "pyth:hermes:benchmarks"`
+distinguishes from live `pyth:hermes:launchd` rows.
+
+Phase row: `docs/phase_log.md` v0.1-phase-71.
 
 ### 49b. Kamino Scope ≥90d historical backfill `[methodology-entry-needed]`
 
