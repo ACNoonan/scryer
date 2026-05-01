@@ -2285,6 +2285,83 @@ deploy) so phase 74 is the next free slot for the fetcher work.
 
 ---
 
+## Done definition — code-shipped vs data-shipped — 2026-05-01 (locked)
+
+### Why this lock exists
+
+A 2026-05-01 audit driven by the xStock quant-work scoping found four
+"Done — shipped in v0.1" entries whose underlying parquet partition
+count at the canonical dataset root was zero:
+
+| wishlist item | phase row | parquet on disk |
+|---|---|---|
+| 24 — `dex_xstock_swaps.v1` | phase 36 | 0 partitions |
+| 45 — `cex_stock_perp_tape.v1` | phases 55 + 57 | 0 partitions |
+| 45 (companion) — `cex_stock_perp_ohlcv.v1` | phases 56 + 57 | 0 partitions |
+| 37 — `backed_nav_strikes.v1` | phase 59 | 0 partitions |
+
+The phase rows are accurate at what they describe — schema crate
+shipped, fetcher crate shipped, CLI subcommand shipped, smoke test
+landed — but a downstream consumer reading the Done index would
+reasonably believe a backfill panel exists, when in fact only the
+plumbing exists. Phase 63 (the CME 2018-2026 backfill) showed the
+right two-row shape for this distinction (phase 38 = schema/fetcher,
+phase 63 = backfill with partition count + bytes + range); the four
+entries above silently fused the two phases.
+
+### Locked policy
+
+A row in the phase-log "Done — shipped in v0.1" index requires **both**:
+
+1. **Code shipped.** Schema crate, fetcher crate, `scry` subcommand,
+   and any consumer-side test the phase declares — all merged.
+2. **Data shipped.** At least one persisted parquet partition at the
+   canonical dataset root (`~/Library/Application Support/scryer/dataset/`
+   or wherever the operator-paths section currently points), covering
+   the canonical date range the phase row declares.
+
+A phase that only ships code is a *code phase*: it gets a Decision-log
+row but does **not** appear in the Done index. It can be promoted to
+the Done index by a later *data phase* row that records the partition
+count, total bytes, and `[start, end)` of the on-disk window — same
+shape phase 63 used for the CME backfill (`11.51M 1m bars across …,
+10,367 daily partitions, 302MB on disk`).
+
+A smoke test (e.g. phase 59's "TSLA $7-spread CEX-cluster-vs-Backed
+at smoke moment") is **not** data-shipped. Smoke tests verify the
+fetcher runs without erroring; they do not constitute a panel that a
+consumer can analyze. Smoke-test rows are recorded in the relevant
+methodology section and the Decision-log row, not the Done index.
+
+### How this applies retroactively
+
+The four entries above are demoted from the Done index to a
+"Code-shipped, data-pending" sub-section of the phase log, with an
+audit note pointing at the 2026-05-01 partition-zero status. Phase
+rows themselves stay unchanged (append-only); the Done index is the
+view that gets corrected. Future backfills of those panels land as
+new phase rows that reference the original code phase and add the
+partition count + bytes + range.
+
+### How this applies going forward
+
+Hard rule #1 in `CLAUDE.md` requires a Decision-log row before
+writing code. This new policy adds: a Done-index row requires *also*
+the data-shipped half. PRs that land schema/fetcher code without a
+backfill must either (a) leave the wishlist item in `wishlist.md`'s
+"Outstanding" section with a note that code is ready, or (b) follow
+up with a data-shipped row in the same or a later phase.
+
+### Decision-log row
+
+Lands as a methodology-only row (no schema, no code). The
+corresponding `docs/phase_log.md` change retitles the index column
+header from "One-line" to make the code-shipped vs data-shipped
+distinction explicit, demotes the four affected rows to the new
+sub-section, and adds an audit note.
+
+---
+
 ## Decision log + Specification log
 
 Both logs moved to `docs/phase_log.md` 2026-04-29. The Decision log is
