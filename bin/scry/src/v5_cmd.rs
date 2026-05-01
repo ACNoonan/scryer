@@ -46,7 +46,7 @@ pub struct TapeArgs {
     /// HTTP request timeout in seconds (Jupiter quote calls).
     #[arg(long, default_value_t = 15)]
     request_timeout_secs: u64,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     /// Venue under `dataset/`. Defaults to `soothsayer_v5` per the
     /// methodology log "Soothsayer venue versioning" rule.

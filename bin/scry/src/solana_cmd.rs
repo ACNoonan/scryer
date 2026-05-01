@@ -36,7 +36,7 @@ pub struct SwapsArgs {
     #[arg(long, env = "HELIUS_API_KEY")]
     helius_api_key: String,
     /// Output dataset root.
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     /// Venue string under `dataset/`. Defaults to
     /// `scryer_store::venue::SOLANA_RAYDIUM_V4`.
@@ -150,7 +150,7 @@ pub struct KaminoLiquidationsArgs {
     /// proxy routing.
     #[arg(long, default_value_t = false)]
     use_get_transaction: bool,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = scryer_store::venue::KAMINO)]
     venue: String,
@@ -249,7 +249,7 @@ pub struct JupiterLendLiquidationsArgs {
     proxy_url: String,
     #[arg(long, env = "HELIUS_API_KEY")]
     helius_api_key: String,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = scryer_store::venue::JUPITER_LEND)]
     venue: String,
@@ -339,7 +339,7 @@ pub struct FluidVaultConfigsArgs {
     symbol_map: Option<PathBuf>,
     #[arg(long, default_value = "http://127.0.0.1:8899/rpc")]
     proxy_url: String,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = scryer_store::venue::JUPITER_LEND)]
     venue: String,
@@ -413,7 +413,7 @@ pub struct KaminoScopeTapeArgs {
     proxy_url: String,
     #[arg(long, default_value = "kamino:scope-tape")]
     source: String,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = scryer_store::venue::KAMINO_SCOPE)]
     venue: String,

@@ -31,7 +31,7 @@ pub struct SwapsArgs {
     #[arg(long)]
     source: Option<String>,
     /// Output dataset root.
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
 }
 
@@ -47,7 +47,7 @@ pub struct TradesArgs {
     pair: String,
     #[arg(long)]
     source: Option<String>,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
 }
 
@@ -94,7 +94,7 @@ pub struct KaminoScopeArgs {
     venue: String,
     #[arg(long)]
     source: Option<String>,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
 }
 
@@ -132,7 +132,7 @@ pub struct PythArgs {
     venue: String,
     #[arg(long)]
     source: Option<String>,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
 }
 
@@ -171,7 +171,7 @@ pub struct V5TapeArgs {
     venue: String,
     #[arg(long)]
     source: Option<String>,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
 }
 
@@ -208,7 +208,7 @@ pub struct RedstoneArgs {
     venue: String,
     #[arg(long)]
     source: Option<String>,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
 }
 
@@ -251,7 +251,7 @@ pub struct YahooArgs {
     /// `import:legacy:yahoo` (uniform across all merged files).
     #[arg(long, default_value = "import:legacy:yahoo")]
     source: String,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
 }
 
@@ -326,7 +326,7 @@ pub struct EarningsArgs {
     venue: String,
     #[arg(long, default_value = "import:legacy:earnings")]
     source: String,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
 }
 
@@ -388,7 +388,7 @@ pub struct BackedArgs {
     venue: String,
     #[arg(long)]
     source: Option<String>,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
 }
 
@@ -425,7 +425,7 @@ pub struct NasdaqHaltsArgs {
     venue: String,
     #[arg(long)]
     source: Option<String>,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
 }
 
@@ -465,7 +465,7 @@ pub struct KrakenFundingArgs {
     venue: String,
     #[arg(long, default_value = "import:legacy:kraken_funding")]
     source: String,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
 }
 

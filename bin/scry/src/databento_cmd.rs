@@ -49,7 +49,7 @@ pub struct IntradayArgs {
     source: String,
     #[arg(long, default_value_t = 120)]
     request_timeout_secs: u64,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = venue::CME)]
     venue: String,
@@ -165,7 +165,7 @@ pub struct EquitiesDailyArgs {
     source: String,
     #[arg(long, default_value_t = 120)]
     request_timeout_secs: u64,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     /// Venue. Default `databento` so this lives separate from the
     /// Stooq-sourced `yahoo` venue (operators can cross-check the

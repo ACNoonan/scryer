@@ -32,7 +32,7 @@ pub struct GtTradesArgs {
     /// HTTP request timeout in seconds.
     #[arg(long, default_value_t = 30)]
     request_timeout_secs: u64,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = scryer_store::venue::GECKOTERMINAL)]
     venue: String,
@@ -122,7 +122,7 @@ pub struct RaydiumPoolMetadataArgs {
     retry_max: u32,
     #[arg(long, default_value_t = 2)]
     retry_delay_secs: u64,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = venue::RAYDIUM)]
     venue: String,
@@ -258,7 +258,7 @@ pub struct GtOhlcvArgs {
     retry_max: u32,
     #[arg(long, default_value_t = 2)]
     retry_delay_secs: u64,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = venue::GECKOTERMINAL)]
     venue: String,

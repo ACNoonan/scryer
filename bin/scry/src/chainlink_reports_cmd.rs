@@ -67,7 +67,7 @@ pub struct ChainlinkReportsArgs {
     /// rows from backfill rows.
     #[arg(long, default_value = "chainlink:data-streams")]
     pub source: String,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     pub dataset: PathBuf,
     /// Venue under `dataset/`. Default `chainlink`.
     #[arg(long, default_value = scryer_store::venue::CHAINLINK)]

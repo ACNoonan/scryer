@@ -19,6 +19,7 @@ use clap::{Parser, Subcommand};
 mod backed_cmd;
 mod cboe_cmd;
 mod cex_funding_cmd;
+mod dataset_default;
 mod cex_stock_perp_cmd;
 mod chainlink_reports_cmd;
 mod databento_cmd;

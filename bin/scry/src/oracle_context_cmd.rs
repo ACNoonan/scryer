@@ -52,7 +52,7 @@ pub struct OracleContextArgs {
     #[arg(long, default_value = "tape-join")]
     source: String,
 
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
 
     #[arg(long, default_value = venue::ORACLE_CONTEXT)]

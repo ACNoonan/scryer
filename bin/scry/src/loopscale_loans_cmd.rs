@@ -39,7 +39,7 @@ pub struct LoopscaleLoansArgs {
     #[arg(long, default_value = "rpc:getProgramAccounts")]
     source: String,
 
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
 
     /// Venue for parent + child output.

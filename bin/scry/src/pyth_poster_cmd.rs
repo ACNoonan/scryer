@@ -115,7 +115,7 @@ pub struct PythPosterArgs {
     /// Dataset root for both the priority-fee tape read and the
     /// poster's mirror-tape write. Reads `dataset/jito/tip_floor/v1/...`
     /// and writes `dataset/pyth_poster/posts/v1/...`.
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
 
     /// Disable the on-chain skip-if-similar pre-read. Default: gate

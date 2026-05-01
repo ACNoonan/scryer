@@ -49,7 +49,7 @@ pub struct Edgar8kArgs {
     retry_delay_secs: u64,
     #[arg(long, default_value_t = 200)]
     rate_limit_ms: u64,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = venue::SEC)]
     venue: String,

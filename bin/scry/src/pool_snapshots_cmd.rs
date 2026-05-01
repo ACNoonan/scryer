@@ -35,7 +35,7 @@ pub struct PoolSnapshotsArgs {
     /// `_source` label stamped on every emitted row.
     #[arg(long, default_value = "rpc:getTransaction")]
     source: String,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     /// Venue under which snapshots are written. Defaults to
     /// `solana_raydium_v4` so swaps + snapshots co-locate per pool.

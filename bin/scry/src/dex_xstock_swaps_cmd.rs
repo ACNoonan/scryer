@@ -60,7 +60,7 @@ pub struct DexXstockSwapsArgs {
     source: String,
     #[arg(long, default_value_t = 30)]
     request_timeout_secs: u64,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     /// Venue for output. Default: `dex_xstock` per the methodology
     /// (cross-DEX prints live under their own venue).

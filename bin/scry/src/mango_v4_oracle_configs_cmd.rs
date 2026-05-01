@@ -35,7 +35,7 @@ pub struct MangoV4OracleConfigsArgs {
     source: String,
     #[arg(long, default_value_t = 60)]
     request_timeout_secs: u64,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = venue::MANGO_V4)]
     venue: String,

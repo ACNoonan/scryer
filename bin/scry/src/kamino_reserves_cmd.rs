@@ -22,7 +22,7 @@ pub struct ReservesArgs {
     /// `_source` stamped on every emitted row.
     #[arg(long, default_value = "rpc:getProgramAccounts")]
     source: String,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     /// Venue under which reserves are written. Defaults to `kamino` so
     /// snapshots co-locate with Phase-17 kamino_liquidations data.

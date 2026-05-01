@@ -35,7 +35,7 @@ pub struct BackedArgs {
     retry_max: u32,
     #[arg(long, default_value_t = 2)]
     retry_delay_secs: u64,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = venue::BACKED)]
     venue: String,
@@ -77,7 +77,7 @@ pub struct NasdaqHaltsArgs {
     retry_max: u32,
     #[arg(long, default_value_t = 2)]
     retry_delay_secs: u64,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = venue::NASDAQ)]
     venue: String,

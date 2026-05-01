@@ -34,7 +34,7 @@ pub struct FreshnessArgs {
     /// canonical operator path (`~/Library/Application Support/
     /// scryer/dataset`); the `./dataset` default exists for ad-hoc
     /// runs against the workspace test data.
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
 
     /// Append a single-line CSV record (`ts_rfc3339,tape,age_secs,

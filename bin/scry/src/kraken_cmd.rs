@@ -82,7 +82,7 @@ pub struct TradesArgs {
     pub request_timeout_secs: u64,
 
     /// Output dataset root.
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     pub dataset: PathBuf,
 
     /// Venue string. Almost never overridden; pinned for the

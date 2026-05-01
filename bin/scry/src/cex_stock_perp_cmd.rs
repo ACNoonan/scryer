@@ -70,7 +70,7 @@ pub struct TapeArgs {
     /// Inter-call delay within a venue's symbol loop.
     #[arg(long, default_value_t = 250)]
     rate_limit_ms: u64,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = venue::CEX_STOCK_PERP)]
     venue: String,
@@ -363,7 +363,7 @@ pub struct OhlcvArgs {
     retry_delay_secs: u64,
     #[arg(long, default_value_t = 250)]
     rate_limit_ms: u64,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = venue::CEX_STOCK_PERP)]
     venue: String,
@@ -701,7 +701,7 @@ pub struct BackfillArgs {
     /// Inter-call delay within the chunk loop (milliseconds).
     #[arg(long, default_value_t = 250)]
     rate_limit_ms: u64,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = venue::CEX_STOCK_PERP)]
     dataset_venue: String,

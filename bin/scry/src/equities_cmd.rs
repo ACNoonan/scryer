@@ -64,7 +64,7 @@ pub struct BarsArgs {
     /// has a daily-hits limit on free tier; the default is gentle.
     #[arg(long, default_value_t = 500)]
     rate_limit_ms: u64,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = venue::YAHOO)]
     venue: String,
@@ -103,7 +103,7 @@ pub struct EarningsArgs {
     /// 60 calls/min — default 1100ms keeps us safely under.
     #[arg(long, default_value_t = 1100)]
     rate_limit_ms: u64,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = venue::YAHOO)]
     venue: String,
@@ -149,7 +149,7 @@ pub struct CorpActionsArgs {
     /// keeps a small safety margin.
     #[arg(long, default_value_t = 1100)]
     rate_limit_ms: u64,
-    #[arg(long, default_value = "./dataset")]
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = venue::YAHOO)]
     venue: String,
