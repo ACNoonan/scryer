@@ -1,15 +1,19 @@
 # scryer launchd plists
 
 This directory is the unified **runtime configuration source-of-truth**
-for everything scheduled on the data-pipeline Mac. It has three
+for everything scheduled on the data-pipeline Mac. It has four
 sub-categories:
 
 - **Top level** — scryer-fetch jobs (proxy + tape collectors). Code
-  lives in this repo.
+  lives in this repo. `scryer deploy` (phase 70-D) auto-installs
+  these into `~/Library/LaunchAgents/` and bootstraps them.
 - **`cataloged/`** — non-fetch jobs (derivation pipelines, reports,
   one-off cleanup) whose code lives in other repos but whose schedule
   belongs in scryer's view of the machine. See
   `cataloged/README.md`.
+- **`deferred/`** — scryer-owned plists that are ready to ship but
+  gated on an external prerequisite (RPC sponsorship, funded wallet,
+  etc.). Excluded from `scryer deploy`. See `deferred/README.md`.
 - **`retired/`** — superseded plists, kept for migration audit.
   See `retired/README.md`.
 
@@ -151,6 +155,21 @@ The RedStone Python is already stopped (the gap that triggered Phase 22),
 so the scryer plist is the sole collector immediately on load.
 
 ## After a code change
+
+The one-command path (phase 70-D):
+
+```bash
+scryer deploy
+```
+
+This rebuilds both binaries, copies them into `~/Library/Application
+Support/scryer/bin/`, syncs every `ops/launchd/com.adamnoonan.scryer.*.plist`
+into `~/Library/LaunchAgents/`, reloads the KeepAlive daemons (proxy,
+portal-server) so they pick up the new binary, and bootstraps any
+newly-added tape plists. Idempotent — running it when nothing has
+changed is a no-op.
+
+The manual equivalent, if you ever need to do one piece in isolation:
 
 ```bash
 cargo build --release -p scry-bin -p scryer-proxy-bin

@@ -10,6 +10,9 @@
 # Commands:
 #   up              Refresh UI bundle then bootstrap any missing scryer plists
 #   down            Bootout all loaded scryer plists
+#   deploy          Build release bins, copy to ~/Library/Application Support,
+#                   sync plists from ops/launchd/ to ~/Library/LaunchAgents/,
+#                   reload KeepAlive daemons. One command per phase ship.
 #   status          Show launchctl state for every scryer plist
 #   open            Open the portal in your default browser
 #   ui-refresh      Rebuild the React UI and rsync to the install location
@@ -135,6 +138,116 @@ cmd_logs() {
   exec tail -F "${existing[@]}"
 }
 
+cmd_deploy() {
+  # Phase 70-D — one-command phase-ship deploy.
+  #
+  # Workflow steps:
+  #   1. cargo build --release for both bins
+  #   2. Copy bins to ~/Library/Application Support/scryer/bin/
+  #   3. Sync top-level repo plists into ~/Library/LaunchAgents/
+  #      (cataloged/ and retired/ subdirs are intentionally excluded —
+  #      cataloged/ contains non-scryer-fetch plists that scryer's view
+  #      tracks but doesn't own, and retired/ is the migration audit
+  #      trail).
+  #   4. Reload KeepAlive daemons (proxy, portal-server) so they pick
+  #      up the new binary. Tape plists fire on StartInterval and
+  #      re-exec the binary on every tick — they auto-pick-up without
+  #      a reload.
+  local bin_dir="$SUPPORT_ROOT/bin"
+  local plist_src_dir="$REPO_ROOT/ops/launchd"
+  local target_dir="$REPO_ROOT/target/release"
+
+  echo "==> deploy: build"
+  ( cd "$REPO_ROOT" && cargo build --release -p scry-bin -p scryer-proxy-bin )
+
+  echo "==> deploy: copy binaries to $bin_dir"
+  mkdir -p "$bin_dir"
+  for bin in scry scryer-proxy; do
+    if [[ ! -x "$target_dir/$bin" ]]; then
+      echo "  [fail] $bin not found at $target_dir/$bin (build failed?)" >&2
+      exit 1
+    fi
+    cp "$target_dir/$bin" "$bin_dir/$bin"
+    printf "  [bin]  %-30s %s\n" "$bin" "→ $bin_dir/$bin"
+  done
+
+  echo "==> deploy: sync plists to $LAUNCH_AGENTS"
+  mkdir -p "$LAUNCH_AGENTS"
+  shopt -s nullglob
+  local synced=0 added=0
+  for plist in "$plist_src_dir"/com.adamnoonan.scryer.*.plist; do
+    local label
+    label=$(basename "$plist" .plist)
+    local dest="$LAUNCH_AGENTS/$label.plist"
+    if [[ -e "$dest" ]] && cmp -s "$plist" "$dest"; then
+      printf "  [ok]   %-50s already in sync\n" "$label"
+      continue
+    fi
+    local was_present=0
+    [[ -e "$dest" ]] && was_present=1
+    cp "$plist" "$dest"
+    if [[ $was_present -eq 1 ]]; then
+      printf "  [sync] %-50s plist updated\n" "$label"
+      synced=$((synced + 1))
+    else
+      printf "  [add]  %-50s new plist installed\n" "$label"
+      added=$((added + 1))
+    fi
+  done
+  if [[ $synced -eq 0 && $added -eq 0 ]]; then
+    echo "  (all plists already in sync)"
+  fi
+
+  echo "==> deploy: reload KeepAlive daemons"
+  # KeepAlive plists pin a long-running process; the OS doesn't re-exec
+  # them when the binary on disk changes. StartInterval plists fork a
+  # fresh process on every tick and pick up the new binary
+  # automatically — no reload needed.
+  local keepalive_labels=(
+    "com.adamnoonan.scryer.proxy"
+    "com.adamnoonan.scryer.portal-server"
+  )
+  for label in "${keepalive_labels[@]}"; do
+    local plist="$LAUNCH_AGENTS/$label.plist"
+    if [[ ! -e "$plist" ]]; then
+      printf "  [skip] %-50s plist not installed\n" "$label"
+      continue
+    fi
+    if is_loaded "$label"; then
+      launchctl bootout "$domain/$label" 2>/dev/null || true
+      printf "  [stop] %-50s\n" "$label"
+    fi
+    if launchctl bootstrap "$domain" "$plist" 2>/dev/null; then
+      printf "  [load] %-50s reloaded with new binary\n" "$label"
+    else
+      printf "  [fail] %-50s bootstrap failed\n" "$label" >&2
+    fi
+  done
+
+  echo "==> deploy: load any newly-added tape plists"
+  # Plists that were added by the sync step above — bootstrap them so
+  # they start ticking; existing tape plists are already loaded and
+  # will pick up the new binary on their next StartInterval fire.
+  while IFS= read -r label; do
+    case "$label" in
+      com.adamnoonan.scryer.proxy|com.adamnoonan.scryer.portal-server)
+        # Already handled in the KeepAlive block.
+        continue
+        ;;
+    esac
+    if ! is_loaded "$label"; then
+      local plist="$LAUNCH_AGENTS/$label.plist"
+      if launchctl bootstrap "$domain" "$plist" 2>/dev/null; then
+        printf "  [up]   %-50s loaded for the first time\n" "$label"
+      else
+        printf "  [fail] %-50s bootstrap failed\n" "$label" >&2
+      fi
+    fi
+  done < <(scryer_labels)
+
+  echo "==> deploy: done"
+}
+
 cmd_kick() {
   local name="${1:-}"
   if [[ -z "$name" ]]; then
@@ -162,6 +275,7 @@ main() {
   case "$cmd" in
     up)         cmd_up         "$@" ;;
     down)       cmd_down       "$@" ;;
+    deploy)     cmd_deploy     "$@" ;;
     status)     cmd_status     "$@" ;;
     open)       cmd_open       "$@" ;;
     ui|ui-refresh|refresh) cmd_ui_refresh "$@" ;;
