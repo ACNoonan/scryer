@@ -3,9 +3,10 @@
 //! Two parts:
 //!
 //! 1. **Decoder primitives** — IX-data parsing (anchor disc + Vec<u8>
-//!    length + snappy decompress + Solidity-ABI envelope parse) and
-//!    v10 ("Tokenized Asset") report decode. Schema 0x000a, 13 ABI
-//!    words = 416 bytes.
+//!    length + snappy decompress + Solidity-ABI envelope parse) plus
+//!    full decoders for v10 ("Tokenized Asset", schema `0x000a`, 13
+//!    ABI words = 416 bytes) and v11 ("Tokenized Asset 24/5",
+//!    schema `0x000b`, 14 ABI words = 448 bytes).
 //!
 //! 2. **`fetch_latest_per_xstock`** — walks Verifier signatures
 //!    backward from `end_ts` via Helius `parseTransactions`,
@@ -13,7 +14,10 @@
 //!    xStock is found (or `lookback_hours` elapses).
 //!
 //! Pattern-lifted from soothsayer's `chainlink/{feeds,verifier,v10,
-//! scraper}.py` (recovered from soothsayer git commit `d8b1f1b`).
+//! scraper}.py` (recovered from soothsayer git commit `d8b1f1b`); v11
+//! decoder pinned against soothsayer `src/soothsayer/chainlink/v11.py`
+//! (which itself pins
+//! `smartcontractkit/data-streams-sdk/rust/crates/report/src/report/v11.rs`).
 //!
 //! Critical correctness note from the soothsayer port: v10 is the
 //! "Tokenized Asset" schema, not "v11 minus market_status." Word 7 is
@@ -21,6 +25,12 @@
 //! 12 (`tokenizedPrice`) is the 24/7 CEX-aggregated mark. V5 compares
 //! Jupiter mid against `tokenized_price` (w12), never against `price`
 //! (w7).
+//!
+//! v11 is the active 24/5 US-equity schema since Jan 2026; its
+//! `market_status` enum has different value semantics than v10's
+//! (6-class vs 3-class) — see `extract_all_reports` and the schema
+//! crate's docstring for the consumer-side `schema_id`-predicate
+//! requirement.
 
 use std::collections::{HashMap, HashSet};
 
@@ -35,6 +45,11 @@ pub const VERIFIER_PROGRAM_ID: &str = "Gt9S41PtjR58CbG9JhJ3J6vxesqrNAswbWYbLNTMZ
 /// Schema ID for v10 "Tokenized Asset" reports (the xStock schema as
 /// of 2026-04). First 2 bytes of the feed_id.
 pub const SCHEMA_V10: u16 = 0x000a;
+
+/// Schema ID for v11 "Tokenized Asset 24/5" reports — active for
+/// xStock equities since Jan 2026 with mid/bid/ask + 6-class
+/// market_status. First 2 bytes of the feed_id.
+pub const SCHEMA_V11: u16 = 0x000b;
 
 /// xStock feed registry (lowercase hex feed_id → canonical xStock
 /// symbol). Verified against live yfinance spot for all 8 tickers
@@ -65,6 +80,9 @@ const VEC_LEN_PREFIX: usize = 4;
 const WORD: usize = 32;
 /// v10 report total bytes (13 × 32 — every field padded to a word).
 const V10_REPORT_LEN: usize = 13 * WORD;
+/// v11 report total bytes (14 × 32 — adds bid/bid_volume/ask/
+/// ask_volume + market_status; reorders relative to v10).
+const V11_REPORT_LEN: usize = 14 * WORD;
 
 /// Decoded `verify` instruction — the bare versioned-report bytes
 /// after stripping anchor framing, snappy-decompressing, and walking
@@ -229,6 +247,82 @@ pub fn parse_verify_ix(ix_data: &[u8]) -> Result<ParsedVerify, FetchError> {
     })
 }
 
+/// One v11 ("Tokenized Asset 24/5") report. All `*_raw` fields are the
+/// 1e18-scaled big-endian integers; convenience methods divide. Wire
+/// layout pinned against soothsayer's
+/// `src/soothsayer/chainlink/v11.py` (which itself pins
+/// `smartcontractkit/data-streams-sdk/rust/crates/report/src/report/v11.rs`).
+///
+/// Field order (word index → field):
+///
+/// ```text
+///   0  feed_id                 bytes32
+///   1  valid_from_timestamp    u32   (right-aligned in word)
+///   2  observations_timestamp  u32
+///   3  native_fee              u192  (low 128 bits used)
+///   4  link_fee                u192
+///   5  expires_at              u32
+///   6  mid                     i192
+///   7  last_seen_timestamp_ns  u64
+///   8  bid                     i192
+///   9  bid_volume              i192
+///  10  ask                     i192
+///  11  ask_volume              i192
+///  12  last_traded_price       i192
+///  13  market_status           u32   (6-class enum; see below)
+/// ```
+///
+/// `market_status` value semantics (v11):
+///   0=unknown, 1=pre-market, 2=regular, 3=post-market,
+///   4=overnight, 5=closed (covers weekends).
+///
+/// Note: this differs from v10's 3-class `market_status` (0=Unknown,
+/// 1=Closed, 2=Open) — consumers comparing across schemas must filter
+/// by `schema_id` first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct V11Report {
+    pub feed_id: [u8; 32],
+    pub valid_from_timestamp: u64,
+    pub observations_timestamp: u64,
+    pub native_fee: u128,
+    pub link_fee: u128,
+    pub expires_at: u64,
+    /// DON-consensus benchmark price.
+    pub mid_raw: i128,
+    /// Wall-clock nanoseconds for the data the DON saw.
+    pub last_seen_timestamp_ns: u64,
+    pub bid_raw: i128,
+    pub bid_volume_raw: i128,
+    pub ask_raw: i128,
+    pub ask_volume_raw: i128,
+    /// Last on-venue trade price reported to the DON.
+    pub last_traded_price_raw: i128,
+    /// 6-class enum — see struct docstring.
+    pub market_status: u32,
+}
+
+impl V11Report {
+    pub fn feed_id_hex(&self) -> String {
+        hex_encode(&self.feed_id)
+    }
+
+    pub fn mid(&self) -> f64 {
+        self.mid_raw as f64 / PRICE_SCALE
+    }
+
+    pub fn bid(&self) -> f64 {
+        self.bid_raw as f64 / PRICE_SCALE
+    }
+
+    pub fn ask(&self) -> f64 {
+        self.ask_raw as f64 / PRICE_SCALE
+    }
+
+    pub fn last_traded_price(&self) -> f64 {
+        self.last_traded_price_raw as f64 / PRICE_SCALE
+    }
+}
+
 /// Decode a v10 (Tokenized Asset) report. Caller must check the
 /// report's schema matches `SCHEMA_V10` first via `parse_verify_ix`.
 pub fn decode_v10(report: &[u8]) -> Result<V10Report, FetchError> {
@@ -255,6 +349,37 @@ pub fn decode_v10(report: &[u8]) -> Result<V10Report, FetchError> {
         new_multiplier_raw: read_i256_low_i128(report, 10 * WORD)?,
         activation_datetime: read_u256_low_u64(report, 11 * WORD)?,
         tokenized_price_raw: read_i256_low_i128(report, 12 * WORD)?,
+    })
+}
+
+/// Decode a v11 ("Tokenized Asset 24/5") report. Caller must check
+/// the report's schema matches `SCHEMA_V11` first via
+/// `parse_verify_ix`.
+pub fn decode_v11(report: &[u8]) -> Result<V11Report, FetchError> {
+    if report.len() < V11_REPORT_LEN {
+        return Err(FetchError::Decode(format!(
+            "v11 report too short: {} bytes (need {})",
+            report.len(),
+            V11_REPORT_LEN
+        )));
+    }
+    let mut feed_id = [0u8; 32];
+    feed_id.copy_from_slice(&report[0..32]);
+    Ok(V11Report {
+        feed_id,
+        valid_from_timestamp: read_u256_low_u64(report, 1 * WORD)?,
+        observations_timestamp: read_u256_low_u64(report, 2 * WORD)?,
+        native_fee: read_u256_low_u128(report, 3 * WORD)?,
+        link_fee: read_u256_low_u128(report, 4 * WORD)?,
+        expires_at: read_u256_low_u64(report, 5 * WORD)?,
+        mid_raw: read_i256_low_i128(report, 6 * WORD)?,
+        last_seen_timestamp_ns: read_u256_low_u64(report, 7 * WORD)?,
+        bid_raw: read_i256_low_i128(report, 8 * WORD)?,
+        bid_volume_raw: read_i256_low_i128(report, 9 * WORD)?,
+        ask_raw: read_i256_low_i128(report, 10 * WORD)?,
+        ask_volume_raw: read_i256_low_i128(report, 11 * WORD)?,
+        last_traded_price_raw: read_i256_low_i128(report, 12 * WORD)?,
+        market_status: read_u256_low_u64(report, 13 * WORD)? as u32,
     })
 }
 
@@ -501,10 +626,15 @@ fn extract_first_v10_observation(tx: &ParsedTx) -> Option<V10Observation> {
 /// 3. Doesn't gate on the xStock registry — feeds outside the registry
 ///    still produce rows with `symbol=""` so cadence histograms cover
 ///    the full v10/v11 universe, not just our 8 stocks.
-/// 4. Currently decodes v10 only. v11 reports get a stub row with
-///    schema_id=11 + cadence-critical fields (feed_id, observation_ts
-///    via the same `parse_verify_ix` walk) but null prices, awaiting
-///    a v11 layout decoder.
+/// 4. Decodes v10 + v11 fully. v10 populates `price`/`tokenized_price`/
+///    `current_multiplier` and leaves the v11 wire fields null; v11
+///    populates `bid_price`/`ask_price`/`mid_price`/`last_traded_price`
+///    and leaves the v10-only fields null. Both share the
+///    `last_update_ts_ns` (DON wall-clock) and fee columns.
+/// 5. Other schemas (3, 7, 8, 9 observed live) emit a cadence-only
+///    stub row with all v10/v11 prices null — only the cross-schema
+///    cadence fields (valid_from / observation_ts / expires_at) are
+///    populated.
 pub fn extract_all_reports(
     tx: &ParsedTx,
     meta: &scryer_schema::Meta,
@@ -559,14 +689,52 @@ pub fn extract_all_reports(
                 slot: tx.slot as i64,
                 fee_payer: tx.fee_payer.clone(),
                 block_time: tx.timestamp,
+                bid_price: None,
+                ask_price: None,
+                mid_price: None,
+                last_traded_price: None,
+                meta: meta.clone(),
+            });
+        } else if parsed.schema == SCHEMA_V11 {
+            let r = match decode_v11(&parsed.raw_report) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::debug!(sig = tx.signature, err = %e, "v11 decode failed");
+                    return;
+                }
+            };
+            out.push(scryer_schema::chainlink_data_streams::v1::Report {
+                symbol,
+                feed_id: feed_id_hex,
+                schema_id: SCHEMA_V11 as i32,
+                valid_from_ts: r.valid_from_timestamp as i64,
+                observation_ts: r.observations_timestamp as i64,
+                expires_at: r.expires_at as i64,
+                last_update_ts_ns: Some(r.last_seen_timestamp_ns as i64),
+                native_fee_raw: Some(r.native_fee as i64),
+                link_fee_raw: Some(r.link_fee as i64),
+                price: None,
+                tokenized_price: None,
+                market_status: Some(r.market_status as i32),
+                current_multiplier: None,
+                signature: tx.signature.clone(),
+                slot: tx.slot as i64,
+                fee_payer: tx.fee_payer.clone(),
+                block_time: tx.timestamp,
+                bid_price: Some(r.bid()),
+                ask_price: Some(r.ask()),
+                mid_price: Some(r.mid()),
+                last_traded_price: Some(r.last_traded_price()),
                 meta: meta.clone(),
             });
         } else {
-            // Non-v10: emit cadence-only row. observation_ts is at the
-            // same offset (word 2 / bytes 92..96) for both v10 and v11
-            // per the Verifier source's parse_report_details_from_report.
-            // valid_from / expires_at also share offsets across schemas.
-            // Prices are null — a future v11 decoder will fill them in.
+            // Schemas 3 / 7 / 8 / 9 (and any future variant) — emit
+            // cadence-only row. observation_ts is at the same offset
+            // (word 2 / bytes 92..96) across every Data Streams
+            // schema per the Verifier source's
+            // parse_report_details_from_report; valid_from /
+            // expires_at also share offsets. Prices are null until a
+            // per-schema decoder lands.
             let observation_ts = read_u32_at(&parsed.raw_report, 92).unwrap_or(0);
             let valid_from_ts = read_u32_at(&parsed.raw_report, 60).unwrap_or(0);
             let expires_at = read_u32_at(&parsed.raw_report, 188).unwrap_or(0);
@@ -588,6 +756,10 @@ pub fn extract_all_reports(
                 slot: tx.slot as i64,
                 fee_payer: tx.fee_payer.clone(),
                 block_time: tx.timestamp,
+                bid_price: None,
+                ask_price: None,
+                mid_price: None,
+                last_traded_price: None,
                 meta: meta.clone(),
             });
         }
@@ -612,6 +784,45 @@ fn read_u32_at(buf: &[u8], off: usize) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a synthetic v11 report (14 words = 448 bytes) for
+    /// round-trip testing. Mirrors the `.01`-marker placeholder
+    /// pattern observed by soothsayer's classifier on weekend SPYx
+    /// feeds (bid 21.01 / ask 715.01 / mid 368.01 / last_traded
+    /// 713.96, market_status=5 closed).
+    fn synth_v11_report(feed_id_hex: &str) -> Vec<u8> {
+        let mut report = vec![0u8; V11_REPORT_LEN];
+        // Word 0: feed_id
+        let feed_id = hex_decode(feed_id_hex).unwrap();
+        report[..32].copy_from_slice(&feed_id);
+        // Word 1: valid_from_timestamp
+        write_u64_be_in_word(&mut report, 1, 1_777_300_000);
+        // Word 2: observations_timestamp
+        write_u64_be_in_word(&mut report, 2, 1_777_300_010);
+        // Word 3: native_fee
+        write_u64_be_in_word(&mut report, 3, 1_000);
+        // Word 4: link_fee
+        write_u64_be_in_word(&mut report, 4, 2_000);
+        // Word 5: expires_at
+        write_u64_be_in_word(&mut report, 5, 1_777_300_100);
+        // Word 6: mid = 368.01 * 1e18
+        write_i128_be_in_word(&mut report, 6, 368_010_000_000_000_000_000);
+        // Word 7: last_seen_timestamp_ns
+        write_u64_be_in_word(&mut report, 7, 1_777_300_000_000_000_000);
+        // Word 8: bid = 21.01 * 1e18
+        write_i128_be_in_word(&mut report, 8, 21_010_000_000_000_000_000);
+        // Word 9: bid_volume = 100 * 1e18 (synthetic round-number)
+        write_i128_be_in_word(&mut report, 9, 100_000_000_000_000_000_000);
+        // Word 10: ask = 715.01 * 1e18
+        write_i128_be_in_word(&mut report, 10, 715_010_000_000_000_000_000);
+        // Word 11: ask_volume = 200 * 1e18
+        write_i128_be_in_word(&mut report, 11, 200_000_000_000_000_000_000);
+        // Word 12: last_traded_price = 713.96 * 1e18
+        write_i128_be_in_word(&mut report, 12, 713_960_000_000_000_000_000);
+        // Word 13: market_status = 5 (closed/weekend)
+        write_u64_be_in_word(&mut report, 13, 5);
+        report
+    }
 
     /// Build a synthetic v10 report for round-trip testing. All field
     /// values chosen to exercise the decoder edge cases (large
@@ -874,6 +1085,100 @@ mod tests {
             assert!(r.price.is_some());
             assert!(r.tokenized_price.is_some());
             assert_eq!(r.market_status, Some(2));
+            // v10 rows leave v11 wire fields null.
+            assert!(r.bid_price.is_none());
+            assert!(r.ask_price.is_none());
+            assert!(r.mid_price.is_none());
+            assert!(r.last_traded_price.is_none());
         }
+    }
+
+    #[test]
+    fn decode_v11_round_trip() {
+        let report = synth_v11_report(
+            "000bc6ba1b453a15c1fe9dcd82265ca47bcd04e7b3667de1623617c45cef2a77",
+        );
+        let r = decode_v11(&report).unwrap();
+        assert_eq!(&r.feed_id[..2], &[0x00, 0x0b]);
+        assert_eq!(r.observations_timestamp, 1_777_300_010);
+        assert_eq!(r.market_status, 5);
+        assert!((r.mid() - 368.01).abs() < 1e-9);
+        assert!((r.bid() - 21.01).abs() < 1e-9);
+        assert!((r.ask() - 715.01).abs() < 1e-9);
+        assert!((r.last_traded_price() - 713.96).abs() < 1e-9);
+        assert_eq!(r.last_seen_timestamp_ns, 1_777_300_000_000_000_000);
+    }
+
+    #[test]
+    fn decode_v11_rejects_short_report() {
+        // 416 bytes = v10 length; v11 needs 448.
+        let err = decode_v11(&[0u8; V10_REPORT_LEN]).unwrap_err();
+        assert!(matches!(err, FetchError::Decode(_)));
+    }
+
+    /// `extract_all_reports` should fully decode v11 reports —
+    /// populate bid/ask/mid/last_traded + market_status, leave the
+    /// v10-only fields null.
+    #[test]
+    fn extract_all_reports_emits_v11_with_prices() {
+        use crate::types::{HeliusInstruction, ParsedTx};
+        use scryer_schema::Meta;
+
+        // Use a fictitious v11 feed_id (none of the 8 xStocks have v11
+        // feed_ids in our registry yet — soothsayer's
+        // XSTOCK_V11_FEEDS is separate); symbol falls back to "".
+        let report_v11 = synth_v11_report(
+            "000b1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab",
+        );
+        let ix_data_v11 =
+            bs58::encode(synth_ix_data(&synth_envelope(&report_v11))).into_string();
+
+        let outer = HeliusInstruction {
+            program_id: "Router1111111111111111111111111111111111111".to_string(),
+            accounts: vec![],
+            data: String::new(),
+            inner_instructions: vec![HeliusInstruction {
+                program_id: VERIFIER_PROGRAM_ID.to_string(),
+                accounts: vec![],
+                data: ix_data_v11,
+                inner_instructions: vec![],
+            }],
+        };
+        let tx = ParsedTx {
+            signature: "V11_SIG".to_string(),
+            slot: 415_999_999,
+            timestamp: 1_777_300_013,
+            transaction_error: None,
+            fee_payer: "Router1111111111111111111111111111111111111".to_string(),
+            account_data: vec![],
+            instructions: vec![outer],
+        };
+        let meta = Meta::new(
+            scryer_schema::chainlink_data_streams::v1::SCHEMA_VERSION,
+            1_777_300_100,
+            "test:fixture",
+        );
+
+        let rows = extract_all_reports(&tx, &meta);
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.schema_id, SCHEMA_V11 as i32);
+        assert_eq!(r.symbol, ""); // unmapped feed_id
+        assert_eq!(r.observation_ts, 1_777_300_010);
+        // v11 wire fields populated.
+        assert!((r.bid_price.unwrap() - 21.01).abs() < 1e-9);
+        assert!((r.ask_price.unwrap() - 715.01).abs() < 1e-9);
+        assert!((r.mid_price.unwrap() - 368.01).abs() < 1e-9);
+        assert!((r.last_traded_price.unwrap() - 713.96).abs() < 1e-9);
+        // market_status decoded (6-class value space, here closed=5).
+        assert_eq!(r.market_status, Some(5));
+        // v10-only fields null on a v11 row.
+        assert!(r.price.is_none());
+        assert!(r.tokenized_price.is_none());
+        assert!(r.current_multiplier.is_none());
+        // Cross-schema fields populated for v11 too.
+        assert_eq!(r.last_update_ts_ns, Some(1_777_300_000_000_000_000));
+        assert_eq!(r.native_fee_raw, Some(1_000));
+        assert_eq!(r.link_fee_raw, Some(2_000));
     }
 }

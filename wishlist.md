@@ -50,7 +50,7 @@ don't re-propose.
 | 45 (tape + OHLCV) | Done — phases 55–58 (cex-stock-perp 11 venues) |
 | 45 (Phemex OHLCV) | **Blocked on US-IP geo-block** — see below |
 | 46, 47 | Locked, **not yet shipped** — Priority 0 paper-3 event-source (full entries below) |
-| 48 | Locked, **not yet shipped** — Priority 1 chainlink v11 fix (full entry below) |
+| 48 | Done — phase 67 (`decode_v11` + nullable `bid_price`/`ask_price`/`mid_price`/`last_traded_price` columns on `chainlink_data_streams.v1`; v11 reports now fully decode rather than landing as cadence-only stubs) |
 | 49 | First slice shipped — phase 66 (cadence audit + chainlink launchd plist + CLI `--once`); sub-items 49a (Pyth Hermes ≥90d) / 49b (Kamino Scope ≥90d) / 49c (RedStone permaweb ≥90d) / 49d (chainlink ≥90d run + soothsayer consumer cutover) outstanding (full entry below) |
 
 ---
@@ -274,59 +274,21 @@ Phase 45's `cex_stock_perp_tape.v1` and Phase 59's
 Schema spec + byte-layout table: `docs/schemas.md#chainlink_data_streamsv1`.
 Phase row: `docs/phase_log.md` v0.1-phase-60.
 
-## 48. `chainlink_data_streams.v1` — v11 layout decoder + capture daemon
+## 48. `chainlink_data_streams.v1` — v11 layout decoder — DONE (phase 67)
 
-Phases TBD-D + TBD-E. Three coupled deliverables, all required to
-unblock soothsayer's `reports/v11_cadence_verification.md` from
-per-session manual re-runs of `verify_v11_cadence.py`. Methodology
-entry: `methodology_log.md` "Chainlink v11 layout decode + capture
-cadence — 2026-04-29 (locked)".
+Schema delta + decoder shipped phase 67 (2026-04-30). Phase row in
+`docs/phase_log.md` v0.1-phase-67. Methodology entry:
+`methodology_log.md` "Chainlink v11 layout decode + capture cadence
+— 2026-04-29 (locked)". Schema spec (post-phase-67 column list) in
+`docs/schemas.md#chainlink_data_streamsv1`.
 
-(a) **`decode_v11`** in `crates/scryer-fetch-solana/src/chainlink.rs`
-alongside the existing `decode_v10`. v11 wire layout already verified
-empirically by soothsayer's classifier
-(`scripts/verify_v11_cadence.py`): `bid` / `ask` / `mid` /
-`last_traded` plus `market_status` (6-class: 0=unknown, 1=pre-mkt,
-2=regular, 3=post-mkt, 4=overnight, 5=closed/weekend — note:
-different semantics from v10's 3-class).
-
-(b) **Additive nullable columns on `chainlink_data_streams.v1`**:
-`bid_price` (Float64, nullable), `ask_price` (Float64, nullable),
-`mid_price` (Float64, nullable), `last_traded_price` (Float64,
-nullable). Per the locked schema versioning policy (additive
-nullable = same major version), no v2 bump. v10 rows leave the new
-columns null; v11 rows leave `price` / `tokenized_price` /
-`current_multiplier` null. Document the cross-schema `market_status`
-semantics footgun (see methodology entry table) in the schema
-docstring AND in the `docs/schemas.md` row.
-
-(c) **`com.adamnoonan.scryer.chainlink-reports.plist`** added to
-`ops/launchd/`, modelled on `v5-tape.plist`: 60s `StartInterval`,
-`--lookback-secs 120`, `--use-get-transaction` for quota-resilience,
-writing into `dataset/chainlink/data_streams/v1/...`. With this
-running, soothsayer's `verify_v11_cadence.py` v3 can swap from
-Verifier-sig pagination to a `pd.read_parquet` against the scryer
-mirror; the four missing market_status windows fill in via launchd
-cadence accumulating across the trading week, no per-session manual
-re-runs.
-
-**Why now.** The phase-60 schema docstring's claim that v11 is *"not
-yet in production"* is empirically false as of soothsayer's
-2026-04-26 verification scan, which decoded **26 v11 reports out of
-3000 Verifier sigs** scanned. v11 IS in production on Solana, just
-at lower frequency than v10 (~0.87% of scanned reports). The
-docstring fix lands at methodology-lock time (small documentation
-correction); the decoder + plist work lands across phases TBD-D and
-TBD-E.
-
-**Stale-claim cleanup.** The phase-60 row in `docs/phase_log.md`
-also has the *"v11 was zero in this window — its US-cash-hours-only
-cadence either hasn't rolled out on Solana yet"* claim; the second
-clause (60s sampling rate is below v11's cadence) is the right
-diagnosis, but the first clause is wrong. Cleanup happens at phase
-TBD-D land time as a footnote on the existing row.
-
-**Effort.** ~4–6 hours for (a) + (b) + tests; ~30 minutes for (c).
+**Operator-side empirical verification still pending** (separate
+from item 48 itself): the operator runs `launchctl load -w
+~/Library/LaunchAgents/com.adamnoonan.scryer.chainlink-reports.plist`
+to start the 24/7 forward capture, then re-runs soothsayer's
+`scripts/verify_v11_cadence.py` v3 against the scryer mirror once
+soak data has accumulated. Pending operator-side; no scryer-side
+work outstanding.
 
 ---
 

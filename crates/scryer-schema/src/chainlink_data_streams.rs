@@ -1,12 +1,31 @@
 //! Chainlink Data Streams report tape (Solana).
 //!
-//! `v1` is the v10 ("Tokenized Asset") row schema — the only Data
-//! Streams report observed on the Solana Verifier program
-//! `Gt9S41PtjR58CbG9JhJ3J6vxesqrNAswbWYbLNTMZA3c` as of 2026-04. v11
-//! ("Tokenized Asset 24/5", with mid/bid/ask) is anticipated but not
-//! yet in production; when it lands, its price-sided fields are
-//! nullable here so the same row schema accommodates both schemas
-//! without a v2.
+//! `v1` carries v10 ("Tokenized Asset") and v11 ("Tokenized Asset
+//! 24/5") rows fully decoded, plus cadence-only stub rows for the
+//! other schemas (3, 7, 8, 9) observed on the Solana Verifier program
+//! `Gt9S41PtjR58CbG9JhJ3J6vxesqrNAswbWYbLNTMZA3c`. v11 carries
+//! `mid`/`bid`/`ask`/`last_traded_price` (1e18-scaled int192,
+//! divided to f64) — see `bid_price`, `ask_price`, `mid_price`,
+//! `last_traded_price` columns. v11 leaves the v10-only fields
+//! (`price` / `tokenized_price` / `current_multiplier`) null; v10
+//! leaves the v11-only fields null.
+//!
+//! v11 IS in production on Solana as of 2026-04-26 — soothsayer's
+//! `reports/v11_cadence_verification.md` decoded 26 v11 reports out
+//! of 3000 Verifier sigs scanned (~0.87% of traffic, lower frequency
+//! than v10).
+//!
+//! Cross-schema footgun: the `market_status` column has different
+//! value semantics across schemas. v10: 0=Unknown, 1=Closed, 2=Open.
+//! v11: 0=unknown, 1=pre-mkt, 2=regular, 3=post-mkt, 4=overnight,
+//! 5=closed/weekend. Consumer queries on `market_status` MUST
+//! include a `schema_id` predicate; without it, v10 closed-market
+//! rows mix with v11 pre-market rows.
+//!
+//! Append-only history: the four `*_price` v11 columns landed in
+//! phase 67 (2026-04-30). Pre-phase-67 21-column parquets read
+//! cleanly with `bid_price`/`ask_price`/`mid_price`/`last_traded_price`
+//! decoded as `None` via `try_downcast_column` tolerance.
 //!
 //! Field decode and the Solidity-ABI envelope walk live in
 //! `crates/scryer-fetch-solana/src/chainlink.rs::{parse_verify_ix,
@@ -25,9 +44,9 @@ pub mod v1 {
     use arrow_schema::{DataType, Field, Schema};
     use serde::{Deserialize, Serialize};
 
-    use crate::downcast_column;
     use crate::error::FromArrowError;
     use crate::meta::Meta;
+    use crate::{downcast_column, try_downcast_column};
 
     pub const SCHEMA_VERSION: &str = "chainlink_data_streams.v1";
 
@@ -55,30 +74,43 @@ pub mod v1 {
         pub observation_ts: i64,
         /// Unix second after which the report is no longer valid.
         pub expires_at: i64,
-        /// Last upstream update timestamp (nanoseconds). v10-only;
-        /// nullable for forward-compat with future schemas.
+        /// Last upstream update timestamp (nanoseconds). Populated
+        /// from v10 word 6 (`last_update_timestamp_ns`) and v11 word
+        /// 7 (`last_seen_timestamp_ns`); both are the DON-side wall
+        /// clock for when the source observation was seen. Null for
+        /// non-{v10,v11} schemas.
         pub last_update_ts_ns: Option<i64>,
         /// Native fee, in wei-scaled units (uint192 truncated to
-        /// u128 — sufficient for any realistic fee). Nullable so a
-        /// future schema variant without fees can leave it null.
+        /// u128 — sufficient for any realistic fee). Populated for
+        /// v10 + v11; null for cadence-only schemas.
         pub native_fee_raw: Option<i64>,
-        /// Link fee, same scale.
+        /// Link fee, same scale. Populated for v10 + v11.
         pub link_fee_raw: Option<i64>,
         /// v10 word 7 — underlying-venue last-trade price
         /// (1e18-scaled int192, divided to f64). **Stale on
         /// weekends/holidays for tokenized-asset feeds.** Compare DEX
-        /// prices against `tokenized_price` instead.
+        /// prices against `tokenized_price` instead. Null for v11 rows
+        /// (use `last_traded_price` instead) and non-{v10,v11} schemas.
         pub price: Option<f64>,
         /// v10 word 12 — 24/7 CEX-aggregated mark (1e18-scaled int192,
         /// divided). This is the field the V5 tape compares to
-        /// Jupiter mid.
+        /// Jupiter mid. Null for v11 rows (the v11 wire layout has no
+        /// equivalent; use `mid_price` for the DON-consensus benchmark)
+        /// and non-{v10,v11} schemas.
         pub tokenized_price: Option<f64>,
-        /// v10 word 8 — `0`=Unknown, `1`=Closed, `2`=Open. Stored as
-        /// i32; nullable for future schemas without market status.
+        /// Cross-schema; semantics vary by `schema_id`. v10 word 8:
+        /// `0`=Unknown, `1`=Closed, `2`=Open. v11 word 13:
+        /// `0`=unknown, `1`=pre-mkt, `2`=regular, `3`=post-mkt,
+        /// `4`=overnight, `5`=closed/weekend. **Consumer queries MUST
+        /// filter by `schema_id` before filtering on `market_status`**
+        /// or v10 closed-market rows will mix with v11 pre-market
+        /// rows. Stored as i32; null for non-{v10,v11} schemas
+        /// without market status.
         pub market_status: Option<i32>,
         /// v10 word 9 — current corporate-action multiplier
         /// (1e18-scaled, divided). Track-and-trace for stock
-        /// splits/dividends.
+        /// splits/dividends. v10-only — null for v11 (no
+        /// equivalent on the wire) and non-{v10,v11} schemas.
         pub current_multiplier: Option<f64>,
         /// Solana tx signature (base58, 88 chars).
         pub signature: String,
@@ -93,6 +125,29 @@ pub mod v1 {
         /// Tx blockTime (unix seconds) — on-chain confirmation
         /// timestamp. Differs from `observation_ts` by ~1-10s.
         pub block_time: i64,
+        /// v11 word 8 — top-of-book bid (1e18-scaled int192,
+        /// divided). v11 publishes a `.01`-suffixed synthetic bid
+        /// during `market_status ∈ {4,5}` for SPYx/QQQx/TSLAx — the
+        /// decoder is faithful to the wire; consumers filter via the
+        /// `.01` marker per soothsayer's
+        /// `reports/v11_cadence_verification.md`. Null for non-v11
+        /// rows.
+        pub bid_price: Option<f64>,
+        /// v11 word 10 — top-of-book ask (1e18-scaled int192,
+        /// divided). Same `.01`-suffix synthetic-marker caveat as
+        /// `bid_price`. Null for non-v11 rows.
+        pub ask_price: Option<f64>,
+        /// v11 word 6 — DON-consensus benchmark price (1e18-scaled
+        /// int192, divided). The v11 analogue of v10's
+        /// `tokenized_price`. During PURE_PLACEHOLDER (closed-market)
+        /// `mid` is the arithmetic midpoint of the synthetic
+        /// bid/ask bookend, not a market mid. Null for non-v11 rows.
+        pub mid_price: Option<f64>,
+        /// v11 word 12 — last on-venue trade price reported to the
+        /// DON (1e18-scaled int192, divided). Most recoverable signal
+        /// during `market_status ∈ {4,5}` per soothsayer's
+        /// classifier. Null for non-v11 rows.
+        pub last_traded_price: Option<f64>,
         #[serde(flatten)]
         pub meta: Meta,
     }
@@ -134,6 +189,12 @@ pub mod v1 {
             Field::new("slot", DataType::Int64, false),
             Field::new("fee_payer", DataType::LargeUtf8, false),
             Field::new("block_time", DataType::Int64, false),
+            // v11 wire fields appended in phase 67 (2026-04-30).
+            // Null for v10 + non-{v10,v11} rows.
+            Field::new("bid_price", DataType::Float64, true),
+            Field::new("ask_price", DataType::Float64, true),
+            Field::new("mid_price", DataType::Float64, true),
+            Field::new("last_traded_price", DataType::Float64, true),
             Field::new("_schema_version", DataType::LargeUtf8, false),
             Field::new("_fetched_at", DataType::Int64, false),
             Field::new("_source", DataType::LargeUtf8, false),
@@ -162,6 +223,11 @@ pub mod v1 {
         let fee_payer =
             LargeStringArray::from_iter_values(rows.iter().map(|r| r.fee_payer.as_str()));
         let block_time = Int64Array::from_iter_values(rows.iter().map(|r| r.block_time));
+        let bid_price = Float64Array::from_iter(rows.iter().map(|r| r.bid_price));
+        let ask_price = Float64Array::from_iter(rows.iter().map(|r| r.ask_price));
+        let mid_price = Float64Array::from_iter(rows.iter().map(|r| r.mid_price));
+        let last_traded_price =
+            Float64Array::from_iter(rows.iter().map(|r| r.last_traded_price));
         let schema_version = LargeStringArray::from_iter_values(
             rows.iter().map(|r| r.meta.schema_version.as_str()),
         );
@@ -188,6 +254,10 @@ pub mod v1 {
             Arc::new(slot),
             Arc::new(fee_payer),
             Arc::new(block_time),
+            Arc::new(bid_price),
+            Arc::new(ask_price),
+            Arc::new(mid_price),
+            Arc::new(last_traded_price),
             Arc::new(schema_version),
             Arc::new(fetched_at),
             Arc::new(source),
@@ -214,6 +284,14 @@ pub mod v1 {
         let slot = downcast_column::<Int64Array>(batch, "slot")?;
         let fee_payer = downcast_column::<LargeStringArray>(batch, "fee_payer")?;
         let block_time = downcast_column::<Int64Array>(batch, "block_time")?;
+        // v11 wire fields appended in phase 67 (2026-04-30). Tolerant
+        // lookup so older parquet files (written before phase 67) read
+        // cleanly with these fields decoded as `None`.
+        let bid_price = try_downcast_column::<Float64Array>(batch, "bid_price")?;
+        let ask_price = try_downcast_column::<Float64Array>(batch, "ask_price")?;
+        let mid_price = try_downcast_column::<Float64Array>(batch, "mid_price")?;
+        let last_traded_price =
+            try_downcast_column::<Float64Array>(batch, "last_traded_price")?;
         let schema_version = downcast_column::<LargeStringArray>(batch, "_schema_version")?;
         let fetched_at = downcast_column::<Int64Array>(batch, "_fetched_at")?;
         let source = downcast_column::<LargeStringArray>(batch, "_source")?;
@@ -273,6 +351,10 @@ pub mod v1 {
                 slot: slot.value(i),
                 fee_payer: fee_payer.value(i).to_string(),
                 block_time: block_time.value(i),
+                bid_price: bid_price.and_then(|a| if a.is_null(i) { None } else { Some(a.value(i)) }),
+                ask_price: ask_price.and_then(|a| if a.is_null(i) { None } else { Some(a.value(i)) }),
+                mid_price: mid_price.and_then(|a| if a.is_null(i) { None } else { Some(a.value(i)) }),
+                last_traded_price: last_traded_price.and_then(|a| if a.is_null(i) { None } else { Some(a.value(i)) }),
                 meta: Meta {
                     schema_version: sver.to_string(),
                     fetched_at: fetched_at.value(i),
@@ -307,6 +389,38 @@ pub mod v1 {
                 slot: 415_816_212,
                 fee_payer: "HFn8GnPADiny6XqUoWE8uRPPxb29ikn4yTuPa9MF2fWJ".to_string(),
                 block_time: observation_ts + 3,
+                bid_price: None,
+                ask_price: None,
+                mid_price: None,
+                last_traded_price: None,
+                meta: Meta::new(SCHEMA_VERSION, 1_777_300_000, "rpc:getTransaction"),
+            }
+        }
+
+        fn sample_v11(symbol: &str, observation_ts: i64) -> Report {
+            Report {
+                symbol: symbol.to_string(),
+                feed_id: "000bc6ba1b453a15c1fe9dcd82265ca47bcd04e7b3667de1623617c45cef2a77"
+                    .to_string(),
+                schema_id: 11,
+                valid_from_ts: observation_ts - 1,
+                observation_ts,
+                expires_at: observation_ts + 90,
+                last_update_ts_ns: Some(observation_ts * 1_000_000_000),
+                native_fee_raw: Some(1_000),
+                link_fee_raw: Some(2_000),
+                price: None,
+                tokenized_price: None,
+                market_status: Some(5),
+                current_multiplier: None,
+                signature: "v1111111aaaaaaaa".to_string(),
+                slot: 415_816_300,
+                fee_payer: "HFn8GnPADiny6XqUoWE8uRPPxb29ikn4yTuPa9MF2fWJ".to_string(),
+                block_time: observation_ts + 3,
+                bid_price: Some(21.01),
+                ask_price: Some(715.01),
+                mid_price: Some(368.01),
+                last_traded_price: Some(713.96),
                 meta: Meta::new(SCHEMA_VERSION, 1_777_300_000, "rpc:getTransaction"),
             }
         }
@@ -327,25 +441,79 @@ pub mod v1 {
 
         #[test]
         fn round_trip_preserves_all_fields_including_nulls() {
-            let mut without_v10_fields = sample("UNKNOWN", 1_777_300_020);
-            without_v10_fields.symbol = String::new();
-            without_v10_fields.last_update_ts_ns = None;
-            without_v10_fields.native_fee_raw = None;
-            without_v10_fields.link_fee_raw = None;
-            without_v10_fields.price = None;
-            without_v10_fields.tokenized_price = None;
-            without_v10_fields.market_status = None;
-            without_v10_fields.current_multiplier = None;
+            let mut cadence_only = sample("UNKNOWN", 1_777_300_020);
+            cadence_only.symbol = String::new();
+            cadence_only.last_update_ts_ns = None;
+            cadence_only.native_fee_raw = None;
+            cadence_only.link_fee_raw = None;
+            cadence_only.price = None;
+            cadence_only.tokenized_price = None;
+            cadence_only.market_status = None;
+            cadence_only.current_multiplier = None;
             let rows = vec![
                 sample("SPYx", 1_777_300_010),
                 sample("QQQx", 1_777_300_011),
-                without_v10_fields,
+                sample_v11("SPYx", 1_777_300_012),
+                cadence_only,
             ];
             let batch = to_record_batch(&rows).expect("encode");
-            assert_eq!(batch.num_rows(), 3);
-            assert_eq!(batch.num_columns(), 21);
+            assert_eq!(batch.num_rows(), 4);
+            assert_eq!(batch.num_columns(), 25);
             let recovered = from_record_batch(&batch).expect("decode");
             assert_eq!(rows, recovered);
+        }
+
+        #[test]
+        fn back_compat_reads_pre_phase_67_21_column_parquet() {
+            // Pre-phase-67 layout: same 21 columns as today minus the
+            // four v11 wire fields. We synthesise it by encoding via
+            // current `to_record_batch` then projecting away the new
+            // columns, mirroring how a parquet file written before
+            // phase 67 would deserialize.
+            let rows = vec![
+                sample("SPYx", 1_777_300_010),
+                sample("QQQx", 1_777_300_011),
+            ];
+            let full = to_record_batch(&rows).expect("encode");
+            let schema = full.schema();
+            let keep: Vec<usize> = (0..full.num_columns())
+                .filter(|i| {
+                    let name = schema.field(*i).name();
+                    !matches!(
+                        name.as_str(),
+                        "bid_price" | "ask_price" | "mid_price" | "last_traded_price"
+                    )
+                })
+                .collect();
+            let projected = full.project(&keep).expect("project");
+            assert_eq!(projected.num_columns(), 21);
+
+            let recovered = from_record_batch(&projected).expect("decode");
+            assert_eq!(recovered.len(), 2);
+            for r in &recovered {
+                assert!(r.bid_price.is_none());
+                assert!(r.ask_price.is_none());
+                assert!(r.mid_price.is_none());
+                assert!(r.last_traded_price.is_none());
+            }
+        }
+
+        #[test]
+        fn v11_row_round_trip_preserves_bid_ask_mid_last_traded() {
+            let row = sample_v11("SPYx", 1_777_300_010);
+            let batch = to_record_batch(&[row]).expect("encode");
+            let recovered = from_record_batch(&batch).expect("decode");
+            assert_eq!(recovered.len(), 1);
+            let r = &recovered[0];
+            assert_eq!(r.schema_id, 11);
+            assert_eq!(r.bid_price, Some(21.01));
+            assert_eq!(r.ask_price, Some(715.01));
+            assert_eq!(r.mid_price, Some(368.01));
+            assert_eq!(r.last_traded_price, Some(713.96));
+            // v10-only fields stay null on a v11 row.
+            assert!(r.price.is_none());
+            assert!(r.tokenized_price.is_none());
+            assert!(r.current_multiplier.is_none());
         }
 
         #[test]

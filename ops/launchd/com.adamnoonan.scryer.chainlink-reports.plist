@@ -28,14 +28,23 @@
             path: 258 sigs / 258 reports / 0 failures in 60s while
             Helius was 100% throttled.
 
-            All schemas (3, 7, 8, 9, 10, 11) are decoded; non-xStock
-            feeds emit symbol="". Consumers filter by feed_id allowlist
-            or symbol IS NOT NULL.
+            Schemas decoded (phase 67, 2026-04-30): v10 + v11 fully —
+            v10 carries tokenized_price/price/market_status; v11
+            carries bid/ask/mid/last_traded_price + 6-class
+            market_status. Schemas 3 / 7 / 8 / 9 land as cadence-only
+            stubs (only valid_from / observation_ts / expires_at) —
+            no per-schema decoder yet. Non-xStock feeds emit
+            symbol=""; consumers filter by feed_id allowlist or
+            symbol IS NOT NULL.
 
             24/7 by design — no calendar gating. Chainlink Data Streams
             DON cadence is independent of US market hours; v10 (xStocks)
-            publishes the 24/7 tokenized_price field at all times,
-            v11 publishes only during US cash hours. Both observed.
+            publishes the 24/7 tokenized_price field at all times.
+            v11 publishes 24/5 with off-hours synthetic-marker bid/ask
+            (market_status=5 / closed-weekend bookends end in `.01`
+            per soothsayer's reports/v11_cadence_verification.md);
+            decoder is faithful to the wire — consumers post-filter
+            placeholder rows.
         -->
     </array>
 

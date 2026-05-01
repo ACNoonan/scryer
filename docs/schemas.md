@@ -222,6 +222,90 @@ resolves.
 
 ---
 
+## marginfi_liquidation.v1
+
+**Status.** locked 2026-04-29 — methodology entry "MarginFi-v2
+schemas — 2026-04-29 (locked)" in `methodology_log.md`. Phase TBD-B
+implementation pending.
+
+**Source.** Solana mainnet, MarginFi-v2 program
+`MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA` (verified on-chain
+2026-04-29; the soothsayer-doc-cited
+`MFv2hWf31Z4i1g2AhULZWnuwvvfuBQg4P4HFcXyFZi5` does not exist on
+mainnet — see methodology entry for verification chain). Anchor IX
+`lending_account_liquidate` (anchor disc to be pulled from
+`idl/marginfi/marginfi-v2.json` at implementation time). Accounts
+include `[marginfi_group, asset_bank, liab_bank,
+liquidator_marginfi_account, liquidatee_marginfi_account,
+asset_oracle, liab_oracle, signer]`. IX arg: `asset_amount: u64`
+(collateral seized, in asset-native units).
+
+The conf-haircut prices and pre/post balances are emitted as Anchor
+events (`emit!`) in the program log stream
+(`LendingAccountLiquidateEvent`-style; exact event name pinned via
+IDL). Per-event row reconstructed from event log without re-fetching
+oracle snapshot at trigger time.
+
+```
+signature                   string
+slot                        u64
+block_time                  i64
+group                       string  // pubkey of the Group
+liquidator                  string  // top-level signer pubkey
+liquidatee_account          string  // marginfi Account PDA
+liquidatee_authority        string  // owner of the liquidatee Account
+asset_bank                  string  // collateral side
+asset_mint                  string
+asset_symbol                string  // resolved via xStock/SPL registry, "?" otherwise
+liab_bank                   string  // debt side
+liab_mint                   string
+liab_symbol                 string
+asset_amount_seized         u64     // IX arg, in asset native units
+asset_amount_seized_decimal f64     // human-readable, divided by asset decimals
+asset_oracle_price          f64     // (P, conf) at trigger from event
+asset_oracle_conf           f64
+asset_effective_price       f64     // marginfi-effective: asset → P − conf
+liab_oracle_price           f64
+liab_oracle_conf            f64
+liab_effective_price        f64     // marginfi-effective: liability → P + conf
+liquidator_fee_paid         u64     // event-emitted; in asset native units
+insurance_fund_fee_paid     u64     // event-emitted; in asset native units
+fee_payer                   string  // outer-tx fee payer (Jito-bundle join key)
+pre_health                  f64     // (assets·maint − liabs·maint)/equity, sub-1.0 = liquidatable
+post_health                 f64     // expected ~1.0 after partial liquidation
+```
+
+**Dedup.** `_dedup_key = signature + ':' + ix_index` (matches Drift /
+Mango pattern; MarginFi liquidations can in principle bundle
+multiple seizures across asset/liab pairs in one tx).
+
+**Storage.** `dataset/marginfi/liquidations/v1/year=Y/month=M/day=D.parquet`.
+venue `marginfi`, data_type `liquidations`, daily, no key
+(event-stream pattern matching `kamino_liquidation.v1`).
+
+**Fetcher.** `crates/scryer-fetch-solana/src/marginfi_liquidations.rs`
+(future). `sig_paginate::get_signatures_in_window` (filter: program
+ID, optionally per-Bank PDA for high-density sampling) +
+`parse_transactions::parse_all` + IDL-driven event decode. Use
+`--use-get-transaction` for proxy-routed quota-resilient fallback.
+
+**CLI.** `scry solana marginfi-liquidations --start DATE --end DATE
+[--xstock-only | --all] [--group PUBKEY] --proxy-url URL
+--helius-api-key KEY [--use-get-transaction]`.
+
+**Why a separate panel and not a v2 of `kamino_liquidation.v1`.**
+Two reasons. (1) The `pre_health` / `post_health` semantics are
+MarginFi-specific (computed against the asset-weight-maint /
+liability-weight-maint tuple per Bank, not Kamino's reserve LTV
+gate). Mixing them under one schema would either lose the
+provenance or force a `protocol` discriminator column that consumers
+must filter on every query — same footgun as the `chainlink_data_streams.v1`
+v10/v11 `market_status` mix-up. (2) MarginFi's per-side oracle keys
+are multi-account lists (`bank.config.oracle_keys`) where Kamino's
+are single — the row shape diverges naturally.
+
+---
+
 ## mango_v4_market_tape.v1 — RETRACTED
 
 **Status.** retracted 2026-04-29. Source verification (mango-v4
@@ -356,6 +440,96 @@ Single `getProgramAccounts` call routed through the proxy.
 
 **CLI.** `scry solana fluid-vault-configs --xstock-only --proxy-url URL`.
 With `--all` it skips the memcmp filter.
+
+---
+
+## marginfi_reserve.v1
+
+**Status.** locked 2026-04-29 — methodology entry "MarginFi-v2
+schemas — 2026-04-29 (locked)" in `methodology_log.md`. Phase TBD-A
+implementation pending.
+
+**Source.** Solana mainnet, MarginFi-v2 program
+`MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA` (verified on-chain
+2026-04-29; see methodology entry for verification chain).
+`getProgramAccounts(MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA,
+filter=Bank-discriminator)`. Bank account size needs IDL pin to
+compute precisely; estimate ~1.6KB-2KB based on field set. Per-(Group,
+Bank) snapshot, not paginated by time. Standard `--use-get-transaction`
+fallback if Helius is throttling.
+
+```
+group                       string  // pubkey of the Group
+bank                        string  // pubkey of the Bank PDA
+asset_mint                  string  // pubkey of the SPL mint
+asset_symbol                string  // resolved via xStock/SPL registry, "?" otherwise
+asset_decimals              u8
+
+// Oracle wiring — MULTI-ACCOUNT LIST per the marginfi-v2 README.
+oracle_setup                string  // "switchboard" | "switchboard_v2" |
+                                    //   "pyth_legacy" | "pyth_pull" |
+                                    //   "fixed" — decoded from OracleSetup enum
+oracle_keys                 list<string>  // base58 pubkeys; preserve order from
+                                          //   bank.config.oracle_keys (multi-key
+                                          //   for some banks per README)
+oracle_max_age_seconds      u32     // staleness cap (Pyth/Switchboard)
+
+// Fee + risk parameters.
+asset_weight_init           f64     // collateral haircut on entry
+asset_weight_maint          f64     // maintenance — liquidation trigger threshold
+liability_weight_init       f64
+liability_weight_maint      f64
+liquidator_fee_pct          f64     // typically 2.5%, range 2.5–10% per README
+insurance_fee_pct           f64     // typically 2.5%
+group_fixed_fee_apr         f64
+insurance_ir_fee_pct        f64
+
+// Interest curve points (up to 7 per README).
+zero_util_rate              f64
+hundred_util_rate           f64
+ir_curve_points_json        string  // JSON-serialized list[(util, rate)]; small
+                                    //   (≤7 entries) so JSON is more honest than
+                                    //   parallel-array fixed-arity columns
+
+// Operational caps.
+deposit_limit               u64
+borrow_limit                u64
+total_asset_shares          u128_string   // u128 stored as decimal string
+                                          //   (no native u128 in arrow)
+total_liability_shares      u128_string
+operational_state           string  // "Operational" | "ReduceOnly" | "Paused"
+
+// Bank-state cache timestamp.
+last_update                 i64     // bank.cache last update unix sec
+```
+
+**Dedup.** `_dedup_key = bank` (one PDA per Bank). Weekly snapshot
+cadence intentionally produces one fresh row per Bank per week —
+partition by `_fetched_at` rather than dedup-collapse on re-fetch
+of the same bank.
+
+**Storage.** `dataset/marginfi/reserves/v1/year=Y/month=M/day=D.parquet`.
+Daily partition (matches `kamino_reserve.v1` cadence pattern; ~10–500
+banks per snapshot; weekly cron-driven re-runs build the
+parameter-drift time series for free). venue `marginfi`,
+data_type `reserves`.
+
+**Fetcher.** `crates/scryer-fetch-solana/src/marginfi_reserves.rs`
+(future). Single proxy-routed `getProgramAccounts` with Bank-disc
+memcmp filter; decode via IDL-driven Borsh. `oracle_keys` decoded
+verbatim (preserve list order — some banks point at multiple oracle
+accounts and the order is load-bearing for downstream provider
+dispatch).
+
+**CLI.** `scry solana marginfi-reserves [--xstock-only | --all]
+[--group PUBKEY] --proxy-url URL`.
+
+**Operational.** Run weekly via `com.adamnoonan.scryer.marginfi-
+reserves.plist` (Phase TBD-C); cron-driven re-runs accumulate
+parameter-drift history. The methodology entry calls out
+oracle-provider-specific staleness behavior (Switchboard banks need
+caller-initiated cranks) — `oracle_setup` is the right segment column
+for downstream weekend-staleness analysis.
 
 ---
 
@@ -664,17 +838,21 @@ Pythnet cluster.
 
 ## chainlink_data_streams.v1
 
-**Status.** locked — phase 60 (2026-04-29). Originally specced as
-`chainlink_report.v1` (cadence-only diagnostic); promoted mid-build
-to a continuous price tape per the user's "we'd need consistent data
-to cover this as an inherent weakness" challenge. Same fetcher, same
-Tier 1 log-parsing decode (the Verifier's `Program return:` log
-lines deliver the already-decompressed wrapper-stripped report blob,
-skipping Snappy entirely), wider row schema. Third leg (alongside
-Phase 45's `cex_stock_perp_tape.v1` and Phase 59's
-`backed_nav_strikes.v1`) of the paper §1.1 oracle-divergence panel.
+**Status.** locked — phase 60 (2026-04-29). Phase 67 (2026-04-30)
+appended four nullable v11 wire-field columns
+(`bid_price`/`ask_price`/`mid_price`/`last_traded_price`) and added
+`decode_v11` so v11 reports fully decode instead of landing as
+cadence-only stubs. Originally specced as `chainlink_report.v1`
+(cadence-only diagnostic); promoted mid-build to a continuous price
+tape per the user's "we'd need consistent data to cover this as an
+inherent weakness" challenge. Same fetcher, same Tier 1 log-parsing
+decode (the Verifier's `Program return:` log lines deliver the
+already-decompressed wrapper-stripped report blob, skipping Snappy
+entirely), wider row schema. Third leg (alongside Phase 45's
+`cex_stock_perp_tape.v1` and Phase 59's `backed_nav_strikes.v1`) of
+the paper §1.1 oracle-divergence panel.
 
-**Columns** (16 logical, 5 metadata):
+**Columns** (20 logical, 5 metadata):
 
 - `symbol` (LargeUtf8, non-null) — xStock ticker for known feeds,
   empty string otherwise. Registry lives in
@@ -689,18 +867,28 @@ Phase 45's `cex_stock_perp_tape.v1` and Phase 59's
 - `observation_ts` (Int64, non-null) — DON-side observation second;
   primary cadence anchor.
 - `expires_at` (Int64, non-null) — unix second.
-- `last_update_ts_ns` (Int64, nullable) — v10-only; nanoseconds.
-- `native_fee_raw`, `link_fee_raw` (Int64, nullable) — v10-only.
+- `last_update_ts_ns` (Int64, nullable) — DON wall-clock nanoseconds.
+  Populated for v10 (word 6 `last_update_timestamp_ns`) and v11
+  (word 7 `last_seen_timestamp_ns`); null for cadence-only rows.
+- `native_fee_raw`, `link_fee_raw` (Int64, nullable) — populated for
+  v10 + v11; null for cadence-only rows.
 - `price` (Float64, nullable) — v10 word 7 (underlying-venue last
   trade, 1e18-scaled int192 / 1e18). **Stale on weekends/holidays**
-  for tokenized-asset feeds.
+  for tokenized-asset feeds. Null for v11 (use `last_traded_price`)
+  and non-{v10,v11} schemas.
 - `tokenized_price` (Float64, nullable) — v10 word 12 (24/7
   CEX-aggregated mark, 1e18-scaled). The field V5 tape compares to
-  Jupiter mid.
-- `market_status` (Int32, nullable) — v10 word 8 (0=Unknown,
-  1=Closed, 2=Open).
+  Jupiter mid. Null for v11 (use `mid_price` for the DON-consensus
+  benchmark) and non-{v10,v11} schemas.
+- `market_status` (Int32, nullable) — **cross-schema; semantics vary
+  by `schema_id`.** v10 word 8: 0=Unknown, 1=Closed, 2=Open. v11
+  word 13: 0=unknown, 1=pre-mkt, 2=regular, 3=post-mkt, 4=overnight,
+  5=closed/weekend. **Consumer queries on this column MUST include a
+  `schema_id` predicate** — without it, v10 closed-market rows mix
+  with v11 pre-market rows. Null for non-{v10,v11} schemas.
 - `current_multiplier` (Float64, nullable) — v10 word 9 (corp-action
-  multiplier, 1e18-scaled).
+  multiplier, 1e18-scaled). v10-only — null for v11 (no equivalent
+  on the wire) and non-{v10,v11} schemas.
 - `signature` (LargeUtf8, non-null) — Solana tx signature.
 - `slot` (Int64, non-null) — Solana slot.
 - `fee_payer` (LargeUtf8, non-null) — outer-tx fee payer pubkey
@@ -708,6 +896,21 @@ Phase 45's `cex_stock_perp_tape.v1` and Phase 59's
 - `block_time` (Int64, non-null) — tx blockTime; differs from
   `observation_ts` by ~1-10s (DON observation vs on-chain
   confirmation).
+- `bid_price` (Float64, nullable) — v11 word 8 (top-of-book bid,
+  1e18-scaled int192 / 1e18). v11 publishes `.01`-suffixed synthetic
+  bids during `market_status ∈ {4,5}` for SPYx/QQQx/TSLAx — the
+  decoder is faithful to the wire; consumers filter via the `.01`
+  marker per soothsayer's `reports/v11_cadence_verification.md`.
+  Null for non-v11 rows.
+- `ask_price` (Float64, nullable) — v11 word 10 (top-of-book ask).
+  Same `.01`-suffix synthetic-marker caveat as `bid_price`.
+- `mid_price` (Float64, nullable) — v11 word 6 (DON-consensus
+  benchmark price). v11 analogue of v10's `tokenized_price`. During
+  PURE_PLACEHOLDER (closed-market) `mid` equals the arithmetic
+  midpoint of the synthetic bid/ask bookend, not a market mid.
+- `last_traded_price` (Float64, nullable) — v11 word 12 (last
+  on-venue trade price reported to the DON). Most recoverable signal
+  during `market_status ∈ {4,5}` per soothsayer's classifier.
 
 Plus standard `_schema_version` / `_fetched_at` / `_source` /
 `_dedup_key`.
@@ -741,6 +944,28 @@ across schemas:
 | `market_status` (v10) | 316..320 | u32 BE |
 | `current_multiplier` (v10) | 320..352 | int192 BE |
 | `tokenized_price` (v10) | 416..448 | int192 BE |
+
+**v11 byte layout** (Tokenized Asset 24/5; schema `0x000b`). 14
+words × 32 bytes = 448 bytes. The first three cadence words match
+v10, then v11 reorders entirely (mid/bid/ask + market_status as a
+6-class enum):
+
+| Word | Field | Type |
+|------|-------|------|
+| 0 | `feed_id` (incl. schema_id at 0..2) | bytes32 |
+| 1 | `valid_from_timestamp` | u32 (right-aligned) |
+| 2 | `observations_timestamp` | u32 |
+| 3 | `native_fee` | u192 |
+| 4 | `link_fee` | u192 |
+| 5 | `expires_at` | u32 |
+| 6 | `mid` | i192 |
+| 7 | `last_seen_timestamp_ns` | u64 |
+| 8 | `bid` | i192 |
+| 9 | `bid_volume` | i192 (not stored; ignored) |
+| 10 | `ask` | i192 |
+| 11 | `ask_volume` | i192 (not stored; ignored) |
+| 12 | `last_traded_price` | i192 |
+| 13 | `market_status` | u32 (6-class enum) |
 
 ---
 
