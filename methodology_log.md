@@ -2362,6 +2362,65 @@ sub-section, and adds an audit note.
 
 ---
 
+## Operator paths — `--dataset` resolution — 2026-05-01 (locked)
+
+### What changed
+
+Before today, every `bin/scry` subcommand defaulted `--dataset` to
+the relative path `./dataset`. Operator launchd plists (all 7
+installed) and the portal config worked around this by passing
+`--dataset /Users/adamnoonan/Library/Application Support/scryer/dataset`
+explicitly. Interactive `scry` invocations from the repo root,
+however, picked up the relative default and wrote to
+`~/Documents/scryer/dataset/` — a second, undeclared dataset root.
+
+A 2026-05-01 audit found **303 MB / 10,410 parquet files** at the
+drift root, including the entire CME 2018-2026 backfill (302 MB,
+10,367 partitions). The drift root violated the "single canonical
+layout under `scryer/dataset/`" pre-flight (line 22 of this log) by
+existing, and the methodology was silent on how to prevent it.
+
+### Locked policy
+
+`--dataset` resolution order, in priority:
+
+1. The `--dataset PATH` flag (always wins).
+2. The `$SCRYER_DATASET` environment variable.
+3. **macOS**: `$HOME/Library/Application Support/scryer/dataset`.
+   **Linux**: `$HOME/.local/share/scryer/dataset`.
+4. Last-resort fallback if `$HOME` is unset: `./dataset` (preserves
+   sandbox-build compatibility; not expected to fire in normal use).
+
+The relative `./dataset` default is **deprecated** as a primary path
+— if a process resolves to step 4, that's a misconfigured
+environment, not a normal operating mode.
+
+`bin/scry/src/dataset_default.rs` provides the helper. Every
+subcommand uses `clap`'s `env = "SCRYER_DATASET",
+default_value_os_t = crate::dataset_default::default_dataset_root()`
+attribute pair so the resolution is consistent. Mirrors the portal
+backend's resolution at `crates/scryer-portal/src/config.rs::resolve`.
+
+### What this does NOT change
+
+- Plists keep working unchanged because they pass `--dataset` explicitly.
+- The portal backend's default is unchanged (it already targeted XDG).
+- Existing parquet at the canonical root is unchanged. The 303 MB at
+  the drift root was migrated via `rsync --ignore-existing` for
+  non-overlap content + `scry import` for the three day=28.parquet
+  overlaps that were verified to be a strict subset (rows_added=0
+  across all three after dedup merge).
+
+### Decision-log row
+
+Lands with `bin/scry/src/dataset_default.rs` + the 60-occurrence
+sweep replacing `default_value = "./dataset"` across 37 subcommand
+files + the migration of the drift-root content into canonical via
+the procedure above. Methodology-only — no schema delta, no
+fetcher-crate delta, no plist delta.
+
+---
+
 ## Decision log + Specification log
 
 Both logs moved to `docs/phase_log.md` 2026-04-29. The Decision log is
