@@ -42,6 +42,16 @@ pub struct SwapsArgs {
     /// `scryer_store::venue::SOLANA_RAYDIUM_V4`.
     #[arg(long, default_value = scryer_store::venue::SOLANA_RAYDIUM_V4)]
     venue: String,
+    /// Hard cap on stage-1 `getSignaturesForAddress` pages walked
+    /// before the fetcher bails. The pagination starts at "now" and
+    /// walks backward, so the cap is on TOTAL pages (1000 sigs each)
+    /// regardless of where `--start` falls. Default 5000 (= 5M sigs)
+    /// — safe ceiling for ≤30d windows on most pools. For longer
+    /// windows on high-volume pools (e.g. Raydium SOL/USDC over 180d),
+    /// pass a higher value: 30000 (= 30M sigs) covers any reasonable
+    /// single-pool scan.
+    #[arg(long, default_value_t = 5_000)]
+    max_sig_pages: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,7 +90,8 @@ pub async fn run_swaps(args: SwapsArgs) -> Result<()> {
         args.helius_api_key
     );
 
-    let cfg = SwapsFetcherConfig::new(args.proxy_url.clone(), helius_url);
+    let mut cfg = SwapsFetcherConfig::new(args.proxy_url.clone(), helius_url);
+    cfg.paginate.max_pages = args.max_sig_pages;
     let fetcher = SwapsFetcher::new(cfg).context("building SwapsFetcher")?;
     tracing::info!(
         pool = pool.pool_address,
