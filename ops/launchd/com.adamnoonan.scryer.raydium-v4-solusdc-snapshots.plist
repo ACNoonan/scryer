@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.raydium-v4-solusdc-snapshots</string>
+
+    <!--
+      Hourly forward-tail of the Raydium v4 SOL/USDC pool-vault
+      snapshot panel. Each tick re-derives snapshots from the
+      preceding 2 days of swap partitions via proxy-routed
+      `getTransaction(jsonParsed)` for the first signature per hour.
+      Idempotent on `pool:slot` dedup_key.
+
+      Cadence is 6h to match the swaps tail; the 2-day lookback
+      is yesterday-and-today so a missed tick still gets caught on
+      the next run AND so today's day-partition (which the swaps
+      tail just wrote) is fresh enough to be useful.
+
+      Depends on the swaps tail having written the underlying swap
+      partitions for the same window; the bash command sequences
+      START/END so launchd evaluates them at run time, not at load.
+    -->
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>START=$(date -u -v-2d +%Y-%m-%d); END=$(date -u +%Y-%m-%d); exec /Users/adamnoonan/Library/Application\ Support/scryer/bin/scry solana pool-snapshots --pool-metadata /Users/adamnoonan/Documents/quant-work/data/pool_metadata.json --start "$START" --end "$END" --dataset /Users/adamnoonan/Library/Application\ Support/scryer/dataset --venue solana_raydium_v4</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>21600</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/raydium-v4-solusdc-snapshots.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/raydium-v4-solusdc-snapshots.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SCRY_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>

@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.raydium-v4-solusdc-swaps</string>
+
+    <!--
+      Hourly forward-tail of the Raydium v4 SOL/USDC swap panel.
+      Each tick fetches the prior 25h (24h window + 1h overlap so
+      a missed tick still gets caught on the next run); idempotent
+      on `signature` dedup_key. Writes to
+      dataset/solana_raydium_v4/swaps/v1/pool=<ADDR>/year=Y/month=M/day=D.parquet.
+
+      The 25h overlap costs ~1h of duplicate parseTransactions calls
+      per tick (collapsed at write time by the store's dedup), in
+      exchange for self-healing across single missed ticks (proxy
+      blip, machine sleep, etc.).
+    -->
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>START=$(date -u -v-25H +%Y-%m-%dT%H:%M:%SZ); END=$(date -u +%Y-%m-%dT%H:%M:%SZ); exec /Users/adamnoonan/Library/Application\ Support/scryer/bin/scry solana swaps --pool-metadata /Users/adamnoonan/Documents/quant-work/data/pool_metadata.json --start "$START" --end "$END" --dataset /Users/adamnoonan/Library/Application\ Support/scryer/dataset --venue solana_raydium_v4</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>21600</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/raydium-v4-solusdc-swaps.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/raydium-v4-solusdc-swaps.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SCRY_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>
