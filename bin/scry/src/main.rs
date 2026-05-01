@@ -156,6 +156,11 @@ struct ImportCmd {
 enum ImportTarget {
     /// Import a swap.v1 parquet (e.g. quant-work/data/raydium_solusdc_swaps.parquet).
     Swaps(import_cmd::SwapsArgs),
+    /// Import Flipside Crypto Solana DEX swaps (`solana.defi.fact_swaps`
+    /// shape) into `swap.v1`. LVR-unblock pivot from Helius
+    /// parseTransactions for windows where Helius credit cost is
+    /// prohibitive (e.g., 180d Raydium SOL/USDC). Phase 75.
+    FlipsideSwaps(import_cmd::FlipsideSwapsArgs),
     /// Import a trade.v1 parquet (e.g. quant-work/data/kraken_solusd_trades.parquet).
     Trades(import_cmd::TradesArgs),
     /// Import a kamino_scope.v1 parquet (e.g. soothsayer/data/raw/kamino_scope_tape_*.parquet).
@@ -591,6 +596,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Import(c) => match c.target {
             ImportTarget::Swaps(a) => import_cmd::run_swaps(a).await,
+            ImportTarget::FlipsideSwaps(a) => import_cmd::run_flipside_swaps(a).await,
             ImportTarget::Trades(a) => import_cmd::run_trades(a).await,
             ImportTarget::KaminoScope(a) => import_cmd::run_kamino_scope(a).await,
             ImportTarget::Pyth(a) => import_cmd::run_pyth(a).await,

@@ -15,7 +15,7 @@ use std::time::SystemTime;
 
 use arrow_array::{
     Array, Date32Array, Float64Array, Int64Array, LargeStringArray, RecordBatch, StringArray,
-    TimestampMicrosecondArray, TimestampMillisecondArray,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use scryer_schema::backed::v1 as backed_v1;
@@ -224,6 +224,77 @@ pub fn read_legacy_trade_parquet(
     read_legacy_parquet(path, opts, extract_trades)
 }
 
+/// Per-import configuration for the Flipside `solana.defi.fact_swaps`
+/// reader. Identifies which mint is "SOL" and which is "USDC" so the
+/// reader can pick the right side from the upstream's
+/// `swap_from_mint` / `swap_to_mint` pair and emit `swap.v1` rows
+/// with the correct `Side` + `(sol_amount, usdc_amount)` orientation.
+///
+/// Defaults to canonical wrapped-SOL + USDC mints. Override only if
+/// importing a non-USDC pool (e.g., SOL/USDT, where `usdc_mint`
+/// becomes the USDT mint and the row's `usdc_amount` then carries
+/// USDT amounts — the schema column name is locked, but the field
+/// semantics expand). See methodology entry "LVR-unblock pivot —
+/// Flipside import — 2026-05-01 (locked)".
+#[derive(Clone, Debug)]
+pub struct FlipsideSwapConfig {
+    /// Mint address treated as "SOL" for the import.
+    pub sol_mint: String,
+    /// Mint address treated as "USDC" for the import.
+    pub usdc_mint: String,
+}
+
+impl Default for FlipsideSwapConfig {
+    fn default() -> Self {
+        Self {
+            sol_mint: "So11111111111111111111111111111111111111112".to_string(),
+            usdc_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+        }
+    }
+}
+
+/// Read a Flipside-Crypto-style Solana DEX swaps parquet
+/// (`solana.defi.fact_swaps` shape) and normalize each row to
+/// `swap.v1::Swap`. Required columns:
+///
+/// - `tx_id` (LargeUtf8 or Utf8) — Solana transaction signature; lands
+///   in `swap.v1::Swap::signature` and is the dedup_key.
+/// - `block_id` (Int64) — slot.
+/// - `block_timestamp` (Timestamp\[ns|us|ms\]) — block time, normalized
+///   to unix seconds.
+/// - `swap_from_mint`, `swap_to_mint` (LargeUtf8 or Utf8) — used with
+///   `cfg.sol_mint` / `cfg.usdc_mint` to determine `Side`. Exactly one
+///   of (from_mint, to_mint) must equal `sol_mint` and the other must
+///   equal `usdc_mint`; rows that don't match return an error so the
+///   operator can re-filter their SQL.
+/// - `swap_from_amount`, `swap_to_amount` (Float64) — decimal-adjusted
+///   token amounts (Flipside's canonical shape: `1.5` for 1.5 SOL,
+///   not `1500000000` lamports).
+///
+/// Direction → `Side`:
+/// - `from_mint == sol_mint` (trader gave up SOL, received USDC) →
+///   `Side::SellSol`.
+/// - `from_mint == usdc_mint` (trader gave up USDC, received SOL) →
+///   `Side::BuySol`.
+///
+/// `sol_amount` = the SOL-side amount (positive). `usdc_amount` =
+/// the USDC-side amount (positive). `price = usdc_amount / sol_amount`
+/// (USDC per SOL).
+///
+/// Extra Flipside columns (`swapper`, `program_id`, `swap_from_symbol`,
+/// `swap_to_symbol`, `succeeded`, etc.) are ignored — the operator's
+/// SQL `WHERE` clause should already filter to the desired
+/// program / pool / success criteria.
+pub fn read_flipside_swap_parquet(
+    path: &Path,
+    opts: &ImportOptions,
+    cfg: &FlipsideSwapConfig,
+) -> Result<Vec<swap_v1::Swap>, StoreError> {
+    read_legacy_parquet(path, opts, |batch, opts| {
+        extract_flipside_swaps(batch, opts, cfg)
+    })
+}
+
 fn extract_swaps(
     batch: &RecordBatch,
     opts: &ImportOptions,
@@ -283,6 +354,111 @@ fn extract_trades(
             trade_id: trade_id.value(i),
             meta: Meta::new(
                 trade_v1::SCHEMA_VERSION,
+                opts.fetched_at,
+                opts.source_label.clone(),
+            ),
+        });
+    }
+    Ok(out)
+}
+
+/// Flipside `block_timestamp` is `Timestamp(Nanosecond|Microsecond|
+/// Millisecond, UTC)` depending on Snowflake → parquet export
+/// settings. The reader accepts any of the three and normalizes to
+/// unix seconds.
+enum FlipsideTsCol<'a> {
+    Ns(&'a TimestampNanosecondArray),
+    Us(&'a TimestampMicrosecondArray),
+    Ms(&'a TimestampMillisecondArray),
+}
+
+impl FlipsideTsCol<'_> {
+    fn unix_seconds(&self, i: usize) -> i64 {
+        match self {
+            Self::Ns(a) => a.value(i) / 1_000_000_000,
+            Self::Us(a) => a.value(i) / 1_000_000,
+            Self::Ms(a) => a.value(i) / 1_000,
+        }
+    }
+}
+
+fn flipside_ts_column<'a>(
+    batch: &'a RecordBatch,
+    name: &'static str,
+) -> Result<FlipsideTsCol<'a>, StoreError> {
+    let idx = batch
+        .schema()
+        .index_of(name)
+        .map_err(|_| StoreError::Schema(FromArrowError::MissingColumn(name)))?;
+    let col = batch.column(idx);
+    if let Some(a) = col.as_any().downcast_ref::<TimestampNanosecondArray>() {
+        return Ok(FlipsideTsCol::Ns(a));
+    }
+    if let Some(a) = col.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+        return Ok(FlipsideTsCol::Us(a));
+    }
+    if let Some(a) = col.as_any().downcast_ref::<TimestampMillisecondArray>() {
+        return Ok(FlipsideTsCol::Ms(a));
+    }
+    Err(StoreError::Schema(FromArrowError::WrongType {
+        column: name,
+        expected: "Timestamp(Nanosecond|Microsecond|Millisecond)",
+    }))
+}
+
+fn extract_flipside_swaps(
+    batch: &RecordBatch,
+    opts: &ImportOptions,
+    cfg: &FlipsideSwapConfig,
+) -> Result<Vec<swap_v1::Swap>, StoreError> {
+    let signature = string_column(batch, "tx_id")?;
+    let slot = downcast::<Int64Array>(batch, "block_id")?;
+    let block_ts = flipside_ts_column(batch, "block_timestamp")?;
+    let from_mint = string_column(batch, "swap_from_mint")?;
+    let from_amount = downcast::<Float64Array>(batch, "swap_from_amount")?;
+    let to_mint = string_column(batch, "swap_to_mint")?;
+    let to_amount = downcast::<Float64Array>(batch, "swap_to_amount")?;
+
+    let mut out = Vec::with_capacity(batch.num_rows());
+    for i in 0..batch.num_rows() {
+        let from = from_mint.value(i);
+        let to = to_mint.value(i);
+        let from_amt = from_amount.value(i);
+        let to_amt = to_amount.value(i);
+
+        let (side, sol_amount, usdc_amount) =
+            if from == cfg.sol_mint && to == cfg.usdc_mint {
+                (swap_v1::Side::SellSol, from_amt, to_amt)
+            } else if from == cfg.usdc_mint && to == cfg.sol_mint {
+                (swap_v1::Side::BuySol, to_amt, from_amt)
+            } else {
+                return Err(StoreError::Schema(FromArrowError::UnknownEnumValue {
+                    column: "swap_from_mint/swap_to_mint",
+                    value: format!("({from} -> {to}) does not match configured (sol={}, usdc={})", cfg.sol_mint, cfg.usdc_mint),
+                }));
+            };
+
+        // Avoid divide-by-zero on a degenerate row (Flipside's pipeline
+        // shouldn't emit zero-amount swaps, but defend anyway —
+        // store/consumer would NaN-out otherwise and a zero-row row is
+        // useless for LVR analysis).
+        if sol_amount <= 0.0 || usdc_amount <= 0.0 {
+            return Err(StoreError::Schema(FromArrowError::UnknownEnumValue {
+                column: "swap_from_amount/swap_to_amount",
+                value: format!("non-positive amounts: sol={sol_amount}, usdc={usdc_amount}"),
+            }));
+        }
+
+        out.push(swap_v1::Swap {
+            signature: signature.value(i),
+            slot: slot.value(i) as u64,
+            ts: block_ts.unix_seconds(i),
+            side,
+            sol_amount,
+            usdc_amount,
+            price: usdc_amount / sol_amount,
+            meta: Meta::new(
+                swap_v1::SCHEMA_VERSION,
                 opts.fetched_at,
                 opts.source_label.clone(),
             ),

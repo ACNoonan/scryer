@@ -11,12 +11,18 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow_array::{Float64Array, Int64Array, LargeStringArray, RecordBatch};
-use arrow_schema::{DataType, Field, Schema};
+use arrow_array::{
+    Float64Array, Int64Array, LargeStringArray, RecordBatch, TimestampMicrosecondArray,
+    TimestampNanosecondArray,
+};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
-use scryer_store::import::{read_legacy_swap_parquet, read_legacy_trade_parquet, ImportOptions};
+use scryer_store::import::{
+    read_flipside_swap_parquet, read_legacy_swap_parquet, read_legacy_trade_parquet,
+    FlipsideSwapConfig, ImportOptions,
+};
 use scryer_store::{venue, Dataset, UtcDay};
 
 fn write_legacy_swap_parquet(path: &Path) {
@@ -367,6 +373,333 @@ fn live_fixtures_smoke_kamino_scope() {
         rows.len(),
         path.display()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Flipside `solana.defi.fact_swaps` import path
+// ---------------------------------------------------------------------------
+
+const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
+const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+fn write_flipside_swaps_parquet(path: &Path, ts_unit: TimeUnit) {
+    // Mirrors the operator's drafted SQL output. Three rows: SOL→USDC
+    // (sell), USDC→SOL (buy), and an extra `swapper` / `program_id`
+    // column to verify the importer ignores them.
+    let ts_field_unit = match ts_unit {
+        TimeUnit::Nanosecond => TimeUnit::Nanosecond,
+        TimeUnit::Microsecond => TimeUnit::Microsecond,
+        _ => panic!("test only exercises ns + us"),
+    };
+    let schema = Schema::new(vec![
+        Field::new("tx_id", DataType::LargeUtf8, false),
+        Field::new("block_id", DataType::Int64, false),
+        Field::new(
+            "block_timestamp",
+            DataType::Timestamp(ts_field_unit, None),
+            false,
+        ),
+        Field::new("swap_from_mint", DataType::LargeUtf8, false),
+        Field::new("swap_from_amount", DataType::Float64, false),
+        Field::new("swap_to_mint", DataType::LargeUtf8, false),
+        Field::new("swap_to_amount", DataType::Float64, false),
+        Field::new("swapper", DataType::LargeUtf8, false),
+        Field::new("program_id", DataType::LargeUtf8, false),
+    ]);
+
+    // Anchor block_timestamp at 2026-04-25 14:00:00 UTC = 1777125600s.
+    // Three trades, 1s apart.
+    let ts_unix_secs = [1_777_125_600i64, 1_777_125_601, 1_777_125_602];
+    let block_ts: Arc<dyn arrow_array::Array> = match ts_unit {
+        TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::from_iter_values(
+            ts_unix_secs.iter().map(|s| s * 1_000_000_000),
+        )),
+        TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::from_iter_values(
+            ts_unix_secs.iter().map(|s| s * 1_000_000),
+        )),
+        _ => unreachable!(),
+    };
+
+    let tx_id = LargeStringArray::from(vec!["sigSell", "sigBuy", "sigSell2"]);
+    let block_id = Int64Array::from(vec![416_000_000i64, 416_000_001, 416_000_002]);
+    let from_mint = LargeStringArray::from(vec![WSOL_MINT, USDC_MINT, WSOL_MINT]);
+    let from_amount = Float64Array::from(vec![1.5, 130.0, 0.5]);
+    let to_mint = LargeStringArray::from(vec![USDC_MINT, WSOL_MINT, USDC_MINT]);
+    let to_amount = Float64Array::from(vec![130.5, 1.4955, 43.5]);
+    let swapper = LargeStringArray::from(vec!["walletA", "walletB", "walletA"]);
+    let program_id = LargeStringArray::from(vec![
+        "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+        "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+        "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+    ]);
+
+    let batch = RecordBatch::try_new(
+        Arc::new(schema.clone()),
+        vec![
+            Arc::new(tx_id),
+            Arc::new(block_id),
+            block_ts,
+            Arc::new(from_mint),
+            Arc::new(from_amount),
+            Arc::new(to_mint),
+            Arc::new(to_amount),
+            Arc::new(swapper),
+            Arc::new(program_id),
+        ],
+    )
+    .unwrap();
+
+    let file = File::create(path).unwrap();
+    let props = WriterProperties::builder()
+        .set_compression(Compression::SNAPPY)
+        .build();
+    let mut writer = ArrowWriter::try_new(file, Arc::new(schema), Some(props)).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+#[test]
+fn flipside_swap_parquet_decodes_side_amounts_and_price() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("flipside_swaps_us.parquet");
+    write_flipside_swaps_parquet(&path, TimeUnit::Microsecond);
+
+    let opts = ImportOptions {
+        source_label: "flipside:solana.defi.fact_swaps:test".to_string(),
+        fetched_at: 1_780_000_000,
+    };
+    let cfg = FlipsideSwapConfig::default();
+    let rows = read_flipside_swap_parquet(&path, &opts, &cfg).expect("import");
+    assert_eq!(rows.len(), 3);
+
+    // Row 0: SOL → USDC = SellSol, sol=1.5, usdc=130.5, price=87.0
+    let r0 = &rows[0];
+    assert_eq!(r0.signature, "sigSell");
+    assert_eq!(r0.slot, 416_000_000);
+    assert_eq!(r0.ts, 1_777_125_600);
+    assert_eq!(r0.side, scryer_schema::swap::v1::Side::SellSol);
+    assert!((r0.sol_amount - 1.5).abs() < 1e-12);
+    assert!((r0.usdc_amount - 130.5).abs() < 1e-12);
+    assert!((r0.price - 87.0).abs() < 1e-12);
+    assert_eq!(r0.meta.schema_version, "swap.v1");
+    assert_eq!(r0.meta.source, "flipside:solana.defi.fact_swaps:test");
+    assert_eq!(r0.meta.fetched_at, 1_780_000_000);
+    assert_eq!(r0.dedup_key(), "sigSell");
+
+    // Row 1: USDC → SOL = BuySol, sol=1.4955, usdc=130.0, price≈86.93
+    let r1 = &rows[1];
+    assert_eq!(r1.signature, "sigBuy");
+    assert_eq!(r1.side, scryer_schema::swap::v1::Side::BuySol);
+    assert!((r1.sol_amount - 1.4955).abs() < 1e-12);
+    assert!((r1.usdc_amount - 130.0).abs() < 1e-12);
+    assert!((r1.price - 130.0 / 1.4955).abs() < 1e-9);
+
+    // Row 2: another sell, with smaller amounts
+    let r2 = &rows[2];
+    assert_eq!(r2.signature, "sigSell2");
+    assert_eq!(r2.side, scryer_schema::swap::v1::Side::SellSol);
+    assert!((r2.price - 87.0).abs() < 1e-9);
+}
+
+#[test]
+fn flipside_swap_parquet_handles_nanosecond_timestamps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("flipside_swaps_ns.parquet");
+    write_flipside_swaps_parquet(&path, TimeUnit::Nanosecond);
+
+    let opts = ImportOptions {
+        source_label: "flipside:test-ns".to_string(),
+        fetched_at: 0,
+    };
+    let cfg = FlipsideSwapConfig::default();
+    let rows = read_flipside_swap_parquet(&path, &opts, &cfg).expect("import");
+    assert_eq!(rows.len(), 3);
+    // Same ts as in the us-precision test — proves the dispatch
+    // normalizes both precisions to unix seconds identically.
+    assert_eq!(rows[0].ts, 1_777_125_600);
+    assert_eq!(rows[2].ts, 1_777_125_602);
+}
+
+#[test]
+fn flipside_swap_parquet_writes_through_dataset_with_dedup() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dataset_root = tmp.path().join("dataset");
+    let parquet_path = tmp.path().join("flipside.parquet");
+    write_flipside_swaps_parquet(&parquet_path, TimeUnit::Microsecond);
+
+    let opts = ImportOptions {
+        source_label: "flipside:test".to_string(),
+        fetched_at: 1_780_000_000,
+    };
+    let cfg = FlipsideSwapConfig::default();
+    let rows = read_flipside_swap_parquet(&parquet_path, &opts, &cfg).unwrap();
+
+    let ds = Dataset::new(&dataset_root);
+    let pool = "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2";
+    let stats = ds
+        .write::<scryer_schema::swap::v1::Swap>(
+            venue::SOLANA_RAYDIUM_V4,
+            Some(pool),
+            &rows,
+        )
+        .unwrap();
+    assert_eq!(stats.rows_added, 3);
+    assert_eq!(stats.rows_deduped, 0);
+    assert_eq!(stats.partitions_written, 1);
+
+    // Re-import + re-write: dedup_key (signature) should collapse all 3.
+    let stats2 = ds
+        .write::<scryer_schema::swap::v1::Swap>(
+            venue::SOLANA_RAYDIUM_V4,
+            Some(pool),
+            &rows,
+        )
+        .unwrap();
+    assert_eq!(stats2.rows_added, 0);
+    assert_eq!(stats2.rows_deduped, 3);
+
+    // Read back via Dataset::read and confirm content survives round-trip.
+    let day = UtcDay {
+        year: 2026,
+        month: 4,
+        day: 25,
+    };
+    let read_back = ds
+        .read::<scryer_schema::swap::v1::Swap>(venue::SOLANA_RAYDIUM_V4, Some(pool), day)
+        .unwrap();
+    assert_eq!(read_back.len(), 3);
+    let sigs: std::collections::BTreeSet<_> =
+        read_back.iter().map(|r| r.signature.clone()).collect();
+    assert!(sigs.contains("sigSell"));
+    assert!(sigs.contains("sigBuy"));
+    assert!(sigs.contains("sigSell2"));
+}
+
+#[test]
+fn flipside_swap_parquet_rejects_unconfigured_mints() {
+    // Synthetic parquet whose mints don't match the configured
+    // (sol, usdc) pair — the importer must error out rather than
+    // silently mis-attribute Side.
+    use arrow_array::{Float64Array, Int64Array, LargeStringArray};
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("flipside_other_pool.parquet");
+
+    let schema = Schema::new(vec![
+        Field::new("tx_id", DataType::LargeUtf8, false),
+        Field::new("block_id", DataType::Int64, false),
+        Field::new(
+            "block_timestamp",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        ),
+        Field::new("swap_from_mint", DataType::LargeUtf8, false),
+        Field::new("swap_from_amount", DataType::Float64, false),
+        Field::new("swap_to_mint", DataType::LargeUtf8, false),
+        Field::new("swap_to_amount", DataType::Float64, false),
+    ]);
+    let block_ts = TimestampMicrosecondArray::from_iter_values(std::iter::once(
+        1_777_125_600i64 * 1_000_000,
+    ));
+
+    // SOL → USDT (not USDC) — should fail with the configured (sol, usdc) pair.
+    let usdt_mint = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+    let batch = RecordBatch::try_new(
+        Arc::new(schema.clone()),
+        vec![
+            Arc::new(LargeStringArray::from(vec!["sig"])),
+            Arc::new(Int64Array::from(vec![416_000_000i64])),
+            Arc::new(block_ts),
+            Arc::new(LargeStringArray::from(vec![WSOL_MINT])),
+            Arc::new(Float64Array::from(vec![1.0])),
+            Arc::new(LargeStringArray::from(vec![usdt_mint])),
+            Arc::new(Float64Array::from(vec![100.0])),
+        ],
+    )
+    .unwrap();
+
+    let file = File::create(&path).unwrap();
+    let props = WriterProperties::builder()
+        .set_compression(Compression::SNAPPY)
+        .build();
+    let mut writer = ArrowWriter::try_new(file, Arc::new(schema), Some(props)).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let opts = ImportOptions {
+        source_label: "flipside:test".to_string(),
+        fetched_at: 0,
+    };
+    let cfg = FlipsideSwapConfig::default();
+    let err = read_flipside_swap_parquet(&path, &opts, &cfg).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("swap_from_mint") || msg.contains("swap_to_mint"), "got: {msg}");
+}
+
+#[test]
+fn flipside_swap_parquet_supports_nondefault_quote_via_config() {
+    // Pool where the quote leg is USDT, not USDC. Operator passes a
+    // FlipsideSwapConfig with usdc_mint pointed at the USDT mint;
+    // the schema column is still called `usdc_amount` but carries
+    // USDT amounts — this matches the methodology entry's note about
+    // schema-column-name-locked / field-semantics-expanded.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("flipside_solusdt.parquet");
+
+    let schema = Schema::new(vec![
+        Field::new("tx_id", DataType::LargeUtf8, false),
+        Field::new("block_id", DataType::Int64, false),
+        Field::new(
+            "block_timestamp",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        ),
+        Field::new("swap_from_mint", DataType::LargeUtf8, false),
+        Field::new("swap_from_amount", DataType::Float64, false),
+        Field::new("swap_to_mint", DataType::LargeUtf8, false),
+        Field::new("swap_to_amount", DataType::Float64, false),
+    ]);
+    let block_ts = TimestampMicrosecondArray::from_iter_values(std::iter::once(
+        1_777_125_600i64 * 1_000_000,
+    ));
+
+    let usdt_mint = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+    let batch = RecordBatch::try_new(
+        Arc::new(schema.clone()),
+        vec![
+            Arc::new(LargeStringArray::from(vec!["sig"])),
+            Arc::new(Int64Array::from(vec![416_000_000i64])),
+            Arc::new(block_ts),
+            Arc::new(LargeStringArray::from(vec![WSOL_MINT])),
+            Arc::new(Float64Array::from(vec![2.0])),
+            Arc::new(LargeStringArray::from(vec![usdt_mint])),
+            Arc::new(Float64Array::from(vec![175.0])),
+        ],
+    )
+    .unwrap();
+
+    let file = File::create(&path).unwrap();
+    let props = WriterProperties::builder()
+        .set_compression(Compression::SNAPPY)
+        .build();
+    let mut writer = ArrowWriter::try_new(file, Arc::new(schema), Some(props)).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let opts = ImportOptions {
+        source_label: "flipside:solusdt".to_string(),
+        fetched_at: 0,
+    };
+    let cfg = FlipsideSwapConfig {
+        sol_mint: WSOL_MINT.to_string(),
+        usdc_mint: usdt_mint.to_string(),
+    };
+    let rows = read_flipside_swap_parquet(&path, &opts, &cfg).unwrap();
+    assert_eq!(rows.len(), 1);
+    let r = &rows[0];
+    assert_eq!(r.side, scryer_schema::swap::v1::Side::SellSol);
+    assert!((r.sol_amount - 2.0).abs() < 1e-12);
+    assert!((r.usdc_amount - 175.0).abs() < 1e-12); // USDT amount carried in the usdc_amount field
+    assert!((r.price - 87.5).abs() < 1e-12);
 }
 
 #[test]

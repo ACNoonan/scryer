@@ -7,11 +7,11 @@ use scryer_schema::{
     v5_tape, yahoo,
 };
 use scryer_store::import::{
-    read_legacy_backed_parquet, read_legacy_earnings_parquet, read_legacy_kamino_scope_parquet,
-    read_legacy_kraken_funding_parquet, read_legacy_nasdaq_halts_parquet,
-    read_legacy_pyth_parquet, read_legacy_redstone_parquet, read_legacy_swap_parquet,
-    read_legacy_trade_parquet, read_legacy_v5_tape_parquet, read_legacy_yahoo_parquet,
-    ImportOptions,
+    read_flipside_swap_parquet, read_legacy_backed_parquet, read_legacy_earnings_parquet,
+    read_legacy_kamino_scope_parquet, read_legacy_kraken_funding_parquet,
+    read_legacy_nasdaq_halts_parquet, read_legacy_pyth_parquet, read_legacy_redstone_parquet,
+    read_legacy_swap_parquet, read_legacy_trade_parquet, read_legacy_v5_tape_parquet,
+    read_legacy_yahoo_parquet, FlipsideSwapConfig, ImportOptions,
 };
 use scryer_store::Dataset;
 
@@ -82,6 +82,106 @@ pub async fn run_swaps(args: SwapsArgs) -> Result<()> {
         stats.rows_added, stats.rows_deduped, stats.partitions_written
     );
     Ok(())
+}
+
+#[derive(Parser, Debug)]
+pub struct FlipsideSwapsArgs {
+    /// Path to a Flipside Crypto `solana.defi.fact_swaps`-shaped
+    /// parquet file. Pass multiple `--input` for chunked exports
+    /// (Flipside often splits 180d-volume queries by month). All
+    /// files merge into the same partition tree; dedup_key
+    /// (`signature`) collapses any cross-file overlap.
+    #[arg(long, required = true, num_args = 1..)]
+    input: Vec<PathBuf>,
+    /// Venue string under `dataset/`. Defaults to
+    /// `solana_raydium_v4` for the LVR-unblock canonical pool.
+    #[arg(long, default_value = scryer_store::venue::SOLANA_RAYDIUM_V4)]
+    venue: String,
+    /// Pool address (Solana base58). Becomes the `pool=` partition
+    /// segment.
+    #[arg(long)]
+    pool: String,
+    /// `_source` label stamped on every imported row. Default
+    /// `flipside:solana.defi.fact_swaps:<filename>`. Pin a
+    /// run-specific label (e.g.
+    /// `flipside:solana.defi.fact_swaps:lvr-180d-2026-05-01`) so
+    /// consumers can scope queries via `_source LIKE '...'`.
+    #[arg(long)]
+    source: Option<String>,
+    /// Mint address treated as "SOL" for direction-decoding. Default:
+    /// canonical wrapped-SOL.
+    #[arg(long, default_value = "So11111111111111111111111111111111111111112")]
+    sol_mint: String,
+    /// Mint address treated as "USDC" for direction-decoding. For
+    /// SOL/USDT pools, point this at the USDT mint — `usdc_amount`
+    /// then carries USDT amounts (the schema column name is locked).
+    #[arg(long, default_value = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")]
+    usdc_mint: String,
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
+    dataset: PathBuf,
+}
+
+pub async fn run_flipside_swaps(args: FlipsideSwapsArgs) -> Result<()> {
+    if args.input.is_empty() {
+        anyhow::bail!("--input is required (and may be repeated for chunked Flipside exports)");
+    }
+    let cfg = FlipsideSwapConfig {
+        sol_mint: args.sol_mint.clone(),
+        usdc_mint: args.usdc_mint.clone(),
+    };
+    let ds = Dataset::new(&args.dataset);
+
+    let mut total_rows = 0usize;
+    let mut total_added = 0usize;
+    let mut total_deduped = 0usize;
+    let mut total_partitions = 0usize;
+
+    for input in &args.input {
+        let label = args
+            .source
+            .clone()
+            .unwrap_or_else(|| format!("flipside:solana.defi.fact_swaps:{}", file_stem(input)));
+        let opts = ImportOptions::from_file_mtime(input, &label)
+            .with_context(|| format!("reading mtime of {}", input.display()))?;
+        tracing::info!(
+            path = %input.display(),
+            source = %opts.source_label,
+            fetched_at = opts.fetched_at,
+            sol_mint = %args.sol_mint,
+            usdc_mint = %args.usdc_mint,
+            "loading flipside swap parquet"
+        );
+        let rows = read_flipside_swap_parquet(input, &opts, &cfg)
+            .with_context(|| format!("reading {}", input.display()))?;
+        tracing::info!(rows = rows.len(), "loaded; writing to dataset");
+        total_rows += rows.len();
+
+        let stats = ds
+            .write::<swap::v1::Swap>(&args.venue, Some(&args.pool), &rows)
+            .with_context(|| format!("writing to {}", args.dataset.display()))?;
+        total_added += stats.rows_added;
+        total_deduped += stats.rows_deduped;
+        total_partitions += stats.partitions_written;
+    }
+
+    println!(
+        "flipside swaps imported: files={} rows_loaded={} rows_added={} rows_deduped={} \
+         partitions_written={} pool={} venue={}",
+        args.input.len(),
+        total_rows,
+        total_added,
+        total_deduped,
+        total_partitions,
+        args.pool,
+        args.venue,
+    );
+    Ok(())
+}
+
+fn file_stem(p: &std::path::Path) -> String {
+    p.file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 #[derive(Parser, Debug)]

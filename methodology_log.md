@@ -2285,6 +2285,164 @@ deploy) so phase 74 is the next free slot for the fetcher work.
 
 ---
 
+## LVR-unblock pivot — Flipside import for high-volume Solana pool backfills — 2026-05-01 (locked)
+
+**Locked: when a Solana-pool swap-backfill window's expected
+parseTransactions cost exceeds the Helius credit budget by ≥3×, the
+swap data lands via the new `scry import flipside-swaps` path
+(reading Flipside Crypto's `solana.defi.fact_swaps` parquet exports)
+instead of `scry solana swaps` (Helius parseTransactions).**
+
+The driver: phase 74 closed the off-chain leg (Kraken trades), and
+the LVR-unblock work order's Job 2 was the on-chain leg (180d
+Raydium v4 SOL/USDC swaps). The Job 2 attempt revealed two
+constraints that the original phase-4 fetcher design did not
+anticipate at high pool volumes.
+
+### What we found
+
+Live probe 2026-05-01 against Raydium v4 SOL/USDC pool
+`58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2`:
+
+- Sustained sig rate observed at ~30 sigs/sec (snapshot at peak US
+  hours; lower-bound estimate for 180d average is 10-20 sigs/sec).
+- Extrapolated 180d total = 150-470M signatures via
+  `getSignaturesForAddress(pool_address)`.
+- Per-tx Helius parseTransactions cost = 1 credit/tx.
+- Operator's Helius credit balance = 9M credits.
+
+The phase-4 fetcher's design — "stage 1: get every signature
+touching the pool, stage 2: parseTransactions every one of them,
+filter to swaps post-parse" — burns 1 credit per non-swap sig (LP
+ops, oracle updates, MEV-bot probes, aggregator-pass-through routes),
+and on Raydium SOL/USDC most sigs are non-swaps. **9M credits buys
+~3 days of pool coverage at observed rates, not 180.** Stage 1 also
+hit the previously-undocumented `SignaturePageCap{cap: 5000}` guard
+because pagination walks from "now" back regardless of `--start`,
+so windows whose `start_ts` is more than 5M sigs back from "now" can
+never complete in one run.
+
+### Audit-killed alternatives
+
+| Path | Result |
+|------|--------|
+| Increase `--max-sig-pages` to 30000 | Hits cap again (still <50% of way to `--start`); operator-side `SwapsArgs.max_sig_pages` flag added in the same commit chain so future high-volume windows can experiment, but the Helius credit constraint is the binding one. |
+| Chunk the window into 30d slices | Doesn't help — the cap is on pages walked from "now", not pages-within-window; even a 30d slice walks through everything-newer-than-its-start. |
+| `--use-get-transaction` proxy fallback | Proxy-routed `getTransaction` runs at 5-50 tx/s vs parseTransactions' 100 tx/s; at the low end, 78M sigs / 5 tx/s = 180 days of wall-clock to do 30 days. Not viable for backfill cadences. |
+| GeckoTerminal Pro tier | Free tier returns latest-300-only (already accumulated forward by `geckoterminal-trades.plist`); paid tier costs $99+/mo; existing `geckoterminal.v1::Trade` schema differs from `swap.v1` (consumer join cost). |
+| Helius enhanced-API archival dumps | Not free; per-TB pricing. Same data shape as parseTransactions output (= `swap.v1`-compatible) but doesn't beat the credit cost meaningfully. |
+| Birdeye Pro / Allium / Dune | Paid; not appropriate as the v1 fallback. |
+| **Flipside Crypto `solana.defi.fact_swaps`** | **Free tier**, SQL+CSV/parquet export, indexed across the full Solana history. Maps cleanly to `swap.v1` once the operator's mints are passed (configured wrapped-SOL + USDC by default). |
+
+### Locked design
+
+1. **Path:** `scry import flipside-swaps --input PATH... --pool ADDR
+   [--venue solana_raydium_v4] [--source LABEL] [--sol-mint MINT]
+   [--usdc-mint MINT]`. Operator runs SQL on Flipside Studio (or via
+   their REST API), exports to parquet (chunked by month if their
+   row-cap bites), passes one or many `--input` paths.
+2. **Adapter:** new `scryer_store::import::read_flipside_swap_parquet`
+   + `FlipsideSwapConfig`. Reads required columns (`tx_id`, `block_id`,
+   `block_timestamp` (ns/us/ms-tolerant), `swap_from_mint`,
+   `swap_from_amount`, `swap_to_mint`, `swap_to_amount`); decodes
+   `Side` from mint direction (`from_mint == sol_mint` → `SellSol`;
+   `from_mint == usdc_mint` → `BuySol`); rejects rows whose mints
+   don't match the configured pair (no silent mis-attribution); emits
+   `swap.v1::Swap` rows with `price = usdc_amount / sol_amount`.
+3. **Schema reuse:** `swap.v1::Swap` unchanged. Dedup_key
+   (`signature`) is byte-equal across both backfill paths, so a
+   future Helius-parseTransactions re-fetch over the same window
+   collapses cleanly via the store's read-modify-write merge.
+4. **`_source` label discipline:** Flipside-imported rows carry
+   `_source = "flipside:solana.defi.fact_swaps:<run-label>"` to
+   distinguish from `helius:parseTransactions` rows; consumers scope
+   queries via `_source LIKE 'flipside:%'` for backfill rows or
+   `LIKE 'helius:%'` for forward-poll rows.
+5. **Forward tail:** unchanged. The existing `geckoterminal-trades`
+   plist (15-min cadence, free tier, `geckoterminal.v1::Trade` schema)
+   continues accumulating forward swap data; LVR consumers join
+   `solana_raydium_v4/swaps/v1` (Flipside-backfilled) and
+   `geckoterminal/trades/v1/pool=...` (forward live) as appropriate.
+   No new daemon required.
+6. **Pool snapshots (Job 3) unchanged:** `scry solana pool-snapshots`
+   reads the imported `swap.v1` partitions, picks first signature per
+   hour, and fetches `preTokenBalances` via proxy-routed
+   `getTransaction(jsonParsed)`. ~4,320 RPC calls over 180d
+   (24×180), <minutes wall-clock, ~negligible cost.
+
+### Trade-off acknowledged
+
+**Lose:** Helius parseTransactions extracts swaps via vault-delta
+(`Δsol·Δusdc < 0`), catching every SOL/USDC trade through the pool
+regardless of which IX or program emitted it (e.g., Jupiter
+aggregator routing through Raydium as one hop in a multi-hop route).
+Flipside's `fact_swaps` is indexed by their pipeline using swap-IX
+discriminators per program; Jupiter-aggregator-routed swaps may
+land under their per-hop program rather than under the pool's
+program filter. **Acknowledged: the LVR magnitude pass is robust
+to a 1-2% miss-rate on aggregator-routed hops; if the spot-check
+shows >5% gap, escalate.**
+
+**Gain:** 180d coverage in minutes-of-operator-time + free, vs
+days-of-wall-clock + 50× over budget on Helius. Schema-compatible
+with the existing canonical layout; no consumer-side changes
+required.
+
+### Spot-check methodology (locked)
+
+Before the operator commits the LVR magnitude pass on Flipside-only
+backfilled data:
+
+1. Take the 26h archive parquet at
+   `~/Documents/quant-work/data/archive/exploratory-2026-04-26/raydium_solusdc_swaps.parquet`
+   (which carries vault-delta-extracted swaps via the legacy Python
+   fetcher).
+2. Run a Flipside SQL query for the SAME window
+   (`block_timestamp BETWEEN '2026-04-25 14:14' AND '2026-04-26 16:04'`)
+   with `program_id = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8'`.
+3. Compare row counts: Flipside count ÷ legacy count = coverage rate.
+4. **Acceptance: ≥95% coverage proceeds; <95% triggers a methodology
+   re-think (escalate to Allium / Dune for the panel).**
+
+The spot-check parquet is in the held-out window so it doesn't
+contaminate the LVR analysis even if Flipside's data has subtle
+ordering/decimal differences; the comparison is row-count + signature
+set, not per-row tuple equality.
+
+### Future-fetcher policy (locked)
+
+Future Solana-pool backfills follow the same decision tree:
+
+1. **Estimate sig rate** via 2-page probe (cheap; ~0 cost).
+2. **If 180d sig count × decoded-swap-rate ≤ 80% of available
+   Helius credits:** use `scry solana swaps` (Helius
+   parseTransactions). The vault-delta path is canonical and best-
+   coverage.
+3. **If 180d sig count exceeds budget by ≥3×:** use
+   `scry import flipside-swaps`. Schema-compatible, free, ~minutes
+   operator time.
+4. **Between (1) and (2):** use the smaller-window subset that fits
+   parseTransactions budget; document the truncation in the phase
+   row. Hybrid panels (Flipside backfill + Helius forward tail) are
+   acceptable as long as the dedup_key keeps them coherent.
+
+### Decision-log row
+
+Lands with phase 77 (Flipside import adapter + CLI subcommand +
+methodology entry + spot-check procedure). Phases 75 + 76 (Done-
+definition lock + operator-paths / drift-root migration) shipped
+between phase 74 and this one in parallel-agent slots; phase 77
+is the next free number for this LVR-unblock pivot work. The
+earlier `--max-sig-pages` CLI fix (for the abandoned Helius-
+parseTransactions path; kept for future smaller windows that DO
+fit budget) and the standing-tail launchd plists
+(`raydium-v4-solusdc-swaps.plist` +
+`raydium-v4-solusdc-snapshots.plist`) shipped in the phase-74
+commit chain on the feature branch and merged into main with the
+kraken-trades work.
+
+---
+
 ## Done definition — code-shipped vs data-shipped — 2026-05-01 (locked)
 
 ### Why this lock exists
@@ -2418,6 +2576,85 @@ sweep replacing `default_value = "./dataset"` across 37 subcommand
 files + the migration of the drift-root content into canonical via
 the procedure above. Methodology-only — no schema delta, no
 fetcher-crate delta, no plist delta.
+
+---
+
+## xStock comparator-panel window — 2026-05-01 (locked)
+
+### Why this lock exists
+
+The 2026-05-01 audit of "Done — shipped in v0.1" found three xStock
+panels with code shipped but zero parquet partitions on disk
+(`dex_xstock_swaps.v1`, `backed_nav_strikes.v1`,
+`cex_stock_perp_tape.v1` + `_ohlcv.v1`). They are the inputs to the
+quant-work xStock claim — secondary DEX price as the dependent
+variable, issuer NAV anchor, and CEX-perp comparator. Running the
+backfills without first locking a single shared window would put
+each panel on its own clock, defeating the cross-source join the
+analysis depends on.
+
+### Locked window
+
+**`[2025-11-01T00:00:00Z, 2026-05-01T00:00:00Z)`** — 6 calendar
+months, ending at today's UTC midnight.
+
+Applies to:
+
+- `dex_xstock_swaps.v1` — `scry solana dex-xstock-swaps --start
+  2025-11-01 --end 2026-05-01 --symbols <all-8-default>`. One-shot
+  historical via Helius parseTransactions through the proxy.
+- `cex_stock_perp_ohlcv.v1` Kraken Futures backfill — `scry
+  cex-stock-perp backfill --start 2025-11-01 --end 2026-05-01`. Only
+  Kraken Futures has deep history per the phase-58 finding; other
+  venues are forward-only.
+- `backed_nav_strikes.v1` — forward-only (api.xstocks.fi serves a
+  current quote; no archive). Forward-tape **start** date is
+  2026-05-01; consumers joining to the dex / perp panels treat the
+  pre-start window as missing-by-construction.
+- `cex_stock_perp_tape.v1` — forward-only across the 11 wired
+  venues. Forward-tape start date is 2026-05-01. Same
+  missing-by-construction caveat.
+
+### Why these dates
+
+- **Start = 2025-11-01.** Six months back gives ~125 US trading days
+  per symbol — enough to characterize the discount/premium
+  distribution at multiple regime transitions (Nov-Dec 2025 holiday
+  illiquidity, Jan-Feb 2026 post-holiday recovery, March-April 2026
+  steady-state). Going further back risks pre-listing windows for
+  some xStock symbols (HOOD-x and MSTR-x are the latest issuances)
+  and pulls in fewer consumer-side trade rows.
+- **End = 2026-05-01T00:00:00Z** (today's UTC midnight, exclusive).
+  Stops the historical backfill at a clean boundary just before the
+  forward tapes start capturing live, so there is no overlap window
+  that would force double-counting logic in consumer joins.
+
+### Reproducibility note
+
+Per hard rule #7, re-running these commands over the same window
+must produce identical content modulo `_fetched_at`. If
+GeckoTerminal / api.xstocks.fi / Kraken Futures rewrite history (a
+pool migration, a re-listing, a settlement adjustment), the
+divergence is documented in the phase-log row of the next backfill
+re-run, not silently overwritten.
+
+### Cost guardrails
+
+The dex backfill is the long pole: ~6 months × 8 xStock symbols ×
+Helius parseTransactions costs. Phase-76 ships a 1-day cost probe
+(`scry solana dex-xstock-swaps --start 2026-04-30 --end 2026-05-01`)
+before the full window runs, so the operator can extrapolate quota
+burn vs Helius daily-credit headroom. The probe writes ~1 day of
+real data into the canonical root via the dedup-aware writer; the
+subsequent full-window run subsumes those rows on overlap.
+
+### Decision-log row
+
+Lands as a methodology-only row; the actual backfill runs ship
+their own phase-log rows recording row counts + bytes + per-symbol
+breakdowns. Methodology-only because windowing is an analytical
+constraint that lives in the methodology log, while the backfill
+runs are operational events that live in the phase log.
 
 ---
 
