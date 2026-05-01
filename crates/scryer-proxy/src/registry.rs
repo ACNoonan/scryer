@@ -5,7 +5,7 @@
 //! load-bearing yet (`ws_url`, `tags`).
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -86,8 +86,7 @@ fn expand_env_string(s: &str) -> Result<String, InitError> {
             .find('}')
             .ok_or_else(|| InitError::InvalidProvider(format!("unterminated `${{` in `{s}`")))?;
         let var = &after[..end];
-        let val =
-            std::env::var(var).map_err(|_| InitError::MissingEnv(var.to_string()))?;
+        let val = std::env::var(var).map_err(|_| InitError::MissingEnv(var.to_string()))?;
         out.push_str(&val);
         rest = &after[end + 1..];
     }
@@ -103,6 +102,17 @@ pub struct ProviderState {
     healthy: std::sync::atomic::AtomicBool,
     consecutive_failures: AtomicU32,
     quarantined_until_ms: AtomicU64,
+    /// Wall-clock ms at which the current quarantine started. Used by
+    /// the health-probe recovery cadence to space out
+    /// probe-the-quarantined attempts (every `recovery_probe_interval`
+    /// elapsed since the start of the quarantine window) so an
+    /// upstream that recovers before the natural cooldown expires
+    /// doesn't sit silently for the full 24h.
+    quarantined_since_ms: AtomicU64,
+    /// Wall-clock ms of the last recovery probe fired against this
+    /// provider while quarantined. Reset to 0 when the provider
+    /// comes out of quarantine.
+    last_recovery_probe_ms: AtomicU64,
     latency_ema_ms: AtomicU32,
     quota_state: AtomicU8,
 }
@@ -121,6 +131,8 @@ impl ProviderState {
             healthy: std::sync::atomic::AtomicBool::new(false),
             consecutive_failures: AtomicU32::new(0),
             quarantined_until_ms: AtomicU64::new(0),
+            quarantined_since_ms: AtomicU64::new(0),
+            last_recovery_probe_ms: AtomicU64::new(0),
             latency_ema_ms: AtomicU32::new(400),
             quota_state: AtomicU8::new(QuotaState::Ok as u8),
         }
@@ -150,8 +162,11 @@ impl ProviderState {
         let next = ((prev as u64 * 8 + latency_ms as u64 * 2) / 10) as u32;
         self.latency_ema_ms.store(next.max(1), Ordering::Release);
         self.set_healthy(true);
-        self.quota_state.store(QuotaState::Ok as u8, Ordering::Release);
+        self.quota_state
+            .store(QuotaState::Ok as u8, Ordering::Release);
         self.quarantined_until_ms.store(0, Ordering::Release);
+        self.quarantined_since_ms.store(0, Ordering::Release);
+        self.last_recovery_probe_ms.store(0, Ordering::Release);
     }
 
     pub fn record_failure(&self) -> u32 {
@@ -165,20 +180,75 @@ impl ProviderState {
             let until = SystemTime::now() + std::time::Duration::from_secs(backoff);
             self.quarantined_until_ms
                 .store(unix_ms(until), Ordering::Release);
+            self.quarantined_since_ms
+                .store(unix_ms_now(), Ordering::Release);
+            self.last_recovery_probe_ms.store(0, Ordering::Release);
         }
         n
     }
 
     pub fn record_exhausted(&self, cooldown_secs: u64) {
         self.set_healthy(false);
-        self.quota_state.store(QuotaState::Exhausted as u8, Ordering::Release);
+        self.quota_state
+            .store(QuotaState::Exhausted as u8, Ordering::Release);
         let until = SystemTime::now() + std::time::Duration::from_secs(cooldown_secs);
-        self.quarantined_until_ms.store(unix_ms(until), Ordering::Release);
+        self.quarantined_until_ms
+            .store(unix_ms(until), Ordering::Release);
+        self.quarantined_since_ms
+            .store(unix_ms_now(), Ordering::Release);
+        self.last_recovery_probe_ms.store(0, Ordering::Release);
         self.consecutive_failures.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// Force the provider out of quarantine immediately.
+    ///
+    /// This is the "operator fixed the upstream issue" path — e.g.
+    /// after a Helius paid-tier upgrade, where the proxy's natural
+    /// cooldown (typically 24h) is no longer accurate. Resets
+    /// quarantine state but **does not** flip `is_healthy()` to
+    /// `true`; the next health-probe success will do that. This way
+    /// a misuse of the admin endpoint can't bypass the
+    /// "consecutive_failures < 3" recovery gate.
+    ///
+    /// Returns `true` if the provider was actually quarantined at
+    /// the time of the call (so callers can decide whether to bump a
+    /// counter / log).
+    pub fn clear_quarantine(&self) -> bool {
+        let was_quarantined = self.is_quarantined();
+        self.quarantined_until_ms.store(0, Ordering::Release);
+        self.quarantined_since_ms.store(0, Ordering::Release);
+        self.last_recovery_probe_ms.store(0, Ordering::Release);
+        self.consecutive_failures.store(0, Ordering::Release);
+        // Reset quota state so the next probe can re-detect (rather
+        // than paint over a stale "exhausted" reading).
+        self.quota_state
+            .store(QuotaState::Ok as u8, Ordering::Release);
+        was_quarantined
+    }
+
+    /// `quarantined_since_ms` reader. Returns 0 if the provider has
+    /// never been quarantined or is currently out of quarantine.
+    pub fn quarantined_since_ms(&self) -> u64 {
+        self.quarantined_since_ms.load(Ordering::Acquire)
+    }
+
+    /// `last_recovery_probe_ms` reader. Returns 0 if no recovery
+    /// probe has fired since the current quarantine started.
+    pub fn last_recovery_probe_ms(&self) -> u64 {
+        self.last_recovery_probe_ms.load(Ordering::Acquire)
+    }
+
+    /// Mark that a recovery probe is being attempted now. Called by
+    /// the health-probe loop just before issuing a probe against a
+    /// quarantined provider.
+    pub fn mark_recovery_probe(&self) {
+        self.last_recovery_probe_ms
+            .store(unix_ms_now(), Ordering::Release);
+    }
+
     pub fn record_throttled(&self) {
-        self.quota_state.store(QuotaState::Throttled as u8, Ordering::Release);
+        self.quota_state
+            .store(QuotaState::Throttled as u8, Ordering::Release);
     }
 
     pub fn quota_state(&self) -> QuotaState {
@@ -257,6 +327,30 @@ impl Registry {
         let bytes = std::fs::read(path)?;
         let configs: Vec<ProviderConfig> = serde_json::from_slice(&bytes)?;
         Self::from_configs(configs)
+    }
+
+    /// Clear quarantine on one provider (by case-insensitive name) or
+    /// all providers (`name = None`). Returns the names of providers
+    /// that were actually quarantined when the call landed (so the
+    /// admin handler can report and the metric can count them).
+    ///
+    /// Operator workflow: after fixing an upstream cause (e.g. paid-
+    /// tier quota refill), `curl -X POST
+    /// http://127.0.0.1:8899/admin/clear-quarantine?provider=Helius`
+    /// instead of `launchctl unload && launchctl load proxy.plist`.
+    pub fn clear_quarantine(&self, name: Option<&str>) -> Vec<String> {
+        let mut cleared = Vec::new();
+        for p in &self.providers {
+            if let Some(target) = name {
+                if !p.name().eq_ignore_ascii_case(target) {
+                    continue;
+                }
+            }
+            if p.clear_quarantine() {
+                cleared.push(p.name().to_string());
+            }
+        }
+        cleared
     }
 
     /// Return providers eligible for routing right now: healthy and not
@@ -363,6 +457,101 @@ mod tests {
         assert!(!p.is_quarantined(), "2 failures should not quarantine yet");
         assert_eq!(p.record_failure(), 3);
         assert!(p.is_quarantined(), "3 failures should quarantine");
+    }
+
+    #[test]
+    fn clear_quarantine_resets_state_but_not_healthy() {
+        let p = make_provider("Helius");
+        p.record_exhausted(60 * 60 * 24);
+        assert!(p.is_quarantined());
+        assert_eq!(p.quota_state(), QuotaState::Exhausted);
+        assert!(!p.is_healthy());
+
+        let was = p.clear_quarantine();
+        assert!(was, "should report it was quarantined");
+        assert!(!p.is_quarantined());
+        assert_eq!(p.quota_state(), QuotaState::Ok);
+        assert_eq!(p.consecutive_failures(), 0);
+        // is_healthy stays false — clear is a hint, not a forced
+        // "trust this provider" override.
+        assert!(!p.is_healthy());
+    }
+
+    #[test]
+    fn clear_quarantine_returns_false_when_not_quarantined() {
+        let p = make_provider("a");
+        let was = p.clear_quarantine();
+        assert!(!was, "no-op when provider wasn't quarantined");
+    }
+
+    #[test]
+    fn registry_clear_quarantine_filters_by_name_case_insensitive() {
+        let cfg_a = ProviderConfig {
+            name: "Helius".into(),
+            url: "https://a.example".into(),
+            weight: 1,
+            headers: vec![],
+            tags: vec![],
+            ws_url: None,
+            quota: None,
+        };
+        let cfg_b = ProviderConfig {
+            name: "Alchemy".into(),
+            ..cfg_a.clone()
+        };
+        let registry = Registry::from_configs(vec![cfg_a, cfg_b]).unwrap();
+        registry.providers[0].record_exhausted(60);
+        registry.providers[1].record_exhausted(60);
+
+        let cleared = registry.clear_quarantine(Some("helius"));
+        assert_eq!(cleared, vec!["Helius".to_string()]);
+        assert!(!registry.providers[0].is_quarantined());
+        assert!(registry.providers[1].is_quarantined(), "Alchemy untouched");
+    }
+
+    #[test]
+    fn registry_clear_quarantine_with_none_clears_all() {
+        let cfg_a = ProviderConfig {
+            name: "Helius".into(),
+            url: "https://a.example".into(),
+            weight: 1,
+            headers: vec![],
+            tags: vec![],
+            ws_url: None,
+            quota: None,
+        };
+        let cfg_b = ProviderConfig {
+            name: "Alchemy".into(),
+            ..cfg_a.clone()
+        };
+        let registry = Registry::from_configs(vec![cfg_a, cfg_b]).unwrap();
+        registry.providers[0].record_exhausted(60);
+        // Alchemy left healthy: it should NOT show up in cleared.
+        let cleared = registry.clear_quarantine(None);
+        assert_eq!(cleared, vec!["Helius".to_string()]);
+    }
+
+    #[test]
+    fn record_exhausted_sets_quarantined_since() {
+        let p = make_provider("Helius");
+        assert_eq!(p.quarantined_since_ms(), 0);
+        p.record_exhausted(60);
+        let since = p.quarantined_since_ms();
+        assert!(since > 0, "quarantined_since_ms should be set");
+        let now = unix_ms_now();
+        assert!(now.saturating_sub(since) < 1000, "since should be ~now");
+    }
+
+    #[test]
+    fn record_success_clears_recovery_probe_state() {
+        let p = make_provider("Helius");
+        p.record_exhausted(60);
+        p.mark_recovery_probe();
+        assert!(p.last_recovery_probe_ms() > 0);
+        assert!(p.quarantined_since_ms() > 0);
+        p.record_success(50);
+        assert_eq!(p.last_recovery_probe_ms(), 0);
+        assert_eq!(p.quarantined_since_ms(), 0);
     }
 
     #[test]

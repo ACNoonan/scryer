@@ -52,7 +52,51 @@ pub fn build_router(state: Arc<ProxyState>) -> Router {
         .route("/rpc", post(router::handle_jsonrpc))
         .route("/healthz", get(healthz))
         .route("/metrics", get(metrics_handler))
+        .route("/admin/clear-quarantine", post(admin_clear_quarantine))
         .with_state(state)
+}
+
+/// `POST /admin/clear-quarantine[?provider=NAME]` — operator path.
+///
+/// Force one provider (or all) out of quarantine immediately.
+/// Replaces the `launchctl unload && launchctl load proxy.plist`
+/// workflow documented in `docs/phase_log.md` v0.1-phase-68 prose
+/// when an upstream cause has been fixed (e.g. paid-tier upgrade)
+/// and the proxy's natural cooldown is no longer accurate.
+///
+/// Quarantine state is reset; `is_healthy()` is **not** flipped to
+/// true — the next health probe does that on success. So if the
+/// operator clears quarantine while the upstream is still failing,
+/// the provider re-enters quarantine on the next failed probe
+/// (correct behavior — admin clear is a hint, not an override).
+async fn admin_clear_quarantine(
+    axum::extract::State(state): axum::extract::State<Arc<ProxyState>>,
+    axum::extract::Query(q): axum::extract::Query<AdminClearQuery>,
+) -> axum::response::Response {
+    let cleared = state.registry.clear_quarantine(q.provider.as_deref());
+    for name in &cleared {
+        state
+            .metrics
+            .quarantine_cleared_total
+            .with_label_values(&[name, "admin"])
+            .inc();
+        state.metrics.record_health(name, false);
+    }
+    let body = serde_json::json!({
+        "cleared": cleared,
+        "scope": q.provider.unwrap_or_else(|| "all".to_string()),
+    });
+    if cleared.is_empty() {
+        tracing::info!("admin clear-quarantine: no quarantined providers");
+    } else {
+        tracing::warn!(?cleared, "admin clear-quarantine: forced reset");
+    }
+    (axum::http::StatusCode::OK, axum::Json(body)).into_response()
+}
+
+#[derive(serde::Deserialize, Default)]
+struct AdminClearQuery {
+    provider: Option<String>,
 }
 
 async fn healthz(
@@ -80,7 +124,10 @@ async fn metrics_handler(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     let body = String::from_utf8(buf).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok((
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
         body,
     )
         .into_response())

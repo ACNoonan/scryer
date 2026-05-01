@@ -24,10 +24,10 @@ pub enum Disposition {
 }
 
 const GLOBAL_EXHAUSTION_PATTERNS: &[&str] = &[
-    "max usage reached",       // Helius
-    "monthly limit exceeded",  // QuickNode
-    "credits exhausted",       // QuickNode
-    "daily request limit",     // Alchemy
+    "max usage reached",      // Helius
+    "monthly limit exceeded", // QuickNode
+    "credits exhausted",      // QuickNode
+    "daily request limit",    // Alchemy
     "quota exceeded",
 ];
 
@@ -35,11 +35,7 @@ const GLOBAL_EXHAUSTION_PATTERNS: &[&str] = &[
 /// even though it's not in the spec.
 pub const JSONRPC_EXHAUSTED_CODE: i64 = -32429;
 
-pub fn classify(
-    status: u16,
-    body: &str,
-    quota_hints: Option<&QuotaConfig>,
-) -> Disposition {
+pub fn classify(status: u16, body: &str, quota_hints: Option<&QuotaConfig>) -> Disposition {
     if status == 429 {
         if matches_exhaustion(body, quota_hints) {
             return Disposition::Exhausted;
@@ -71,8 +67,7 @@ fn matches_exhaustion(body: &str, hints: Option<&QuotaConfig>) -> bool {
         return true;
     }
     if let Some(q) = hints {
-        if q
-            .exhaustion_body_patterns
+        if q.exhaustion_body_patterns
             .iter()
             .any(|p| lower.contains(&p.to_ascii_lowercase()))
         {

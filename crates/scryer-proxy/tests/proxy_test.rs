@@ -50,10 +50,7 @@ fn provider(name: &str, url: &str) -> ProviderConfig {
     }
 }
 
-async fn post_jsonrpc(
-    app: axum::Router,
-    body: Value,
-) -> (StatusCode, Value) {
+async fn post_jsonrpc(app: axum::Router, body: Value) -> (StatusCode, Value) {
     let resp = app
         .oneshot(
             Request::builder()
@@ -306,6 +303,7 @@ async fn health_probe_marks_responsive_provider_healthy() {
         HealthConfig {
             interval: std::time::Duration::from_millis(50),
             quota_exhausted_cooldown: std::time::Duration::from_secs(60),
+            recovery_probe_interval: std::time::Duration::from_secs(300),
         },
     );
 
@@ -321,4 +319,93 @@ async fn health_probe_marks_responsive_provider_healthy() {
         state.registry.providers[0].is_healthy(),
         "probe should have flipped provider healthy"
     );
+}
+
+#[tokio::test]
+async fn admin_clear_quarantine_resets_named_provider() {
+    let state = make_state(vec![
+        provider("Helius", "https://example.invalid"),
+        provider("Alchemy", "https://example.invalid"),
+    ])
+    .await;
+    state.registry.providers[0].record_exhausted(60 * 60 * 24);
+    state.registry.providers[1].record_exhausted(60 * 60 * 24);
+    assert!(state.registry.providers[0].is_quarantined());
+    assert!(state.registry.providers[1].is_quarantined());
+
+    let app = build_router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/clear-quarantine?provider=Helius")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["cleared"], json!(["Helius"]));
+    assert_eq!(body["scope"], json!("Helius"));
+
+    assert!(!state.registry.providers[0].is_quarantined());
+    assert!(
+        state.registry.providers[1].is_quarantined(),
+        "Alchemy untouched"
+    );
+}
+
+#[tokio::test]
+async fn admin_clear_quarantine_with_no_provider_clears_all() {
+    let state = make_state(vec![
+        provider("Helius", "https://example.invalid"),
+        provider("Alchemy", "https://example.invalid"),
+    ])
+    .await;
+    state.registry.providers[0].record_exhausted(60);
+    // Alchemy left healthy.
+
+    let app = build_router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/clear-quarantine")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["cleared"], json!(["Helius"]));
+    assert_eq!(body["scope"], json!("all"));
+}
+
+#[tokio::test]
+async fn admin_clear_quarantine_increments_counter() {
+    let state = make_state(vec![provider("Helius", "https://example.invalid")]).await;
+    state.registry.providers[0].record_exhausted(60);
+
+    let app = build_router(state.clone());
+    let _ = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/clear-quarantine?provider=Helius")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let count = state
+        .metrics
+        .quarantine_cleared_total
+        .with_label_values(&["Helius", "admin"])
+        .get();
+    assert_eq!(count, 1);
 }

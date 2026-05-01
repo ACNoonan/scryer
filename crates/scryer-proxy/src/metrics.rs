@@ -30,6 +30,22 @@ pub struct Metrics {
     pub probes_total: IntCounter,
     pub probes_skipped_quarantined_total: IntCounterVec,
     pub probe_duration_seconds: Histogram,
+
+    /// Quarantine-clear events broken down by reason. `admin` is the
+    /// operator-driven path (`POST /admin/clear-quarantine`),
+    /// `success_probe` is a health-probe re-probe of a quarantined
+    /// provider that came back healthy ahead of the natural cooldown.
+    /// "Natural" cooldown elapse isn't counted here — there's no event
+    /// hook (it's just `now < quarantined_until_ms` flipping false).
+    pub quarantine_cleared_total: IntCounterVec,
+
+    /// Recovery-probe attempts: a health-tick fired a probe at a
+    /// quarantined provider to test whether the upstream recovered
+    /// before the natural cooldown elapsed. Independent of probe
+    /// outcome (success vs failure); pair with
+    /// `quarantine_cleared_total{reason="success_probe"}` to see how
+    /// often early-recovery attempts pay off.
+    pub recovery_probes_total: IntCounterVec,
 }
 
 impl Metrics {
@@ -37,7 +53,10 @@ impl Metrics {
         let registry = Registry::new();
 
         let requests_total = IntCounterVec::new(
-            Opts::new("scryer_proxy_requests_total", "Forwarded JSON-RPC requests."),
+            Opts::new(
+                "scryer_proxy_requests_total",
+                "Forwarded JSON-RPC requests.",
+            ),
             &["provider", "method", "status"],
         )?;
         let request_failures_total = IntCounterVec::new(
@@ -117,6 +136,21 @@ impl Metrics {
             "Health probe latency.",
         ))?;
 
+        let quarantine_cleared_total = IntCounterVec::new(
+            Opts::new(
+                "scryer_proxy_quarantine_cleared_total",
+                "Quarantine-clear events. reason=admin|success_probe.",
+            ),
+            &["provider", "reason"],
+        )?;
+        let recovery_probes_total = IntCounterVec::new(
+            Opts::new(
+                "scryer_proxy_recovery_probes_total",
+                "Health probes fired against quarantined providers to test early recovery.",
+            ),
+            &["provider"],
+        )?;
+
         registry.register(Box::new(requests_total.clone()))?;
         registry.register(Box::new(request_failures_total.clone()))?;
         registry.register(Box::new(retries_total.clone()))?;
@@ -129,6 +163,8 @@ impl Metrics {
         registry.register(Box::new(probes_total.clone()))?;
         registry.register(Box::new(probes_skipped_quarantined_total.clone()))?;
         registry.register(Box::new(probe_duration_seconds.clone()))?;
+        registry.register(Box::new(quarantine_cleared_total.clone()))?;
+        registry.register(Box::new(recovery_probes_total.clone()))?;
 
         Ok(Self {
             registry,
@@ -144,6 +180,8 @@ impl Metrics {
             probes_total,
             probes_skipped_quarantined_total,
             probe_duration_seconds,
+            quarantine_cleared_total,
+            recovery_probes_total,
         })
     }
 

@@ -75,10 +75,13 @@ pub async fn forward(
         HeaderValue::from_static(concat!("scryer-proxy/", env!("CARGO_PKG_VERSION"))),
     );
     for h in &provider.config.headers {
-        let name = HeaderName::from_bytes(h.name.as_bytes())
-            .map_err(|_| ForwardError::BuildHeader { name: h.name.clone() })?;
-        let value = HeaderValue::from_str(&h.value)
-            .map_err(|_| ForwardError::BuildHeader { name: h.name.clone() })?;
+        let name =
+            HeaderName::from_bytes(h.name.as_bytes()).map_err(|_| ForwardError::BuildHeader {
+                name: h.name.clone(),
+            })?;
+        let value = HeaderValue::from_str(&h.value).map_err(|_| ForwardError::BuildHeader {
+            name: h.name.clone(),
+        })?;
         headers.insert(name, value);
     }
 
