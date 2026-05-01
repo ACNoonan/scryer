@@ -26,3 +26,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [features]
 default = []
 custom-protocol = ["tauri/custom-protocol"]
+
+[lints]
+workspace = true

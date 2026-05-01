@@ -88,7 +88,7 @@ where
         .column(idx)
         .as_any()
         .downcast_ref::<A>()
-        .ok_or(FromArrowError::WrongType {
+        .ok_or_else(|| FromArrowError::WrongType {
             column: name,
             expected: std::any::type_name::<A>(),
         })
@@ -115,7 +115,7 @@ where
         .as_any()
         .downcast_ref::<A>()
         .map(Some)
-        .ok_or(FromArrowError::WrongType {
+        .ok_or_else(|| FromArrowError::WrongType {
             column: name,
             expected: std::any::type_name::<A>(),
         })

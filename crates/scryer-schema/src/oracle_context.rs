@@ -291,7 +291,7 @@ pub mod v1 {
             row.post_price = None;
             row.post_unix_ts = None;
             row.post_age_secs = None;
-            let batch = to_record_batch(&[row.clone()]).expect("encode");
+            let batch = to_record_batch(&[row]).expect("encode");
             let recovered = from_record_batch(&batch).expect("decode");
             assert_eq!(recovered[0].post_price, None);
             assert_eq!(recovered[0].post_unix_ts, None);

@@ -44,6 +44,24 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "tim
 tracing = "0.1"
 thiserror = "1"
 
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+# Correctness / clear-cut bugs — deny.
+or_fun_call = "deny"
+redundant_clone = "deny"
+assigning_clones = "deny"
+collection_is_never_read = "deny"
+to_string_in_format_args = "deny"
+mutex_atomic = "deny"
+# Performance smells — start at warn so adoption isn't a wall of errors.
+naive_bytecount = "warn"
+stable_sort_primitive = "warn"
+large_types_passed_by_value = "warn"
+large_futures = "warn"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

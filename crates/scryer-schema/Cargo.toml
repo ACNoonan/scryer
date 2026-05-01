@@ -12,3 +12,6 @@ path = "src/lib.rs"
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 serde = { workspace = true }
+
+[lints]
+workspace = true

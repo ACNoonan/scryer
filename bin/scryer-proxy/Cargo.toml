@@ -17,3 +17,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 anyhow = "1"
 axum = "0.7"
 dotenvy = "0.15"
+
+[lints]
+workspace = true

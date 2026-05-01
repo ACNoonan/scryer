@@ -17,3 +17,6 @@ scryer-schema = { path = "../scryer-schema" }
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints]
+workspace = true

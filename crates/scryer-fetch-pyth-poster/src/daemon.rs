@@ -1104,7 +1104,7 @@ mod tests {
         let (row, outcome) = build_tape_row(
             &cfg,
             &update,
-            SubmitOutcome::Posted(receipt.clone()),
+            SubmitOutcome::Posted(receipt),
             "REALPDA1111",
             2_500,
             None,
@@ -1229,7 +1229,7 @@ mod tests {
         );
 
         let stats = dataset
-            .write::<Post>(VENUE, None, &[row.clone()])
+            .write::<Post>(VENUE, None, &[row])
             .expect("write");
 
         assert_eq!(stats.rows_added, 1);

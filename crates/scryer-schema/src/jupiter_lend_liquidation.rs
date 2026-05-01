@@ -253,7 +253,7 @@ pub mod v1 {
             // string storage path round-trips it byte-for-byte.
             let mut row = sample("sigMax");
             row.col_per_unit_debt_raw = u128::MAX;
-            let batch = to_record_batch(&[row.clone()]).expect("encode");
+            let batch = to_record_batch(&[row]).expect("encode");
             let recovered = from_record_batch(&batch).expect("decode");
             assert_eq!(recovered.len(), 1);
             assert_eq!(recovered[0].col_per_unit_debt_raw, u128::MAX);

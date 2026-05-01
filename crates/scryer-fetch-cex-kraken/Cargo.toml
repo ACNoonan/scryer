@@ -7,3 +7,6 @@ description = "Kraken public REST clients — trades, OHLC, funding. Owns its ow
 
 [lib]
 path = "src/lib.rs"
+
+[lints]
+workspace = true

@@ -184,7 +184,7 @@ mod tests {
         let body = UpdatePriceFeedBody {
             params: PostUpdateParams {
                 message: update.message.clone(),
-                proof: update.proof.clone(),
+                proof: update.proof,
                 treasury_id: 0x07,
             },
             shard_id: 0x1234, // little-endian: 34 12

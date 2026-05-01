@@ -205,11 +205,11 @@ mod tests {
         let body = r#"{
             "observations": [
                 {"date":"2026-04-21","value":"not-a-number"},
-                {"date":"2026-04-22","value":"3.14"}
+                {"date":"2026-04-22","value":"3.15"}
             ]
         }"#;
         let rows = parse_response(body, "T10YIE", &meta()).expect("parse");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].value, 3.14);
+        assert_eq!(rows[0].value, 3.15);
     }
 }

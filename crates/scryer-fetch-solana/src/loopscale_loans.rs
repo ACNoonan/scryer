@@ -161,8 +161,8 @@ pub fn decode_loan_bytes(
         };
 
         if num_collaterals == 0 {
-            primary_asset_mint = asset_mint.clone();
-            primary_asset_identifier = asset_identifier.clone();
+            primary_asset_mint.clone_from(&asset_mint);
+            primary_asset_identifier.clone_from(&asset_identifier);
         }
         if is_xstock {
             has_xstock_collateral = true;

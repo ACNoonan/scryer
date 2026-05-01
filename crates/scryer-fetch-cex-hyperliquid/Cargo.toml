@@ -7,3 +7,6 @@ description = "Hyperliquid REST/WS clients — trades, orderbook, funding. v0.4+
 
 [lib]
 path = "src/lib.rs"
+
+[lints]
+workspace = true

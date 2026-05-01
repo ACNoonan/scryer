@@ -33,3 +33,6 @@ test-mock = []
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tempfile = "3"
+
+[lints]
+workspace = true
