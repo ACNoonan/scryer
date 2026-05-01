@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.freshness-watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin/scry</string>
+        <string>freshness</string>
+        <string>--dataset</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/dataset</string>
+        <string>--alert-log</string>
+        <string>/Users/adamnoonan/Library/Logs/scryer/freshness.alerts.csv</string>
+        <string>--notify</string>
+        <!--
+            Cadence: 900s (15 min). Tradeoff:
+              * Shorter (e.g. 5 min) catches outages faster but spams
+                notifications when a single laggy tick crosses the
+                threshold; the watchdog has no debounce.
+              * Longer (e.g. 30 min) hides up-to-30m of silent failure.
+              * 15 min ≈ 3× the longest tape's threshold (5 min for the
+                60s tapes); a stale tape will surface within one
+                watchdog tick, and most transient blips clear inside
+                one tape threshold without ever firing.
+
+            Per-tape thresholds (5× cadence) live in the binary at
+            `bin/scry/src/freshness_cmd.rs::TAPES`. Add a row there
+            when a new launchd plist lands.
+
+            Phase 70-A scope: detection only — mtime is the proxy for
+            "tape wrote successfully". Phase 70-B replaces this with
+            tick-level rows in tape_tick_health.v1, which lets us
+            distinguish "upstream failed cleanly" (row written with
+            status=upstream_err) from "daemon dead silent"
+            (no row at all).
+        -->
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/freshness-watchdog.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/freshness-watchdog.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SCRY_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>

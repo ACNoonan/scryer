@@ -445,84 +445,114 @@ With `--all` it skips the memcmp filter.
 
 ## marginfi_reserve.v1
 
-**Status.** locked 2026-04-29 — methodology entry "MarginFi-v2
-schemas — 2026-04-29 (locked)" in `methodology_log.md`. Phase TBD-A
-implementation pending.
+**Status.** locked + shipped — phase 69 (2026-05-01). Methodology
+entry "MarginFi-v2 schemas — 2026-04-29 (locked)" in
+`methodology_log.md` set the design; phase 69 implementation
+landed the schema, fetcher, CLI, and live-validated against 422
+mainnet Banks (0 decode errors). Schema docstring at
+`crates/scryer-schema/src/marginfi_reserve.rs` carries the
+authoritative byte-layout pin.
 
 **Source.** Solana mainnet, MarginFi-v2 program
 `MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA` (verified on-chain
-2026-04-29; see methodology entry for verification chain).
-`getProgramAccounts(MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA,
-filter=Bank-discriminator)`. Bank account size needs IDL pin to
-compute precisely; estimate ~1.6KB-2KB based on field set. Per-(Group,
-Bank) snapshot, not paginated by time. Standard `--use-get-transaction`
-fallback if Helius is throttling.
+2026-04-29; see methodology entry for verification chain). One
+proxy-routed `getProgramAccounts` with Bank-disc memcmp at offset 0
+(`memcmp.bytes = "QnTef4UXSzF"`, base58 of
+`[142,49,166,242,50,66,97,188]`). Bank account size pinned at **1864
+bytes** (8-byte Anchor disc + 1856-byte body) via live probe
+2026-04-30. IDL fetched into `idl/marginfi/marginfi-v2.json` (431KB).
+
+**Schema columns** (38 logical + 4 metadata = 42 total). See the
+schema source for full byte-offset map; column list:
 
 ```
-group                       string  // pubkey of the Group
-bank                        string  // pubkey of the Bank PDA
-asset_mint                  string  // pubkey of the SPL mint
-asset_symbol                string  // resolved via xStock/SPL registry, "?" otherwise
+bank                        string   // Bank PDA
+group                       string   // MarginfiGroup PDA
+asset_mint                  string   // SPL mint
+asset_symbol                string   // xStock registry resolution, "?" otherwise
 asset_decimals              u8
 
-// Oracle wiring — MULTI-ACCOUNT LIST per the marginfi-v2 README.
-oracle_setup                string  // "switchboard" | "switchboard_v2" |
-                                    //   "pyth_legacy" | "pyth_pull" |
-                                    //   "fixed" — decoded from OracleSetup enum
-oracle_keys                 list<string>  // base58 pubkeys; preserve order from
-                                          //   bank.config.oracle_keys (multi-key
-                                          //   for some banks per README)
-oracle_max_age_seconds      u32     // staleness cap (Pyth/Switchboard)
+// Oracle wiring (multi-key fixed-array of 5 with zero-pubkey filtering)
+oracle_setup                string   // 18-variant snake_case enum
+oracle_keys                 string   // comma-joined base58 pubkeys, populated only
+oracle_max_age_seconds      u16
+oracle_max_confidence       u32
 
-// Fee + risk parameters.
-asset_weight_init           f64     // collateral haircut on entry
-asset_weight_maint          f64     // maintenance — liquidation trigger threshold
+// Risk weights (Q48 fixed-point → f64)
+asset_weight_init           f64
+asset_weight_maint          f64
 liability_weight_init       f64
 liability_weight_maint      f64
-liquidator_fee_pct          f64     // typically 2.5%, range 2.5–10% per README
-insurance_fee_pct           f64     // typically 2.5%
-group_fixed_fee_apr         f64
-insurance_ir_fee_pct        f64
 
-// Interest curve points (up to 7 per README).
-zero_util_rate              f64
-hundred_util_rate           f64
-ir_curve_points_json        string  // JSON-serialized list[(util, rate)]; small
-                                    //   (≤7 entries) so JSON is more honest than
-                                    //   parallel-array fixed-arity columns
-
-// Operational caps.
+// Limits
 deposit_limit               u64
 borrow_limit                u64
-total_asset_shares          u128_string   // u128 stored as decimal string
-                                          //   (no native u128 in arrow)
-total_liability_shares      u128_string
-operational_state           string  // "Operational" | "ReduceOnly" | "Paused"
+total_asset_value_init_limit u64
 
-// Bank-state cache timestamp.
-last_update                 i64     // bank.cache last update unix sec
+// State + tags
+operational_state           string   // "paused" | "operational" | "reduce_only" | "killed_by_bankruptcy"
+risk_tier                   string   // "collateral" | "isolated"
+asset_tag                   u8
+config_flags                u8       // bitfield
+
+// Interest-rate config (Q48 fixed-point f64s + JSON-serialized 7-tuple)
+optimal_utilization_rate    f64
+plateau_interest_rate       f64
+max_interest_rate           f64
+insurance_fee_fixed_apr     f64
+insurance_ir_fee            f64
+protocol_fixed_fee_apr      f64
+protocol_ir_fee             f64
+protocol_origination_fee    f64
+curve_type                  u8       // 0 (legacy) | 1 (multi-point)
+ir_curve_points_json        string   // {zero_util_rate_u32, hundred_util_rate_u32, points: [{util_u32, rate_u32}; 5], curve_type}
+
+// BankCache last-oracle observation + spot rates
+cache_last_oracle_price             f64
+cache_last_oracle_price_confidence  f64
+cache_last_oracle_price_timestamp   i64
+cache_base_rate_pct                 f64   // 0-1000% scale
+cache_lending_rate_pct              f64
+cache_borrowing_rate_pct            f64
+
+last_update                 i64           // Bank-level last mutation unix-sec
+raw_account_b64             string        // forensic re-decode of the 304-byte trailer
 ```
 
-**Dedup.** `_dedup_key = bank` (one PDA per Bank). Weekly snapshot
-cadence intentionally produces one fresh row per Bank per week —
-partition by `_fetched_at` rather than dedup-collapse on re-fetch
-of the same bank.
+**Spec divergence from this doc's pre-implementation draft.** The
+draft listed `liquidator_fee_pct`, `insurance_fee_pct`,
+`group_fixed_fee_apr`, `insurance_ir_fee_pct`, `total_asset_shares`,
+`total_liability_shares` as Bank-level fields. The actual marginfi-v2
+IDL puts liquidation fees in the **global `FeeState` account**
+(`liquidation_max_fee` + `liquidation_flat_sol_fee`), not per-Bank.
+The IR-related fees ARE per-Bank but live inside
+`interest_rate_config` (above as `insurance_fee_fixed_apr`,
+`insurance_ir_fee`, `protocol_fixed_fee_apr`, `protocol_ir_fee`).
+`total_asset_shares` / `total_liability_shares` are
+`WrappedI80F48` running totals (not u128); they're decoded
+internally but not surfaced as v1 columns to keep the schema
+focused on the parameter-table use case. Future consumers needing
+the running totals can re-decode from `raw_account_b64` or land an
+additive v1 column add.
+
+**Dedup.** `_dedup_key = "marginfi_reserve:{bank}:{_fetched_at}"`.
+Snapshot-tape semantics: weekly snapshots accumulate as distinct rows
+for parameter-drift analysis (matches `kamino_reserve.v1`).
 
 **Storage.** `dataset/marginfi/reserves/v1/year=Y/month=M/day=D.parquet`.
-Daily partition (matches `kamino_reserve.v1` cadence pattern; ~10–500
-banks per snapshot; weekly cron-driven re-runs build the
-parameter-drift time series for free). venue `marginfi`,
-data_type `reserves`.
+Daily + no-key partition. venue `marginfi`, data_type `reserves`.
 
-**Fetcher.** `crates/scryer-fetch-solana/src/marginfi_reserves.rs`
-(future). Single proxy-routed `getProgramAccounts` with Bank-disc
-memcmp filter; decode via IDL-driven Borsh. `oracle_keys` decoded
-verbatim (preserve list order — some banks point at multiple oracle
-accounts and the order is load-bearing for downstream provider
-dispatch).
+**Fetcher.** `crates/scryer-fetch-solana/src/marginfi_reserves.rs`.
+Single proxy-routed `getProgramAccounts` + offset-based zero-copy
+decode (marginfi-v2 is bytemuck repr=C, not Borsh). `oracle_keys`
+decoded as fixed `[pubkey; 5]` array with zero-pubkey
+(`11111111111111111111111111111111`) entries filtered out, order
+preserved.
 
-**CLI.** `scry solana marginfi-reserves [--xstock-only | --all]
-[--group PUBKEY] --proxy-url URL`.
+**CLI.** `scry solana marginfi-reserves [--all] [--proxy-url URL]
+[--venue marginfi]`. Defaults to xstock-only filter (drops to 0 today
+— there are no direct xStock Banks; xStock exposure routes via
+Kamino-position banks); pass `--all` for the full panel.
 
 **Operational.** Run weekly via `com.adamnoonan.scryer.marginfi-
 reserves.plist` (Phase TBD-C); cron-driven re-runs accumulate

@@ -32,9 +32,11 @@ mod drift_liquidations_cmd;
 mod equities_cmd;
 mod evm_cmd;
 mod fred_cmd;
+mod freshness_cmd;
 mod loopscale_loans_cmd;
 mod mango_v4_liquidations_cmd;
 mod mango_v4_oracle_configs_cmd;
+mod marginfi_reserves_cmd;
 mod oracle_context_cmd;
 mod pyth_poster_cmd;
 mod pyth_publisher_cmd;
@@ -43,6 +45,7 @@ mod sec_cmd;
 mod pool_snapshots_cmd;
 mod priority_fees_cmd;
 mod pyth_cmd;
+mod pyth_backfill_cmd;
 mod redstone_cmd;
 mod solana_cmd;
 mod v5_cmd;
@@ -125,6 +128,13 @@ enum Command {
     /// schemas". Slice 2: --once + --dry-run only; slice 2c lands the
     /// real on-chain submitter.
     PythPoster(pyth_poster_cmd::PythPosterArgs),
+    /// Forward-poll freshness watchdog (phase 70-A). Walks each
+    /// expected tape's dataset subtree, finds the newest parquet by
+    /// mtime, and exits non-zero if any tape is stale relative to its
+    /// per-tape threshold. Schedule via launchd at 15-min cadence so
+    /// silent daemon outages surface as a non-zero `launchctl list`
+    /// exit code + (optionally) a macOS notification.
+    Freshness(freshness_cmd::FreshnessArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -395,6 +405,14 @@ enum PythTarget {
     /// Schedule via launchd / cron at the desired cadence
     /// (typical: 60s).
     Tape(pyth_cmd::TapeArgs),
+    /// Historical backfill via the Pyth Benchmarks API
+    /// (`benchmarks.pyth.network/v1/updates/price/{ts}/{interval}`).
+    /// Iterates `[--start, --end)` at minute boundaries, picks the
+    /// latest publish per (feed, 60s bucket), writes one
+    /// `pyth.v1::Reading` per feed-with-data-in-bucket. Off-hours
+    /// session feeds emit no row (intrinsic to Pyth's session-feed
+    /// design — outer-join on the consumer side). Phase 67 (item 49a).
+    Backfill(pyth_backfill_cmd::BackfillArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -475,6 +493,13 @@ enum SolanaTarget {
     /// filtered by the parent Group pubkey. Writes to
     /// dataset/mango_v4/oracle_configs/v1/year=Y/month=M/day=D.parquet.
     MangoV4OracleConfigs(mango_v4_oracle_configs_cmd::MangoV4OracleConfigsArgs),
+    /// MarginFi-v2 Bank-account snapshot. One-shot
+    /// `getProgramAccounts` against `MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA`
+    /// with a Bank-disc memcmp filter; per-Bank decode + xStock
+    /// post-filter (defaults to xstock-only; pass `--all` to snapshot
+    /// every Bank). Writes one `marginfi_reserve.v1::Reserve` row per
+    /// matched Bank to dataset/marginfi/reserves/v1/year=Y/month=M/day=D.parquet.
+    MarginfiReserves(marginfi_reserves_cmd::MarginfiReservesArgs),
     /// Cross-DEX xStock swap prints. Vault-delta extraction across
     /// every DEX touching xStock mints (Orca/Meteora/Phoenix/Raydium
     /// variants/aggregator-routed). Writes to dataset/dex_xstock/
@@ -566,6 +591,7 @@ async fn main() -> Result<()> {
             SolanaTarget::DriftLiquidations(a) => drift_liquidations_cmd::run_drift_liquidations(a).await,
             SolanaTarget::MangoV4Liquidations(a) => mango_v4_liquidations_cmd::run_mango_v4_liquidations(a).await,
             SolanaTarget::MangoV4OracleConfigs(a) => mango_v4_oracle_configs_cmd::run_mango_v4_oracle_configs(a).await,
+            SolanaTarget::MarginfiReserves(a) => marginfi_reserves_cmd::run_marginfi_reserves(a).await,
             SolanaTarget::DexXstockSwaps(a) => dex_xstock_swaps_cmd::run_dex_xstock_swaps(a).await,
             SolanaTarget::PythPublisher(a) => pyth_publisher_cmd::run_pyth_publisher(a).await,
             SolanaTarget::JitoBundles(a) => jito_cmd::run_jito_bundles(a).await,
@@ -580,6 +606,7 @@ async fn main() -> Result<()> {
         },
         Command::Pyth(c) => match c.target {
             PythTarget::Tape(a) => pyth_cmd::run_tape(a).await,
+            PythTarget::Backfill(a) => pyth_backfill_cmd::run_backfill(a).await,
         },
         Command::Dexagg(c) => match c.target {
             DexaggTarget::GtTrades(a) => dexagg_cmd::run_gt_trades(a).await,
@@ -630,6 +657,7 @@ async fn main() -> Result<()> {
             CexFundingTarget::Multi(a) => cex_funding_cmd::run_multi(a).await,
         },
         Command::PythPoster(a) => pyth_poster_cmd::run_pyth_poster(a).await,
+        Command::Freshness(a) => freshness_cmd::run_freshness(a).await,
     }
 }
 

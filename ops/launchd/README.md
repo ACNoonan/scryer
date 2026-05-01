@@ -30,6 +30,7 @@ JSON-RPC proxy under `KeepAlive`.
 | `com.adamnoonan.scryer.pyth-tape.plist` | every 60s | nothing (REST direct) |
 | `com.adamnoonan.scryer.geckoterminal-trades.plist` | every 900s (15m) | nothing (REST direct) |
 | `com.adamnoonan.scryer.v5-tape.plist` | every 60s | proxy + Helius (parseTransactions) |
+| `com.adamnoonan.scryer.freshness-watchdog.plist` | every 900s (15m) | nothing (reads dataset mtimes; phase 70-A) |
 
 ## Runtime layout
 
@@ -94,6 +95,22 @@ cp ops/launchd/*.plist ~/Library/LaunchAgents/
    launchctl load ~/Library/LaunchAgents/com.adamnoonan.scryer.geckoterminal-trades.plist
    launchctl load ~/Library/LaunchAgents/com.adamnoonan.scryer.v5-tape.plist
    ```
+
+3. **Freshness watchdog** (any time, but tapes must be loaded first
+   or it will alert immediately):
+
+   ```bash
+   launchctl load ~/Library/LaunchAgents/com.adamnoonan.scryer.freshness-watchdog.plist
+   ```
+
+   On each 15-min tick it walks the dataset for each tape in the
+   built-in expected list (`bin/scry/src/freshness_cmd.rs::TAPES`),
+   exits non-zero if any tape's newest parquet is older than its
+   per-tape threshold, appends a CSV line per stale tape to
+   `~/Library/Logs/scryer/freshness.alerts.csv`, and fires a macOS
+   user notification. To add a new tape to the watchdog, append a
+   `Tape { name, rel_path, threshold_secs, cadence_label }` row to
+   the `TAPES` slice and rebuild.
 
    **V5 tape note**: defaults to Helius `parseTransactions` for the
    Chainlink stage (~50s for a 15-min lookback ≈ 5000 sigs, batched).

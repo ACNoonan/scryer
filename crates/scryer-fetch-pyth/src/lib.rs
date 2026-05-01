@@ -28,6 +28,16 @@ use thiserror::Error;
 pub const DEFAULT_HERMES_URL: &str =
     "https://hermes.pyth.network/v2/updates/price/latest";
 
+/// Pyth Benchmarks historical-update endpoint base. Append
+/// `/{anchor_unix}/{interval_secs}` and `?ids=...&parsed=true` to
+/// retrieve all publishes in `[anchor_unix, anchor_unix + interval_secs]`
+/// for the requested feeds. Phase 67 (2026-05-01) audit confirmed
+/// retention is ≥365 days; all four session feeds (regular / pre /
+/// post / on) are queryable by raw `feed_id` even though the
+/// TradingView-shim catalog only exposes the regular feed by symbol.
+pub const DEFAULT_BENCHMARKS_URL_BASE: &str =
+    "https://benchmarks.pyth.network/v1/updates/price";
+
 /// Default xStock feed registry — 8 underliers × 4 sessions.
 ///
 /// Sessions: `regular` (NYSE/NASDAQ hours), `pre`, `post`, `on`
@@ -400,6 +410,202 @@ fn parse_decimal_i64(s: &str) -> Option<i64> {
     s.parse::<i64>().ok()
 }
 
+// ---------------------------------------------------------------------------
+// Historical-backfill path — Pyth Benchmarks `/v1/updates/price/{ts}/{int}`
+// ---------------------------------------------------------------------------
+
+/// Configuration for [`poll_window`] historical reads.
+#[derive(Clone, Debug)]
+pub struct BackfillConfig {
+    /// Base URL (no trailing slash). [`DEFAULT_BENCHMARKS_URL_BASE`].
+    pub benchmarks_url_base: String,
+    /// Window size in seconds. Capped at 60 by the upstream API.
+    pub interval_secs: u32,
+    /// Stamped into every emitted row's `_source`.
+    pub source_label: String,
+    pub request_timeout: Duration,
+    /// Number of retries on HTTP 429 (rate-limit) before giving up
+    /// on a bucket. Default 5 — enough to ride out short throttle
+    /// windows. The fetcher uses exponential backoff starting at
+    /// `retry_429_initial_backoff_ms` and doubling each attempt.
+    pub retry_429_max_attempts: u32,
+    pub retry_429_initial_backoff_ms: u64,
+}
+
+impl Default for BackfillConfig {
+    fn default() -> Self {
+        Self {
+            benchmarks_url_base: DEFAULT_BENCHMARKS_URL_BASE.to_string(),
+            interval_secs: 60,
+            source_label: "pyth:hermes:benchmarks".to_string(),
+            request_timeout: Duration::from_secs(30),
+            retry_429_max_attempts: 5,
+            retry_429_initial_backoff_ms: 1_000,
+        }
+    }
+}
+
+/// Top-level Benchmarks response is a list of update batches. Each
+/// batch wraps one PNAU blob and the parsed entries that came in it.
+#[derive(Deserialize, Debug)]
+struct BenchmarksBatch {
+    #[serde(default)]
+    parsed: Vec<HermesEntry>,
+}
+
+/// Issue one Benchmarks call for `[anchor_unix, anchor_unix +
+/// cfg.interval_secs]` and return one row per feed in `feeds` that
+/// has at least one publish in that window. Per-feed selection: pick
+/// the entry with the maximum `publish_time` (i.e. the latest publish
+/// in the window — equivalent to "what `latest` would have returned
+/// at moment `anchor_unix + interval_secs`").
+///
+/// `poll_unix` and `poll_ts` are caller-supplied so all rows from one
+/// bucket carry identical anchor timestamps. By convention the caller
+/// uses `poll_unix = anchor_unix + interval_secs` (window-end), which
+/// keeps `pyth_age_s = poll_unix - publish_time` non-negative —
+/// matching the forward-poll's "we sampled at T, the publish was at
+/// T-Δ" semantics.
+///
+/// Feeds with **zero** publishes in the window are SKIPPED — no row
+/// emitted (vs. forward `poll_once`'s error-row treatment). Off-hours
+/// gaps for session-flavored feeds are intrinsic to Pyth's design and
+/// downstream consumers should outer-join.
+pub async fn poll_window(
+    client: &reqwest::Client,
+    cfg: &BackfillConfig,
+    feeds: &[FeedRef],
+    anchor_unix: i64,
+    poll_unix: i64,
+    poll_ts: &str,
+    meta: &Meta,
+) -> Result<Vec<Reading>, FetchError> {
+    let url = format!(
+        "{}/{}/{}",
+        cfg.benchmarks_url_base.trim_end_matches('/'),
+        anchor_unix,
+        cfg.interval_secs
+    );
+    let mut query: Vec<(&str, &str)> = feeds
+        .iter()
+        .map(|f| ("ids", f.feed_id.as_str()))
+        .collect();
+    query.push(("parsed", "true"));
+    // Skip the binary blob — we don't decode it on the backfill path
+    // (only the parsed fields are emitted into pyth.v1::Reading).
+    query.push(("encoding", "base64"));
+
+    // Retry-on-429 with exponential backoff. Pyth Benchmarks
+    // throttles harder than Hermes /latest — multi-minute lockouts
+    // observed during phase-67 smoke when sustained req/s exceeded
+    // ~5. The locked default (rate_limit_ms=100, retry_429=5×1s
+    // exp-backoff) targets ~4 req/s sustained which matches the
+    // observed safe rate.
+    let mut text = String::new();
+    let mut backoff_ms = cfg.retry_429_initial_backoff_ms;
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        let resp = client
+            .get(&url)
+            .query(&query)
+            .timeout(cfg.request_timeout)
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await?;
+        if status == 429 && attempt < cfg.retry_429_max_attempts {
+            tracing::warn!(
+                attempt,
+                max = cfg.retry_429_max_attempts,
+                backoff_ms,
+                "Pyth Benchmarks 429; backing off"
+            );
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            backoff_ms = backoff_ms.saturating_mul(2);
+            continue;
+        }
+        if status >= 400 {
+            return Err(FetchError::UpstreamStatus { status, body });
+        }
+        text = body;
+        break;
+    }
+    let batches: Vec<BenchmarksBatch> = serde_json::from_str(&text)
+        .map_err(|e| FetchError::MalformedBody(format!("non-json: {e}")))?;
+
+    let rows = build_window_rows(&batches, feeds, poll_unix, poll_ts, meta);
+    Ok(rows)
+}
+
+/// Pure aggregation: pick the latest publish per feed_id across all
+/// batches and expand into `Reading`s. Extracted so the tests can
+/// exercise the bucket-fold logic without HTTP.
+fn build_window_rows(
+    batches: &[BenchmarksBatch],
+    feeds: &[FeedRef],
+    poll_unix: i64,
+    poll_ts: &str,
+    meta: &Meta,
+) -> Vec<Reading> {
+    // Map feed_id (lowercased, no 0x) -> the entry with max publish_time.
+    let mut latest: std::collections::HashMap<String, HermesEntry> =
+        std::collections::HashMap::new();
+    for batch in batches {
+        for entry in &batch.parsed {
+            let key = strip_0x(&entry.id).to_lowercase();
+            let pt = entry
+                .price
+                .as_ref()
+                .and_then(|p| p.publish_time)
+                .unwrap_or(0);
+            let keep = match latest.get(&key) {
+                None => true,
+                Some(existing) => {
+                    let existing_pt = existing
+                        .price
+                        .as_ref()
+                        .and_then(|p| p.publish_time)
+                        .unwrap_or(0);
+                    pt > existing_pt
+                }
+            };
+            if keep {
+                latest.insert(key, clone_entry(entry));
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(feeds.len());
+    for f in feeds {
+        let key = strip_0x(&f.feed_id).to_lowercase();
+        if let Some(entry) = latest.remove(&key) {
+            out.push(expand_entry(f, entry, poll_unix, poll_ts, meta));
+        }
+        // No publishes in window → no row (caller's outer-join sees
+        // the off-hours gap intrinsic to Pyth's session-feed design).
+    }
+    out
+}
+
+fn clone_entry(e: &HermesEntry) -> HermesEntry {
+    HermesEntry {
+        id: e.id.clone(),
+        price: e.price.as_ref().map(clone_price),
+        ema_price: e.ema_price.as_ref().map(clone_price),
+        metadata: e.metadata.as_ref().map(|m| HermesMetadata { slot: m.slot }),
+    }
+}
+
+fn clone_price(p: &HermesPrice) -> HermesPrice {
+    HermesPrice {
+        price: p.price.clone(),
+        conf: p.conf.clone(),
+        expo: p.expo,
+        publish_time: p.publish_time,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,5 +703,127 @@ mod tests {
     fn id_match_is_case_insensitive_and_strips_0x() {
         assert_eq!(strip_0x("0xABCDEF"), "ABCDEF");
         assert_eq!(strip_0x("abcdef"), "abcdef");
+    }
+
+    fn batch(entries: Vec<(&str, i64, &str, &str)>) -> BenchmarksBatch {
+        BenchmarksBatch {
+            parsed: entries
+                .into_iter()
+                .map(|(fid, pt, price, conf)| HermesEntry {
+                    id: fid.to_string(),
+                    price: Some(HermesPrice {
+                        price: Some(price.to_string()),
+                        conf: Some(conf.to_string()),
+                        expo: Some(-5),
+                        publish_time: Some(pt),
+                    }),
+                    ema_price: None,
+                    metadata: Some(HermesMetadata { slot: Some(pt) }),
+                })
+                .collect(),
+        }
+    }
+
+    fn ref_for(sym: &str, sess: &str, fid: &str) -> FeedRef {
+        FeedRef {
+            symbol: sym.to_string(),
+            session: sess.to_string(),
+            feed_id: fid.to_string(),
+        }
+    }
+
+    #[test]
+    fn window_picks_latest_publish_per_feed() {
+        let feeds = vec![ref_for("SPY", "regular", "abc")];
+        // Three batches in the window — last one is the latest.
+        let batches = vec![
+            batch(vec![("abc", 1_777_474_801, "71000000", "20000")]),
+            batch(vec![("abc", 1_777_474_802, "71010000", "20001")]),
+            batch(vec![("abc", 1_777_474_859, "71111111", "30000")]),
+        ];
+        let rows = build_window_rows(&batches, &feeds, 1_777_474_860, "ts", &meta());
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.pyth_publish_time, 1_777_474_859);
+        assert!((r.pyth_price - 711.11111).abs() < 1e-3);
+        // age = 1777474860 - 1777474859 = 1 (always non-negative since
+        // we anchor poll_unix at window-end).
+        assert_eq!(r.pyth_age_s, 1);
+    }
+
+    #[test]
+    fn window_skips_feeds_with_zero_publishes() {
+        let feeds = vec![
+            ref_for("SPY", "regular", "abc"),
+            ref_for("SPY", "on", "def"),
+        ];
+        // Only the regular feed has publishes — the on-session feed has none.
+        let batches = vec![
+            batch(vec![("abc", 1_777_474_810, "71000000", "20000")]),
+            batch(vec![("abc", 1_777_474_820, "71001000", "20001")]),
+        ];
+        let rows = build_window_rows(&batches, &feeds, 1_777_474_860, "ts", &meta());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].symbol, "SPY");
+        assert_eq!(rows[0].session, "regular");
+    }
+
+    #[test]
+    fn window_handles_multiple_feeds_in_one_batch() {
+        let feeds = vec![
+            ref_for("SPY", "pre", "abc"),
+            ref_for("AAPL", "pre", "def"),
+        ];
+        // Pyth batches multi-feed publishes per moment — both feeds in
+        // one parsed array (mirrors the live response shape during
+        // pre-market when 8 pre-feeds publish simultaneously).
+        let batches = vec![
+            BenchmarksBatch {
+                parsed: vec![
+                    HermesEntry {
+                        id: "abc".to_string(),
+                        price: Some(HermesPrice {
+                            price: Some("71000000".to_string()),
+                            conf: Some("20000".to_string()),
+                            expo: Some(-5),
+                            publish_time: Some(1_777_465_810),
+                        }),
+                        ema_price: None,
+                        metadata: None,
+                    },
+                    HermesEntry {
+                        id: "def".to_string(),
+                        price: Some(HermesPrice {
+                            price: Some("18500000".to_string()),
+                            conf: Some("5000".to_string()),
+                            expo: Some(-5),
+                            publish_time: Some(1_777_465_810),
+                        }),
+                        ema_price: None,
+                        metadata: None,
+                    },
+                ],
+            },
+        ];
+        let rows = build_window_rows(&batches, &feeds, 1_777_465_860, "ts", &meta());
+        assert_eq!(rows.len(), 2);
+        let by_sym: std::collections::HashMap<_, _> =
+            rows.iter().map(|r| (r.symbol.clone(), r)).collect();
+        assert!((by_sym["SPY"].pyth_price - 710.0).abs() < 1e-6);
+        assert!((by_sym["AAPL"].pyth_price - 185.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn window_id_match_is_case_insensitive() {
+        let feeds = vec![ref_for("SPY", "regular", "ABCDEF")];
+        let batches = vec![batch(vec![(
+            "0xabcdef",
+            1_777_474_810,
+            "71000000",
+            "20000",
+        )])];
+        let rows = build_window_rows(&batches, &feeds, 1_777_474_860, "ts", &meta());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pyth_publish_time, 1_777_474_810);
     }
 }

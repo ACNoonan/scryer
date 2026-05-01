@@ -1966,6 +1966,96 @@ via historical APIs without changing the forward-cadence policy.
 
 ---
 
+## Pyth Benchmarks historical backfill — 2026-05-01 (locked)
+
+**Locked: historical Pyth equity tape backfills go through
+`benchmarks.pyth.network/v1/updates/price/{ts}/{interval}`** (the
+"Benchmarks API range form"), NOT through Hermes `/v2/updates/price/
+{publish_time}` and NOT through Pythnet on-chain replay. Used by
+phase 71 to land the 49a sub-item (Paper-1 oracle coverage-inversion
+historical panel, Pyth leg).
+
+### Why not the obvious paths
+
+The wishlist's original 49a plan ("extend backwards via Hermes
+benchmarks endpoint, Hermes typically retains ~6 months") was based
+on a wrong empirical assumption. 2026-05-01 audit findings:
+
+| Path | Result |
+|------|--------|
+| `hermes.pyth.network/v2/updates/price/{publish_time}` (single-ts) | 404 "Update data not found" for ALL probes (60s / 5m / 1h / 1d / 90d ago). Equity feeds are not stored by this endpoint despite the docs. |
+| `benchmarks.pyth.network/v1/updates/price/{publish_time}` (single-ts) | Same — 404 for arbitrary timestamps; only specific publish-time-exact matches return data. Useless for backfill. |
+| `benchmarks.pyth.network/v1/shims/tradingview/history` (1m OHLC) | Works for `Equity.US.{TICKER}/USD` but only the regular (US-mkt-hrs) session — `pre`/`post`/`on` session-flavored symbols don't exist in the TV-shim catalog. Loses the off-hours data Paper-1 cares about. |
+| Pythnet RPC sig-walk (`pythnet.rpcpool.com`) | Public node retention = ~21.7 hours (`First available block: ~slot now − 195K` = ~78K seconds). 90d impossible at the public tier. Forward poll (running since 2026-04-24) already covers everything Pythnet retains, so a Pythnet replay would emit zero new information. |
+| **Benchmarks API range form `/v1/updates/price/{ts}/{interval}`** | **Works.** Retention ≥365 days verified empirically. All 4 session feeds (regular / pre / post / on) addressable by raw `feed_id` (TV-shim catalog gap is irrelevant — the raw-`ids=` query bypasses the symbol catalog). |
+
+### Empirical coverage shape (locked 2026-05-01)
+
+Pyth's 4-session-feed design constrains what's actually published.
+The forward poll has the same shape; the backfill just makes the
+historical depth explicit. Coverage by US-clock window:
+
+| Session feed | Active window (US/Eastern) | Active hours / week |
+|--------------|----------------------------|---------------------|
+| `regular` | Mon-Fri 09:30 - 16:00 | ~32.5 h |
+| `pre` | Mon-Fri 04:00 - 09:30 | ~27.5 h |
+| `post` | Mon-Fri 16:00 - 20:00 | ~20 h |
+| `on` (overnight) | Mon-Fri 20:00 - 04:00 + Sun 23:00 - Mon 04:00 | ~45 h |
+| **Empty** (no Pyth publishes at all) | Sat 04:00 ET - Sun 23:00 ET (~43 h) | — |
+
+**The Sat-04:00 - Sun-23:00 ET window is empty on Pyth.** This is
+NOT a Benchmarks-API gap — it's intrinsic to Pyth's session design
+(the `on` overnight feed is anchored to US weekday cycles, not 24/7
+weekend coverage). Paper-1's "weekend regime" analysis on the Pyth
+leg therefore covers only Sat-overnight + Sun-overnight slices, not
+US-day weekend. The same constraint applies to Pyth's forward poll;
+this is a Pyth-feed property, not a backfill artifact.
+
+### Locked design
+
+1. **Endpoint:** `benchmarks.pyth.network/v1/updates/price/{anchor_unix}/{interval_secs}` with `interval_secs=60` (upstream cap), `?ids={feed_id}&...&parsed=true&encoding=base64`.
+2. **Multi-feed batching:** all 32 default-registry feed IDs in one call. Pyth groups multi-feed publishes per moment in the same `parsed[]` array — single call covers all symbols × sessions for the bucket.
+3. **Bucket alignment:** poll_ts at every `:00` UTC second (i.e. minute boundary). Window for the bucket labeled `T` is `[T-60, T]`. URL path uses `{T-60}` as anchor; rows carry `poll_unix = T`. This keeps `pyth_age_s = poll_unix - publish_time` non-negative (matches forward poll's "we sampled at T, the publish was at T-Δ" semantics).
+4. **Per-(feed, bucket) row selection:** pick the entry with the maximum `publish_time` in the window (the latest publish ≤ T). Equivalent to "what `latest` would have returned at moment T."
+5. **Empty buckets:** **NO row emitted** when a feed has zero publishes in its bucket. The off-hours session-feed gaps are intrinsic to Pyth's design; downstream consumers outer-join. Forward-poll's error-row treatment (one zeroed row per missing-feed-tick) does NOT apply — backfill rows reflect Pyth's actual archive state, not collection ergonomics.
+6. **`_source` label:** `"pyth:hermes:benchmarks"` distinguishes from forward-poll's `"pyth:hermes"` / `"pyth:hermes:launchd"`. Consumers can scope queries via `_source LIKE 'pyth:hermes:benchmarks%'` for backfill rows.
+7. **Schema reuse:** existing `pyth.v1::Reading` (16 logical fields). No new schema; no version bump. Dedup_key = `pyth:{symbol}:{session}:{poll_ts}` continues unchanged. Forward-poll rows and backfill rows coexist cleanly because forward-poll's `poll_ts` drifts off the minute boundary by milliseconds-to-seconds while backfill's is exactly aligned, so collisions are rare and harmless when they happen (existing-row-wins by store policy).
+
+### Rate-limit policy
+
+Empirical 2026-05-01 ceiling: **~4 req/s sustained** (rate-limit-ms ≥ 250). Higher rates (50 req/s probed) trigger HTTP 429 lockouts that take multi-minute backoff to clear. The fetcher's locked default:
+
+- `rate_limit_ms = 100` (CLI default — operator can pin higher; 250ms is the safe sustained ceiling)
+- `retry_429_max_attempts = 5`
+- `retry_429_initial_backoff_ms = 1_000` (doubles each retry: 1s / 2s / 4s / 8s / 16s)
+
+At 4 req/s sustained, 90 days × 1440 minutes/day = 129,600 buckets / 4 = ~32,400 seconds = **~9 hours wall-clock**. Sustained backfills should stay at 250ms+ to avoid throttle escalation.
+
+### Why this lands as backfill, not as a forward-poll change
+
+The forward poll's `pyth-tape.plist` is unchanged — it continues
+hitting `hermes.pyth.network/v2/updates/price/latest` every 60s and
+emitting the same `pyth.v1` rows with `_source = "pyth:hermes:launchd"`.
+The Benchmarks endpoint is exclusively for historical depth; it
+would not improve forward latency (Hermes /latest is already
+sub-second, Benchmarks is ~870ms / call) and would burn
+backfill-tier rate-limit budget on rows the forward poll already
+captures.
+
+### Decision-log row
+
+Lands with phase 71 (`scry pyth backfill` CLI + `poll_window`
+fetcher in `scryer-fetch-pyth` + 1-hour live smoke validation
+showing 496 rows / 0 empty / 0 failed buckets across 32 feeds at
+the pre-market → market-open boundary; 1-hour weekend smoke
+empirically characterizing the Sat-day Pyth gap; 429 retry path
+exercised). The actual 90-day historical backfill RUN is
+operator-side (~9 hours wall-clock at the locked 4 req/s ceiling)
+and will land its parquet-paths + row-counts as a phase 71
+follow-up row when the operator triggers it.
+
+---
+
 ## Decision log + Specification log
 
 Both logs moved to `docs/phase_log.md` 2026-04-29. The Decision log is

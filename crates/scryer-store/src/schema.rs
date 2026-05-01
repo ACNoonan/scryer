@@ -25,7 +25,8 @@ use scryer_schema::{
     backed, backed_nav_strikes, cboe_indices, cex_perp_funding_multi, cex_stock_perp_ohlcv, cex_stock_perp_tape, chainlink_data_streams, cme_intraday_1m, deribit_iv, dex_xstock_swaps, drift_liquidation, earnings, edgar_8k, evm_liquidation, fluid_vault_config, fred_macro, fred_macro_extended, geckoterminal, geckoterminal_ohlcv,
     jito_bundles, jito_tip_floor, jupiter_lend_liquidation, kamino_liquidation, kamino_obligation,
     kamino_obligation_position, kamino_reserve, kamino_scope, kraken_funding, loopscale_loan,
-    loopscale_loan_collateral, mango_v4_liquidation, mango_v4_oracle_config, nasdaq_halts,
+    loopscale_loan_collateral, mango_v4_liquidation, mango_v4_oracle_config, marginfi_reserve,
+    nasdaq_halts,
     oracle_context, pool_snapshot, pyth, pyth_poster_post, pyth_poster_tx, pyth_publisher,
     raydium_pool_metadata, redstone, solana_priority_fees, swap, trade, v5_tape, xstock_holders, yahoo, yahoo_corp_actions, FromArrowError,
 };
@@ -962,6 +963,31 @@ impl DatasetSchema for kamino_reserve::v1::Reserve {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         kamino_reserve::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for marginfi_reserve::v1::Reserve {
+    const DATA_TYPE: &'static str = "reserves";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    /// Bank config rarely changes (MarginFi governance is the only
+    /// mutator). Daily partitioning gives 1 snapshot per day per Bank
+    /// for the weekly-snapshot cadence; matches `kamino_obligation.v1`'s
+    /// daily-snapshot convention rather than `kamino_reserve.v1`'s
+    /// yearly — MarginFi has 422+ Banks today (vs Kamino-xStocks' 8)
+    /// so per-day-per-Bank rolls up cleaner.
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.meta.fetched_at
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        marginfi_reserve::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        marginfi_reserve::v1::from_record_batch(batch)
     }
 }
 

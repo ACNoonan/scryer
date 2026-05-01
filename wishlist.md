@@ -49,7 +49,8 @@ don't re-propose.
 | 44 | Done — phases 52–54 + 64 + 65 (Pyth equity-feed poster; slice 2c-3 fully shipped — `RealStagedSubmitter` + `pyth_poster_tx.v1` per-stage tape + CLI `--no-dry-run`; funded devnet smoke remains operator-side per phase 65 prose) |
 | 45 (tape + OHLCV) | Done — phases 55–58 (cex-stock-perp 11 venues) |
 | 45 (Phemex OHLCV) | **Blocked on US-IP geo-block** — see below |
-| 46, 47 | Locked, **not yet shipped** — Priority 0 paper-3 event-source (full entries below) |
+| 46 | Done — phase 69 (`marginfi_reserve.v1` schema + fetcher + `scry solana marginfi-reserves` CLI; 422 mainnet Banks live-validated; zero direct xStock Banks today — xStock exposure routes via Kamino-position banks) |
+| 47 | Locked, **not yet shipped** — Priority 0 paper-3 event panel (full entry below) |
 | 48 | Done — phase 67 (`decode_v11` + nullable `bid_price`/`ask_price`/`mid_price`/`last_traded_price` columns on `chainlink_data_streams.v1`; v11 reports now fully decode rather than landing as cadence-only stubs) |
 | 49 | First slice shipped — phase 66 (cadence audit + chainlink launchd plist + CLI `--once`); sub-items 49a (Pyth Hermes ≥90d) / 49b (Kamino Scope ≥90d) / 49c (RedStone permaweb ≥90d) / 49d (chainlink ≥90d run + soothsayer consumer cutover) outstanding (full entry below) |
 
@@ -70,38 +71,24 @@ returned 0 events) is **MarginFi-v2** — the dominant on-chain
 source of liquidation events for any xStock-adjacent panel. Schemas
 locked 2026-04-29 in `methodology_log.md` "MarginFi-v2 schemas".
 
-## 46. `marginfi_reserve.v1` — MarginFi-v2 per-Bank snapshot
+## 46. `marginfi_reserve.v1` — DONE (phase 69)
 
-Phase TBD-A. Counterpart to `kamino_reserve.v1` (item 4) for the
-soothsayer paper-3 cross-protocol parameter table. Locked-load-bearing
-per soothsayer `docs/sources/lending/marginfi.md` §6 open-question
-gating: the Kamino-xStocks 30-day liquidation scan returned 0 events,
-making MarginFi the dominant on-chain source of liquidation events
-for any xStock-adjacent event-panel build. Methodology entry:
-`methodology_log.md` "MarginFi-v2 schemas — 2026-04-29 (locked)".
+Schema + fetcher + `scry solana marginfi-reserves [--all]` CLI shipped
+2026-05-01. IDL fetched via `anchor idl fetch
+MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA --provider.cluster mainnet`
+to `idl/marginfi/marginfi-v2.json`. Live-validated: 422 mainnet Banks
+decoded cleanly (0 errors). **Headline finding: zero direct xStock
+Banks today** — xStock exposure on MarginFi routes via Kamino-position
+banks (`KaminoPythPush` / `KaminoSwitchboardPull` oracle setups);
+soothsayer Paper-3 §3 cross-protocol joins will need an extra
+Kamino-position → underlying-mint hop.
 
-Schema + source detail: `docs/schemas.md#marginfi_reservev1`.
+Schema + source detail: `docs/schemas.md#marginfi_reservev1`. Phase row:
+`docs/phase_log.md` v0.1-phase-69.
 
-**Notes.**
-- Mainnet program ID `MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA`
-  (verified on-chain 2026-04-29 — the soothsayer-doc-cited
-  `MFv2hWf31Z4i1g2AhULZWnuwvvfuBQg4P4HFcXyFZi5` does not exist on
-  mainnet; soothsayer §6 #1 should be closed with the verified
-  address).
-- `bank.config.oracle_keys` is a **multi-account list per Bank** —
-  capture verbatim with order preserved; downstream consumers
-  dispatch by oracle program owner (Switchboard / Pyth / Fixed).
-- IDL is not committed in the marginfi-v2 repo; fetch via either
-  `anchor idl fetch <PROGRAM_ID> --provider.cluster mainnet` (iff
-  marginfi published the IDL on-chain at deploy) or `anchor build`
-  against `github.com/0dotxyz/marginfi-v2` (note: 301-redirect from
-  `mrgnlabs/marginfi-v2`).
-- Switchboard-wired Banks have crank-cadence-dependent staleness —
-  `oracle_setup` is the correct segment column for downstream
-  weekend-staleness analysis (soothsayer §1.2 / §6 #4).
-
-**Effort.** ~3–4 hours (snapshot fetcher + IDL-driven decode +
-multi-oracle-key handling).
+**CLI.** `scry solana marginfi-reserves [--all] [--proxy-url URL]`.
+Defaults to xstock-only filter (drops to 0 today; pass `--all` for
+the full 422-Bank panel).
 
 ## 47. `marginfi_liquidation.v1` — MarginFi-v2 event panel
 

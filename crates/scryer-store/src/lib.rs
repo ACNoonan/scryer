@@ -66,6 +66,7 @@ pub mod venue {
     pub const DRIFT: &str = "drift";
     pub const SOLANA: &str = "solana";
     pub const MANGO_V4: &str = "mango_v4";
+    pub const MARGINFI: &str = "marginfi";
     pub const DERIBIT: &str = "deribit";
     pub const CBOE: &str = "cboe";
     pub const RAYDIUM: &str = "raydium";
