@@ -7,6 +7,8 @@
 //!   scry solana swaps  --pool-metadata FILE --start DATE --end DATE
 //!                      --proxy-url URL --helius-api-key KEY
 //!                      [--dataset DIR] [--venue VENUE]
+//!   scry kraken trades --pair PAIR --start DATE --end DATE
+//!                      [--source LABEL] [--rate-limit-ms 1000] [--dataset DIR]
 
 use std::path::PathBuf;
 
@@ -14,12 +16,6 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 
-mod dexagg_cmd;
-mod import_cmd;
-mod jito_cmd;
-mod jito_tip_floor_cmd;
-mod kamino_obligations_cmd;
-mod kamino_reserves_cmd;
 mod backed_cmd;
 mod cboe_cmd;
 mod cex_funding_cmd;
@@ -28,25 +24,32 @@ mod chainlink_reports_cmd;
 mod databento_cmd;
 mod deribit_cmd;
 mod dex_xstock_swaps_cmd;
+mod dexagg_cmd;
 mod drift_liquidations_cmd;
 mod equities_cmd;
 mod evm_cmd;
 mod fred_cmd;
 mod freshness_cmd;
+mod import_cmd;
+mod jito_cmd;
+mod jito_tip_floor_cmd;
+mod kamino_obligations_cmd;
+mod kamino_reserves_cmd;
+mod kraken_cmd;
 mod loopscale_loans_cmd;
 mod mango_v4_liquidations_cmd;
 mod mango_v4_oracle_configs_cmd;
 mod marginfi_reserves_cmd;
 mod oracle_context_cmd;
-mod pyth_poster_cmd;
-mod pyth_publisher_cmd;
-mod rss_cmd;
-mod sec_cmd;
 mod pool_snapshots_cmd;
 mod priority_fees_cmd;
-mod pyth_cmd;
 mod pyth_backfill_cmd;
+mod pyth_cmd;
+mod pyth_poster_cmd;
+mod pyth_publisher_cmd;
 mod redstone_cmd;
+mod rss_cmd;
+mod sec_cmd;
 mod solana_cmd;
 mod v5_cmd;
 mod xstock_holders_cmd;
@@ -116,6 +119,11 @@ enum Command {
     /// funding_ts) triple to dataset/cex_perp_funding/funding/v1/
     /// symbol={SYM}/year=Y/month=M/day=D.parquet.
     CexFunding(CexFundingCmd),
+    /// Kraken public REST clients. v0.1: `trades` only. Paginating
+    /// nanosecond-cursor walk over `api.kraken.com/0/public/Trades`.
+    /// Writes to dataset/kraken/trades/v1/pair={PAIR}/year=Y/month=M/
+    /// day=D.parquet. Phase 74 (closes v0.1 scope-2).
+    Kraken(KrakenCmd),
     /// Multi-venue 24/7 CEX perp tape on xStock underliers. v1 ships
     /// 4 venues (Kraken Futures, Gate.io, OKX, Coinbase International).
     /// Writes to dataset/cex_stock_perp/tape/v1/underlier={SYM}/year=Y/
@@ -301,6 +309,21 @@ enum DeribitTarget {
 struct CexFundingCmd {
     #[command(subcommand)]
     target: CexFundingTarget,
+}
+
+#[derive(Parser, Debug)]
+struct KrakenCmd {
+    #[command(subcommand)]
+    target: KrakenTarget,
+}
+
+#[derive(Subcommand, Debug)]
+enum KrakenTarget {
+    /// Window-walker over Kraken's public `Trades` endpoint. Iterates
+    /// `[--start, --end)` via the upstream's nanosecond cursor at
+    /// 1 req/s sustained, dedups on `kraken:{trade_id}`, writes to
+    /// dataset/kraken/trades/v1/pair={PAIR}/year=Y/month=M/day=D.parquet.
+    Trades(kraken_cmd::TradesArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -581,17 +604,27 @@ async fn main() -> Result<()> {
         Command::Solana(c) => match c.target {
             SolanaTarget::Swaps(a) => solana_cmd::run_swaps(a).await,
             SolanaTarget::KaminoLiquidations(a) => solana_cmd::run_kamino_liquidations(a).await,
-            SolanaTarget::JupiterLendLiquidations(a) => solana_cmd::run_jupiter_lend_liquidations(a).await,
+            SolanaTarget::JupiterLendLiquidations(a) => {
+                solana_cmd::run_jupiter_lend_liquidations(a).await
+            }
             SolanaTarget::FluidVaultConfigs(a) => solana_cmd::run_fluid_vault_configs(a).await,
             SolanaTarget::KaminoScopeTape(a) => solana_cmd::run_kamino_scope_tape(a).await,
             SolanaTarget::PoolSnapshots(a) => pool_snapshots_cmd::run_pool_snapshots(a).await,
             SolanaTarget::KaminoReserves(a) => kamino_reserves_cmd::run_reserves(a).await,
             SolanaTarget::KaminoObligations(a) => kamino_obligations_cmd::run_obligations(a).await,
             SolanaTarget::LoopscaleLoans(a) => loopscale_loans_cmd::run_loopscale_loans(a).await,
-            SolanaTarget::DriftLiquidations(a) => drift_liquidations_cmd::run_drift_liquidations(a).await,
-            SolanaTarget::MangoV4Liquidations(a) => mango_v4_liquidations_cmd::run_mango_v4_liquidations(a).await,
-            SolanaTarget::MangoV4OracleConfigs(a) => mango_v4_oracle_configs_cmd::run_mango_v4_oracle_configs(a).await,
-            SolanaTarget::MarginfiReserves(a) => marginfi_reserves_cmd::run_marginfi_reserves(a).await,
+            SolanaTarget::DriftLiquidations(a) => {
+                drift_liquidations_cmd::run_drift_liquidations(a).await
+            }
+            SolanaTarget::MangoV4Liquidations(a) => {
+                mango_v4_liquidations_cmd::run_mango_v4_liquidations(a).await
+            }
+            SolanaTarget::MangoV4OracleConfigs(a) => {
+                mango_v4_oracle_configs_cmd::run_mango_v4_oracle_configs(a).await
+            }
+            SolanaTarget::MarginfiReserves(a) => {
+                marginfi_reserves_cmd::run_marginfi_reserves(a).await
+            }
             SolanaTarget::DexXstockSwaps(a) => dex_xstock_swaps_cmd::run_dex_xstock_swaps(a).await,
             SolanaTarget::PythPublisher(a) => pyth_publisher_cmd::run_pyth_publisher(a).await,
             SolanaTarget::JitoBundles(a) => jito_cmd::run_jito_bundles(a).await,
@@ -599,7 +632,9 @@ async fn main() -> Result<()> {
             SolanaTarget::PriorityFees(a) => priority_fees_cmd::run_priority_fees(a).await,
             SolanaTarget::XstockHolders(a) => xstock_holders_cmd::run_xstock_holders(a).await,
             SolanaTarget::OracleContext(a) => oracle_context_cmd::run_oracle_context(a).await,
-            SolanaTarget::ChainlinkReports(a) => chainlink_reports_cmd::run_chainlink_reports(a).await,
+            SolanaTarget::ChainlinkReports(a) => {
+                chainlink_reports_cmd::run_chainlink_reports(a).await
+            }
         },
         Command::Redstone(c) => match c.target {
             RedstoneTarget::Tape(a) => redstone_cmd::run_tape(a).await,
@@ -656,6 +691,9 @@ async fn main() -> Result<()> {
         Command::CexFunding(c) => match c.target {
             CexFundingTarget::Multi(a) => cex_funding_cmd::run_multi(a).await,
         },
+        Command::Kraken(c) => match c.target {
+            KrakenTarget::Trades(a) => kraken_cmd::run_trades(a).await,
+        },
         Command::PythPoster(a) => pyth_poster_cmd::run_pyth_poster(a).await,
         Command::Freshness(a) => freshness_cmd::run_freshness(a).await,
     }
@@ -666,8 +704,7 @@ async fn main() -> Result<()> {
 /// second is for second-precision windows in tests.
 pub fn parse_unix_seconds(s: &str) -> Result<i64> {
     if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        let dt = Utc
-            .from_utc_datetime(&d.and_hms_opt(0, 0, 0).context("invalid time-of-day")?);
+        let dt = Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0).context("invalid time-of-day")?);
         return Ok(dt.timestamp());
     }
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {

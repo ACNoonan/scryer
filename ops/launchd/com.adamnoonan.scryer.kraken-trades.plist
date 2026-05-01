@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.kraken-trades</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin/scry</string>
+        <string>kraken</string>
+        <string>trades</string>
+        <string>--pair</string>
+        <string>SOLUSD</string>
+        <string>--lookback-secs</string>
+        <string>86400</string>
+        <string>--source</string>
+        <string>kraken:Trades:launchd</string>
+        <string>--rate-limit-ms</string>
+        <string>1000</string>
+        <string>--dataset</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/dataset</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/kraken-trades.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/kraken-trades.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SCRY_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>

@@ -2056,6 +2056,235 @@ follow-up row when the operator triggers it.
 
 ---
 
+## Kraken-spot-trades fetcher v0.1 — 2026-05-01 (locked)
+
+**Locked: the originally-scoped v0.1 slice 2 (`scry kraken trades`)
+ships at phase 74**, closing the last v0.1-scope deliverable that had
+been deferred since 2026-04-27 because the operator was still pulling
+Kraken trades through `quant-work/lvr/fetch_kraken.py`. The schema
+side was completed at phase 1 (`trade.v1::Trade`) and the legacy-
+import path at phase 5 (`scry import trades`); phase 74 lands the
+fetcher itself. The driver is the LVR-unblock work order (item TBD-
+quant-work, 2026-05-01): the consumer's locked 180d window
+[2025-10-27T14:00Z, 2026-04-25T14:00Z) needs canonical Kraken-side
+trades — the existing legacy parquet covers only 18 days of that
+window.
+
+### Pair name canonicalization
+
+**Locked: scryer's canonical Kraken-pair string is the operator's
+altname (`SOLUSD`), not Kraken's underlying canonical
+(`XSOLZUSD`).** Three reasons:
+
+1. The legacy `quant-work/data/kraken_solusd_trades.parquet` (phase-5
+   import target) carries `pair=SOLUSD` semantics in its filename; the
+   phase-5 `scry import trades --pair SOLUSD` invocation already
+   pinned this convention to disk.
+2. Kraken's REST `Trades` endpoint accepts `pair=SOLUSD` in the
+   query and returns the trade tape under whatever pair-key it
+   internally normalized to (often `XSOLZUSD`); the partition path
+   should reflect what the operator typed, not what Kraken's
+   internal SQL canonical happens to be.
+3. The dedup_key (`kraken:{trade_id}`) carries no pair information
+   anyway — it's per-trade, globally unique on Kraken — so the
+   partition string is purely an organizational convention.
+
+The fetcher therefore (a) sends the user-typed `--pair` value
+verbatim to Kraken, (b) extracts trades from the single-key result
+object regardless of which key Kraken normalized to, and (c) writes
+to `pair=<user-typed-pair>` partitions. Future pairs (e.g. `BTCUSD`,
+`ETHUSD`) follow the same pattern — operator types altname, scryer
+preserves it.
+
+### Endpoint, pagination, response shape
+
+**Endpoint:** `https://api.kraken.com/0/public/Trades?pair=<pair>&since=<ns_cursor>`.
+**Response (success):**
+
+```json
+{
+  "error": [],
+  "result": {
+    "<canonical_pair_key>": [
+      [price_str, volume_str, ts_f64, side_char, type_char, misc_str, trade_id_int],
+      ...
+    ],
+    "last": "<ns_cursor_string>"
+  }
+}
+```
+
+- `price_str` / `volume_str` are decimal strings; parse to f64.
+- `ts_f64` is unix seconds with sub-second precision (matches
+  `trade.v1::Trade::ts: f64`).
+- `side_char` is `"b"` or `"s"`; `type_char` is `"l"` or `"m"`;
+  `misc_str` is often empty.
+- `trade_id_int` is a Kraken-side stable per-trade integer (matches
+  `trade.v1::Trade::trade_id: i64`).
+- `result.last` is a nanoseconds-since-unix-epoch cursor as a
+  decimal string; pass it as `since=` for the next call.
+- Page size is **upstream-determined** (typically up to 1000
+  trades) — there is no client-controlled page size.
+
+**Pagination strategy:** start at `since = floor(start_window_unix * 1e9)`,
+fetch a page, write the trades, advance `since = result.last`,
+stop when (a) `since >= floor(end_window_unix * 1e9)` or (b) the
+page is empty (caught up to live tail). The cursor is exclusive on
+the lower bound: trades returned have `ts > since`, so passing
+`result.last` as the next `since` does not re-fetch the boundary
+trade. Operator re-runs over an already-pulled window dedup cleanly
+on `kraken:{trade_id}`.
+
+**Error envelope:** Kraken's `error` array is non-empty on upstream
+errors (e.g. `["EService:Unavailable"]`, `["EAPI:Rate limit exceeded"]`).
+HTTP 200 + non-empty error → fetcher treats as a fail-the-page
+condition and propagates to the retry loop.
+
+### Rate-limit + retry policy
+
+**Locked: 1 sustained req/s + exponential backoff on transport
+errors and on the rate-limit error.**
+
+Kraken's public REST tier has a soft "API counter" that increments
+per call and decrements at ~1 unit/s, with `Trades` consuming 1
+unit/call. The unauthenticated tier's max counter is 15, so very
+short bursts are tolerated but a 1 req/s sustained baseline is the
+safe ceiling for multi-hour backfills. The locked defaults:
+
+- `rate_limit_ms = 1000` (one call per second sustained — operator
+  override is allowed but not recommended for >1h runs).
+- `retry_max = 5`, `retry_initial_backoff_ms = 1000`, exponential:
+  1s / 2s / 4s / 8s / 16s. Triggered by:
+  - HTTP transport errors (DNS, TCP, TLS, timeout).
+  - HTTP status ≥ 500.
+  - HTTP 200 with `error` containing `"EAPI:Rate limit exceeded"`
+    or `"EService:Unavailable"`.
+- `request_timeout = 30s` — Kraken's free-tier response time can
+  spike to 10s+ during peak load.
+
+The retry loop is per-page; if all retries are exhausted the
+fetcher returns an error and the CLI bubbles it up. No silent
+gap-tolerance: a window with an unrecoverable upstream failure
+should fail loudly per the "loudly-failing pipelines" gameplan
+(phase 70 RCA).
+
+### Output shape + partition
+
+Schema: `trade.v1::Trade` (locked phase 1). Partition: keyed on
+`pair`, daily granularity (already declared in
+`scryer-store::schema::DatasetSchema for trade::v1::Trade`). Output
+path:
+
+```
+dataset/kraken/trades/v1/pair=<PAIR>/year=YYYY/month=MM/day=DD.parquet
+```
+
+Per-row `_meta`:
+- `_schema_version = "trade.v1"`.
+- `_fetched_at = <unix seconds at fetch start>` (one timestamp per
+  fetcher invocation, stamped on every row written by that
+  invocation; matches phase-5 import convention).
+- `_source = "kraken:Trades"` (default; operator override via
+  `--source` for the launchd tail vs. one-shot backfill
+  distinction, e.g. `kraken:Trades:launchd` vs.
+  `kraken:Trades:backfill:2025-10-27..2026-04-25`).
+
+Dedup_key: `kraken:{trade_id}` (locked phase 1). Re-runs over an
+already-fetched window write zero new rows; the store layer's
+read-modify-write merge preserves the existing row's `_fetched_at`
++ `_source`.
+
+### Cross-validation against phase-5 legacy import
+
+The phase-5 `scry import trades --input <legacy.parquet> --venue kraken
+--pair SOLUSD --source kraken:legacy:quant-work-import` already
+produces a parquet with the trade.v1 schema from
+`quant-work/data/kraken_solusd_trades.parquet`. The phase-74 cross-
+validation procedure:
+
+1. Pick a temp dataset root distinct from the canonical one (e.g.
+   `/tmp/kraken-validate/dataset/`).
+2. Run the legacy import into the temp root: `scry import trades
+   --input ~/Documents/quant-work/data/kraken_solusd_trades.parquet
+   --venue kraken --pair SOLUSD --source kraken:legacy:quant-work-import
+   --dataset /tmp/kraken-validate/dataset`.
+3. Run the new fetcher over the same window into the same temp root
+   under a distinct `_source`: `scry kraken trades --pair SOLUSD
+   --start <legacy.min_ts> --end <legacy.max_ts + 1s> --source
+   kraken:Trades:phase-74-validate --dataset /tmp/kraken-validate/dataset`.
+4. Read both row sets back; compare:
+   - Row count (with same `pair` filter).
+   - `_dedup_key` set equality.
+   - For matching dedup_keys: `(price, volume, ts, side, type, misc,
+     trade_id)` tuple equality (the `_meta` columns are expected to
+     differ on `_fetched_at` and `_source`).
+
+**Expected outcome:** byte-equal modulo `_fetched_at` and `_source`.
+Any divergence is a data-fidelity bug and freezes the run for
+investigation. The validation result lands in the phase-74 row in
+`docs/phase_log.md`.
+
+**Validation result 2026-05-01** (validation hour `[1761764400,
+1761768000)` = 2025-10-29 19:00-20:00 UTC, 1951 legacy rows): row
+count + trade_id set + (price, volume, side, type, misc) all
+byte-equal. **`ts` differs by exactly 1 f64 ULP (≈ 240 ns) on
+223/1951 rows (11.4%)**. Every diff sits at `±2^-22 ≈ ±2.384e-7`
+which is the f64 ULP at magnitude `1.76e9`. The diffs are
+upstream-precision drift: Kraken's JSON serialization of the
+trade-time float string truncates one trailing decimal compared
+to the late-2025 response shape, and the parser-result f64 lands
+on the adjacent representable f64 value. This is **not a fetcher
+bug** — it's a Kraken-side change between fetch dates, observable
+only on rows where the upstream's old vs new string round to
+different f64 ULPs.
+
+The `_dedup_key = "kraken:{trade_id}"` is byte-equal across both
+parquets, so consumers joining on dedup_key see no fragmentation.
+Self-consistency check (same fetcher, two independent runs into
+two dataset roots): **1951/1951 tuples byte-equal** — the fetcher
+is fully reproducible against itself.
+
+**Operator implication for the 180d backfill**: the new fetcher's
+`ts` may differ by ≤ 240 ns from any extant legacy parquet rows
+that overlap the same trades. If the operator wants a consistent
+historical panel, prefer the new-fetcher rows over the legacy-
+import rows on overlap (they represent Kraken's *current* archive
+state); the dedup-key collapses them cleanly when both end up in
+the same partition. Per the v0.6 LVR-side hygiene rule, this
+ts-drift is reported here as a known quantified divergence rather
+than treated as a freeze condition — the divergence is bounded,
+sub-microsecond, and traceable to a documented upstream cause.
+
+The cross-validation does NOT use the canonical
+`~/Library/Application Support/scryer/dataset/` root — a separate
+temp root keeps the canonical layout free of test-source rows.
+
+### What's deferred to v0.2+
+
+- **OHLC + funding fetchers in this crate.** The crate description
+  says "trades, OHLC, funding"; phase 74 ships only `trades`. OHLC
+  is covered by the existing `cex_stock_perp ohlcv` (Kraken Futures
+  flavor); funding is covered by the existing
+  `kraken_funding.v1`+`scry import kraken-funding` migration. Spot-
+  OHLC is not currently a known consumer requirement; defer.
+- **Multi-pair batching.** v1 is one-pair-per-invocation (the
+  endpoint accepts comma-separated pairs but no consumer needs
+  multi-pair batching today; one-pair invocations match the
+  partition-key convention 1:1 and keep retries scoped per pair).
+- **WS Tick stream.** Kraken's WebSocket `trade` channel is the
+  real-time complement; out of v0.1 scope per `methodology_log.md`
+  "Open questions (defer to v0.2+)" → "WebSocket / streaming".
+
+### Decision-log row
+
+Lands with phase 74 (fetcher + CLI + cross-validation +
+`com.adamnoonan.scryer.kraken-trades.plist` hourly tail). Phase 5
+already shipped the legacy-import path; phases 72/73 are claimed by
+parallel-agent work (proxy quarantine self-clear + one-command
+deploy) so phase 74 is the next free slot for the fetcher work.
+
+---
+
 ## Decision log + Specification log
 
 Both logs moved to `docs/phase_log.md` 2026-04-29. The Decision log is

@@ -24,6 +24,7 @@ scryer-fetch-equities = { path = "../../crates/scryer-fetch-equities" }
 scryer-fetch-rss = { path = "../../crates/scryer-fetch-rss" }
 scryer-fetch-fred = { path = "../../crates/scryer-fetch-fred" }
 scryer-fetch-databento = { path = "../../crates/scryer-fetch-databento" }
+scryer-fetch-cex-kraken = { path = "../../crates/scryer-fetch-cex-kraken" }
 scryer-fetch-cex-perps = { path = "../../crates/scryer-fetch-cex-perps" }
 scryer-fetch-deribit = { path = "../../crates/scryer-fetch-deribit" }
 scryer-fetch-cboe = { path = "../../crates/scryer-fetch-cboe" }
