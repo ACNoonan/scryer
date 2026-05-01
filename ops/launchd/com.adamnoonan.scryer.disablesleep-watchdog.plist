@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    LaunchDaemon (system-level, runs as root) — re-asserts
+    `pmset disablesleep=1` at boot and every 6h.
+
+    Why this exists:
+      `pmset sleep 0` only disables the IDLE sleep timer; lid-close on
+      battery still triggers `Clamshell Sleep` on Apple Silicon unless
+      the system-wide `SleepDisabled` flag is set (stored in
+      /Library/Preferences/com.apple.PowerManagement.plist under
+      `SystemPowerSettings.SleepDisabled`). Audit on 2026-05-01 found
+      36–49% missed polls per day on the cadence-based oracle tapes
+      (pyth, kamino_scope, redstone, soothsayer_v5) tracing directly
+      to clamshell sleep windows.
+
+    Why a watchdog (not just a one-shot):
+      The flag persists in /Library/Preferences across reboots, so this
+      is belt-and-suspenders — covers macOS-update drift, plist
+      corruption, and accidental `pmset disablesleep 0`.
+
+    Install target: /Library/LaunchDaemons/ (NOT ~/Library/LaunchAgents)
+    because pmset writes to /Library/Preferences and needs root.
+
+    Install:
+      sudo cp ops/launchd/com.adamnoonan.scryer.disablesleep-watchdog.plist /Library/LaunchDaemons/
+      sudo chown root:wheel /Library/LaunchDaemons/com.adamnoonan.scryer.disablesleep-watchdog.plist
+      sudo chmod 644       /Library/LaunchDaemons/com.adamnoonan.scryer.disablesleep-watchdog.plist
+      sudo launchctl bootstrap system /Library/LaunchDaemons/com.adamnoonan.scryer.disablesleep-watchdog.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.disablesleep-watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>/usr/bin/pmset -a disablesleep 1 &amp;&amp; echo "$(date '+%Y-%m-%dT%H:%M:%S%z') asserted disablesleep=1"</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!--
+        Cadence: 21600s (6h). The setting is persistent in
+        /Library/Preferences, so this only fires for drift recovery
+        after macOS updates or accidental clears. 6h gives ~4 ticks/day
+        — fast enough to catch a cleared flag before a full overnight
+        sleep window, slow enough that the log stays trivially small.
+    -->
+    <key>StartInterval</key>
+    <integer>21600</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/disablesleep-watchdog.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/disablesleep-watchdog.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>
