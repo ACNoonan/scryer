@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    DRAFT — pending fetcher phase. Wishlist item 51c; methodology row
+    "Paper-4 Phase-A capture spec — slot-resolution xStock AMM panel —
+    2026-05-01 (locked)" in scryer/methodology_log.md.
+
+    Do not `launchctl load` until `scry solana clmm-pool-state watch`
+    ships (new crate `scryer-fetch-solana-pool-state`) and the schema
+    `clmm_pool_state.v1` (docs/schemas.md, line 734) has its
+    first-data-shipped phase row.
+
+    Forward-only by design: replay from the swap tape would be O(swaps)
+    per pool, dominantly more expensive than account-subscription
+    forward-capture.
+
+    Push-based daemon — KeepAlive, NOT StartInterval. The 60s
+    `getMultipleAccounts` polled fallback path is internal to the
+    fetcher, not driven by launchd.
+
+    Geyser provider choice (Helius vs Triton vs Yellowstone vs
+    operator-run node) is NOT locked in the methodology row — lands in
+    the per-fetcher methodology row when the crate ships, per scryer
+    hard rule #5. The plist passes `--proxy-url` to the local
+    scryer-proxy by default; the daemon negotiates Geyser upstream
+    through proxy config.
+
+    Pool allowlist computed at startup from a top-K-by-TVL Whirlpool +
+    Raydium-CLMM scan filtered by the 8 xStock mints; refreshed on
+    daemon restart. The `--pools auto` argument is the documented
+    sentinel for that on-startup scan; an explicit file can be supplied
+    with `--pools /path/to/allowlist.json` if the operator wants to pin
+    the set across restarts.
+
+    Programs:
+      Orca Whirlpools  whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc
+      Raydium CLMM     CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.clmm-pool-state-watch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin/scry</string>
+        <string>solana</string>
+        <string>clmm-pool-state</string>
+        <string>watch</string>
+        <string>--pools</string>
+        <string>auto</string>
+        <string>--proxy-url</string>
+        <string>http://127.0.0.1:8899/rpc</string>
+        <string>--source</string>
+        <string>solana:clmm-pool-state:launchd</string>
+        <string>--dataset</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/dataset</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/clmm-pool-state-watch.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/clmm-pool-state-watch.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SCRY_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>

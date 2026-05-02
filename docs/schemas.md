@@ -5,7 +5,7 @@ done, or retracted). Pulled out of `wishlist.md` and `methodology_log.md`
 to give agents a focused-context lookup of "what columns does
 `<schema>.v1` have, what's the dedup key, where does it land on disk."
 
-Last updated: 2026-04-29.
+Last updated: 2026-05-02.
 
 ## How this file relates to the others
 
@@ -47,7 +47,7 @@ shown as the recipe, not the literal column type (always string).
 
 ## kamino_liquidation.v1
 
-**Status.** locked 2026-04-28. Phase 17 implementation pending.
+**Status.** done. Locked 2026-04-28; shipped phase 17.
 
 **Source.** Solana mainnet, Klend program
 `KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD`. Two anchor disc both
@@ -104,7 +104,7 @@ altcoin markets — see wishlist item 19.
 
 ## jupiter_lend_liquidation.v1
 
-**Status.** locked 2026-04-28. Phase 18 implementation pending.
+**Status.** done. Locked 2026-04-28; shipped phase 18.
 
 **Source.** Solana mainnet, Fluid Vaults program
 `jupr81YtYssSyPt8jbnGuiWon5f6x9TcDEFxYe3Bdzi`. Single anchor disc
@@ -397,7 +397,7 @@ Loopscale xStock TVL crosses ~$1M (currently ~$9.4k).
 
 ## fluid_vault_config.v1
 
-**Status.** locked 2026-04-28. Phase 19 implementation pending.
+**Status.** done. Locked 2026-04-28; shipped phase 19.
 
 **Source.** Solana mainnet,
 `getProgramAccounts(jupr81YtYssSyPt8jbnGuiWon5f6x9TcDEFxYe3Bdzi,

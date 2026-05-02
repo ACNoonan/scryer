@@ -12,9 +12,11 @@ gathers the data to be read.
 
 ## Status
 
-`v0.0 — design phase`. Pre-flight is in `methodology_log.md`. No code yet
-beyond this README and the methodology log. Architecture decisions locked
-before any source files land, per the project methodology.
+`v0.1` has shipped broad fetcher/schema coverage plus launchd-operated
+pipelines. `v0.2` platform work is active: schema namespace taxonomy and
+workflow-runner design are locked; manifests, `SchemaId` enforcement, sensors,
+and the runner remain pending. See `docs/phase_log.md` and
+`docs/platform_plan.md` for current operational status.
 
 ## What it is
 

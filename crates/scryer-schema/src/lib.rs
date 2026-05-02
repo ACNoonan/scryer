@@ -66,6 +66,7 @@ pub mod pyth_poster_tx;
 pub mod pyth_publisher;
 pub mod raydium_pool_metadata;
 pub mod redstone;
+pub mod schema_id;
 pub mod solana_priority_fees;
 pub mod swap;
 pub mod trade;
@@ -77,6 +78,75 @@ pub mod yahoo_corp_actions;
 
 pub use error::FromArrowError;
 pub use meta::Meta;
+pub use schema_id::{Domain, SchemaId, SchemaIdError, KNOWN_V2_SCHEMAS};
+
+/// Registry of every shipped v1 schema id string. v1 ids retain the
+/// pre-taxonomy two-part `<name>.v1` form and are not represented by
+/// `SchemaId`; manifest validation in `scryer-manifest` accepts a
+/// string when it parses as `SchemaId` (v2) or matches an entry here
+/// (v1). Update this list whenever a new v1 schema module is added.
+///
+/// Order matches the migration index in `docs/platform_plan.md`.
+pub const KNOWN_V1_SCHEMAS: &[&str] = &[
+    "swap.v1",
+    "trade.v1",
+    "kamino_liquidation.v1",
+    "kamino_obligation.v1",
+    "kamino_obligation_position.v1",
+    "kamino_reserve.v1",
+    "kamino_scope.v1",
+    "marginfi_reserve.v1",
+    "drift_liquidation.v1",
+    "mango_v4_liquidation.v1",
+    "mango_v4_oracle_config.v1",
+    "loopscale_loan.v1",
+    "loopscale_loan_collateral.v1",
+    "jupiter_lend_liquidation.v1",
+    "fluid_vault_config.v1",
+    "dex_xstock_swaps.v1",
+    "clmm_pool_state.v1",
+    "dlmm_pool_state.v1",
+    "raydium_pool_metadata.v1",
+    "pool_snapshot.v1",
+    "v5_tape.v1",
+    "pyth.v1",
+    "pyth_publisher.v1",
+    "pyth_poster_post.v1",
+    "pyth_poster_tx.v1",
+    "chainlink_data_streams.v1",
+    "redstone.v1",
+    "oracle_context.v1",
+    "jito_tip_floor.v1",
+    "solana_priority_fees.v1",
+    "jito_bundles.v1",
+    "jito_bundle_tape.v1",
+    "validator_client.v1",
+    "evm_liquidation.v1",
+    "cex_perp_funding_multi.v1",
+    "cex_stock_perp_tape.v1",
+    "cex_stock_perp_ohlcv.v1",
+    "kraken_funding.v1",
+    "deribit_iv.v1",
+    "geckoterminal.v1",
+    "geckoterminal_ohlcv.v1",
+    "cme_intraday_1m.v1",
+    "cboe_indices.v1",
+    "yahoo.v1",
+    "yahoo_corp_actions.v1",
+    "earnings.v1",
+    "backed.v1",
+    "backed_nav_strikes.v1",
+    "nasdaq_halts.v1",
+    "fred_macro.v1",
+    "fred_macro_extended.v1",
+    "edgar_8k.v1",
+    "xstock_holders.v1",
+];
+
+/// True when `s` is one of the registered v1 schema id strings.
+pub fn is_known_v1_schema(s: &str) -> bool {
+    KNOWN_V1_SCHEMAS.contains(&s)
+}
 
 pub(crate) fn downcast_column<'a, A>(
     batch: &'a arrow_array::RecordBatch,
@@ -124,4 +194,41 @@ where
             column: name,
             expected: std::any::type_name::<A>(),
         })
+}
+
+#[cfg(test)]
+mod v1_registry_tests {
+    use super::{is_known_v1_schema, KNOWN_V1_SCHEMAS};
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn known_v1_schemas_are_unique() {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for s in KNOWN_V1_SCHEMAS {
+            assert!(seen.insert(s), "duplicate v1 schema id: {s}");
+        }
+    }
+
+    #[test]
+    fn known_v1_schemas_have_v1_suffix_and_lowercase_name() {
+        for s in KNOWN_V1_SCHEMAS {
+            let (name, suffix) = s
+                .rsplit_once('.')
+                .unwrap_or_else(|| panic!("v1 schema id missing dot: {s}"));
+            assert_eq!(suffix, "v1", "v1 schema id has non-v1 suffix: {s}");
+            assert!(!name.is_empty(), "v1 schema id has empty name: {s}");
+            for c in name.chars() {
+                let ok = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_';
+                assert!(ok, "v1 schema id name has invalid char `{c}`: {s}");
+            }
+        }
+    }
+
+    #[test]
+    fn helper_matches_registry() {
+        assert!(is_known_v1_schema("trade.v1"));
+        assert!(is_known_v1_schema("swap.v1"));
+        assert!(!is_known_v1_schema("trade.v2"));
+        assert!(!is_known_v1_schema("not_a_schema.v1"));
+    }
 }

@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    DRAFT — pending fetcher phase. Wishlist item 51e; methodology row
+    "Paper-4 Phase-A capture spec — slot-resolution xStock AMM panel —
+    2026-05-01 (locked)" in scryer/methodology_log.md.
+
+    Schema `dex_xstock_swaps.v1` (docs/schemas.md line 590) and
+    fetcher code shipped phase 36. Outstanding for 51e:
+      (1) backfill `[2025-07-14, forward-cursor)` per the 2026-05-01
+          methodology supersession of the 2025-11-01 start;
+      (2) `--once` / `--lookback-secs` mode on the CLI, which the
+          existing `--start <START> --end <END>` interface does not yet
+          expose. This plist assumes the `--once` mode lands; do not
+          load until that CLI extension ships.
+
+    Cadence: 60s tick + 120s lookback, mirroring chainlink-reports.plist
+    (same dedup-on-signature property protects against overlapping
+    windows). Wishlist 51e prescription was "≤900s cadence mirroring
+    geckoterminal-trades.plist", but xStock swap volume is bursty
+    enough that a slower cadence under-covers fast windows; 60s with
+    the same proxy + parseTransactions stage-2 path as
+    chainlink-reports is the safer default.
+
+    Stage 2 routing: --use-get-transaction goes through the local
+    scryer-proxy (multi-provider failover) so the swap tape stays alive
+    even when Helius's daily quota is exhausted.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.dex-xstock-swaps</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin/scry</string>
+        <string>solana</string>
+        <string>dex-xstock-swaps</string>
+        <string>--once</string>
+        <string>--lookback-secs</string>
+        <string>120</string>
+        <string>--use-get-transaction</string>
+        <string>--source</string>
+        <string>dex_xstock:swaps:launchd</string>
+        <string>--dataset</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/dataset</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/dex-xstock-swaps.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/dex-xstock-swaps.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SCRY_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>

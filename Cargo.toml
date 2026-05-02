@@ -20,6 +20,7 @@ members = [
     "crates/scryer-fetch-cboe",
     "crates/scryer-fetch-sec",
     "crates/scryer-fetch-xstocks",
+    "crates/scryer-manifest",
     "crates/scryer-schema",
     "crates/scryer-store",
     "crates/scryer-portal",

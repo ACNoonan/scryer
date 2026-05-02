@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    DRAFT — pending fetcher phase. Wishlist item 51a; methodology row
+    "Paper-4 Phase-A capture spec — slot-resolution xStock AMM panel —
+    2026-05-01 (locked)" in scryer/methodology_log.md.
+
+    Do not `launchctl load` until `scry solana jito-bundle-tape watch`
+    ships and the schema `jito_bundle_tape.v1` (docs/schemas.md) has its
+    first-data-shipped phase row.
+
+    Forward-only: Jito's bundle history is finite. Phase-log row at
+    forward-poll launch must record the start timestamp and the
+    missing-by-construction caveat for pre-start data (same convention
+    as cex_stock_perp_tape.v1).
+
+    KeepAlive, NOT StartInterval — sub-second slot-stream poll runs as a
+    long-lived daemon; StartInterval would re-spawn the process on every
+    tick.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.jito-bundle-tape</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin/scry</string>
+        <string>solana</string>
+        <string>jito-bundle-tape</string>
+        <string>watch</string>
+        <string>--source</string>
+        <string>jito:bundle-tape:launchd</string>
+        <string>--dataset</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/dataset</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/jito-bundle-tape.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/jito-bundle-tape.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SCRY_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>

@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    DRAFT — pending fetcher phase. Wishlist item 51d; methodology row
+    "Paper-4 Phase-A capture spec — slot-resolution xStock AMM panel —
+    2026-05-01 (locked)" in scryer/methodology_log.md.
+
+    Do not `launchctl load` until `scry solana dlmm-pool-state watch`
+    ships (same crate `scryer-fetch-solana-pool-state` as 51c) and the
+    schema `dlmm_pool_state.v1` (docs/schemas.md, line 787) has its
+    first-data-shipped phase row.
+
+    Sibling daemon to clmm-pool-state-watch — same shape, different
+    program / schema. DLMM bin-state semantics differ from CLMM
+    tick-state (active-bin pointer + bin-step + per-bin reserves);
+    sibling schema rather than a column-superset of `clmm_pool_state.v1`
+    per scryer hard rule #4.
+
+    Forward-only by design — same rationale as 51c.
+
+    Push-based daemon — KeepAlive, NOT StartInterval.
+
+    Pool allowlist: top-K-by-TVL Meteora DLMM scan filtered by the 8
+    xStock mints, computed at startup. `--pools auto` for on-startup
+    scan; `--pools /path/to/file.json` to pin.
+
+    Program:
+      Meteora DLMM     LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.dlmm-pool-state-watch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin/scry</string>
+        <string>solana</string>
+        <string>dlmm-pool-state</string>
+        <string>watch</string>
+        <string>--pools</string>
+        <string>auto</string>
+        <string>--proxy-url</string>
+        <string>http://127.0.0.1:8899/rpc</string>
+        <string>--source</string>
+        <string>solana:dlmm-pool-state:launchd</string>
+        <string>--dataset</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/dataset</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/dlmm-pool-state-watch.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/dlmm-pool-state-watch.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SCRY_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>

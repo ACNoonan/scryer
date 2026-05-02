@@ -1,0 +1,33 @@
+# Manifest schema lock: methodology_log.md "Source manifest format" (2026-05-02).
+#
+# Mirror of com.adamnoonan.scryer.kraken-trades.plist. Lands in
+# read-only/no-behavior-change mode: launchd still drives the fetch on
+# StartInterval=3600. Once the runner ships and parallel soak passes
+# (M3.5), the launchd plist retires and the [workflow] block below
+# becomes the trigger.
+
+id = "kraken-trades"
+description = "Kraken public Trades endpoint, SOLUSD pair, hourly rolling 24h lookback."
+schema_ids = ["trade.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "kraken", "trades",
+    "--pair", "SOLUSD",
+    "--lookback-secs", "86400",
+    "--source", "kraken:Trades:launchd",
+    "--rate-limit-ms", "1000",
+]
+
+[freshness]
+sla_secs = 7200
+
+[budget]
+# 1000ms rate-limit ceiling × 3600s/run gives an absolute upper bound
+# of ~3600 requests; observed runs sit closer to ~90. Cap loosely above
+# observed.
+max_requests_per_run = 500
+
+[workflow]
+sensor = "interval(3600s)"

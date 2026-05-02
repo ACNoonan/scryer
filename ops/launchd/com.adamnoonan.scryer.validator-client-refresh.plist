@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    DRAFT — pending fetcher phase. Wishlist item 51b; methodology row
+    "Paper-4 Phase-A capture spec — slot-resolution xStock AMM panel —
+    2026-05-01 (locked)" in scryer/methodology_log.md.
+
+    Do not `launchctl load` until `scry solana validator-client refresh`
+    ships and the schema `validator_client.v1` (docs/schemas.md) has its
+    first-data-shipped phase row.
+
+    Cadence: per-epoch. A Solana epoch is ~432K slots × 0.4s ≈ 172800s
+    (2 days). StartInterval=86400 (24h) deliberately runs the refresh
+    twice per epoch to absorb skew / clock drift / RPC transient failure
+    without missing an epoch boundary. Dedup key (epoch, leader_pubkey)
+    makes a duplicate refresh a no-op.
+
+    Forward-only past the labeller's public-history horizon; phase-log
+    row records start timestamp + missing-by-construction convention.
+
+    Cross-validation: getVersion self-report ↔ community labeller
+    (Helius validators API or Stakewiz). client_label = "unknown" on
+    disagreement is the defined behaviour, not an error.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.validator-client-refresh</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin/scry</string>
+        <string>solana</string>
+        <string>validator-client</string>
+        <string>refresh</string>
+        <string>--source</string>
+        <string>solana:validator-client:launchd</string>
+        <string>--dataset</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/dataset</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>86400</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/validator-client-refresh.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/validator-client-refresh.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SCRY_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>

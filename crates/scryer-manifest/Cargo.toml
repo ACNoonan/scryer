@@ -1,0 +1,18 @@
+[package]
+name = "scryer-manifest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Parser and validator for ops/sources/<id>.toml source manifests. Schema locked in methodology_log.md `Source manifest format` (2026-05-02)."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+scryer-schema = { path = "../scryer-schema" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+toml = "0.8"
+
+[lints]
+workspace = true

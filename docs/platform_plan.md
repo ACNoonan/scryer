@@ -1,0 +1,202 @@
+# scryer - Platform v0.2 Initiative
+
+Operational plan for turning scryer from a pile of fetchers and launchd plists into a manifest-driven data platform.
+
+Last compacted: 2026-05-02.
+
+Production resiliency lens added 2026-05-02: the v0.2 platform should become a data-pipeline control plane, not just a prettier cron replacement.
+
+## Current State
+
+- Active initiative: v0.2 platform work.
+- Locked methodology: `Schema namespace taxonomy + v2 migration plan - 2026-05-01`.
+- Locked methodology: `Workflow runner - sensor-driven, parquet-checkpointed - 2026-05-01`.
+- Locked methodology: `Source manifest format - 2026-05-02`.
+- Shipped code: `SchemaId` type + closed-domain enum + v2 registry under `crates/scryer-schema/src/schema_id.rs` (M2.1).
+- Shipped code: `KNOWN_V1_SCHEMAS` registry in `scryer-schema` and the `scryer-manifest` parser/validator crate (M1.2).
+- First worked manifest: `ops/sources/kraken-trades.toml` (M1.1, read-only — launchd still drives the fetch; now exercised by the `scryer-manifest` round-trip test).
+- Current source operation: launchd plists + `scry` subcommands.
+- Target source operation: `ops/sources/*.toml` manifests + workflow runner.
+- Production target: every critical dataset has an owner-level freshness contract, retry/recovery policy, validation gate, source/proxy health signal, and loud-but-routed alert path.
+
+## Load-Bearing Design
+
+- Source manifests declare fetcher command, schema IDs, freshness SLA, budget, dependencies, and optional workflow blocks.
+- Schema IDs use `<domain>.<source>.<record_type>.v<n>` with a closed domain enum and controlled record-type vocabulary.
+- v1 schemas remain shipped forever; v2 schemas land in parallel namespace and are cut over deliberately.
+- Workflows use sensor expressions and dispatch `scry` subcommands.
+- Workflow execution checkpoints to parquet via `internal.scryer.workflow_run.v2`.
+- Freshness SLAs, budget enforcement, heartbeats, provenance, and dead-letter parquet become runner/store concerns, not per-plist conventions.
+- The runner owns dataset-level health: last successful publish, current lag, expected next materialization, retry depth, exhausted attempts, blocked dependencies, validation status, and backfill drain state.
+- The proxy owns provider-level health: per-provider latency, error rate, timeout rate, quota/rate-limit state, circuit state, in-flight concurrency, failover routing, and retry exhaustion.
+- Canonical publish is a separate success boundary from fetch execution. A command can succeed at extraction but still fail validation, dedup, budget, or publish.
+- Alerts should target consumer impact first: stale datasets, exhausted retries, blocked dependencies, provider quorum loss, and validation failures. Raw attempt failures become warnings unless the retry/recovery budget is exhausted or freshness is at risk.
+
+## Production Resiliency Model
+
+Scryer has three reliability planes:
+
+1. Source plane: upstream APIs, RPC providers, CEX/DEX endpoints, and provider quotas.
+2. Execution plane: runner scheduling, attempts, sensors, retries, timeouts, checkpoints, backfills, and dead letters.
+3. Data plane: parquet partitions, schema/dedup contracts, publish gates, freshness, volume, and field-level validation.
+
+Core production rules:
+
+- Every outbound provider call has a timeout, retry classifier, backoff with jitter, and low-cardinality failure reason.
+- Retries are scoped to the smallest safe unit: provider call, fetch page, partition interval, or workflow step. Whole-workflow retries are a last resort.
+- Long-running work emits heartbeats with resumable progress. A stale heartbeat is a failure signal even if the process is still alive.
+- Backfills have separate concurrency and budget from forward freshness work; current-period data wins over historical replay unless a manifest declares otherwise.
+- Failed attempts are observable but not always page-worthy. Exhausted retries, stale datasets, provider quorum loss, validation failures, and missed publish windows are page-worthy according to source criticality.
+- Data quality starts broad and cheap: freshness, volume/row-count deltas, schema drift, partition completeness, duplicate/dedup rate, and null/out-of-range checks for Tier-0 assets.
+- Dead-letter parquet stores failed work units and enough context to replay or inspect without scraping logs.
+- Alert routing is pluggable. Discord can be the first notifier, but the runner should emit structured alert events so Slack/PagerDuty/email/webhook sinks can be added without changing fetchers.
+
+## Next Actions
+
+1. Lock source manifest format and one worked example.
+2. Add `SchemaId` type and build-time uniqueness enforcement.
+3. Add first source manifest in read-only/no-behavior-change mode.
+4. Add `internal.scryer.workflow_run.v2` schema.
+5. Implement sensor primitives.
+6. Implement runner binary.
+7. Migrate one launchd source through parallel soak.
+8. Migrate remaining launchd plists in risk-ranked batches.
+9. Add production resiliency track: proxy circuit health, runner retry policy, validation gates, alert sink, and operator status command.
+10. Define Tier-0 data products and assign initial freshness/volume/schema/validation policies.
+
+## Work Queue
+
+| ID | Work | Status | Depends On |
+|---|---|---|---|
+| M1.1 | Manifest format methodology lock | done 2026-05-02 | none |
+| M1.2 | Manifest parser/validator crate | done 2026-05-02 — `crates/scryer-manifest` | M1.1, M2.1 |
+| M1.3 | First source manifest, no behavior change | done 2026-05-02 — `ops/sources/kraken-trades.toml` parses cleanly via `scryer-manifest::Manifest::from_path`; launchd still drives the fetch | M1.2 |
+| M2.1 | `SchemaId` type + build enforcement | done 2026-05-02 | taxonomy lock |
+| M2.2 | v2 directory/module layout | pending | M2.1 |
+| M2.3 | Wave 1 mechanical v2 schemas | pending | M2.2 |
+| M2.4 | Wave 2 vocabulary migrations | pending | M2.3 |
+| M2.5 | Wave 3 semantic splits | pending | M2.4 |
+| M2.6 | Wave 4 high-volume migrations | pending | M2.5 |
+| M3.1 | `internal.scryer.workflow_run.v2` | pending | M2.1 |
+| M3.2 | Sensor primitives | pending | none |
+| M3.3 | Runner binary | pending | M1.2, M3.1, M3.2 |
+| M3.4 | First workflow proof + soak | pending | M3.3 |
+| M3.5 | Launchd Phase A migration | pending | M3.4 |
+| M3.6 | Launchd Phase B migration | pending | M3.5 |
+| M3.7 | First analytics workflow | pending | M3.6 |
+| MX.1 | Cost budget enforcement | pending | M3.3 |
+| MX.2 | Per-source freshness SLA | pending | M3.3 |
+| MX.3 | Dead-letter parquet | pending | M2.1 |
+| PR.1 | Source criticality tiers + owner/consumer impact fields in manifest | proposed | M1.2 |
+| PR.2 | Runner retry policy: timeout, max attempts, backoff, jitter, retryable/non-retryable errors | proposed | M3.3 |
+| PR.3 | Heartbeat/checkpoint progress for long-running fetches and backfills | proposed | M3.1, M3.3 |
+| PR.4 | Validation gates: partition completeness, row volume, schema drift, duplicate rate, required field checks | proposed | M2.1, M3.3 |
+| PR.5 | Alert event schema + Discord/webhook notifier | proposed | M3.1 |
+| PR.6 | Operator status command: source health, freshness lag, retry exhaustion, blocked dependencies, proxy provider state | proposed | M3.3 |
+| PR.7 | Proxy resilience upgrade: circuit breakers, per-provider bulkheads, adaptive failover, retry-exhaustion metrics | proposed | existing proxy |
+| PR.8 | SLO-style alert policy: fast-burn provider failures, slow-burn freshness misses, and ticket-vs-page severity | proposed | PR.5, PR.6 |
+| PR.9 | Backfill scheduler controls: separate forward/backfill concurrency, pause/resume/cancel, missing-vs-failed replay modes | proposed | M3.3 |
+
+## Migration Waves
+
+| Wave | Scope | Rule |
+|---|---|---|
+| 1 | Mechanical v1 -> v2 renames | No semantic row-shape changes. |
+| 2 | Vocabulary migrations | Requires per-schema methodology decision. |
+| 3 | Semantic splits | Requires consumer notice before cutover. |
+| 4 | High-volume/backfilled schemas | Start fresh v2 backfill after current backfills finish. |
+
+## Schema Migration Index
+
+Use this as the operational migration tracker. `docs/schemas.md` remains the field-level schema reference.
+
+| v1 Today | v2 Target | Wave | Status |
+|---|---|---|---|
+| `swap.v1` | `solana.aggregate.swap.v2` | 4 | pending |
+| `trade.v1` | `cex.aggregate.trade.v2` | 4 | pending |
+| `kamino_liquidation.v1` | `solana.kamino.liquidation.v2` | 1 | pending |
+| `kamino_obligation.v1` | `solana.kamino.obligation.v2` | 1 | pending |
+| `kamino_obligation_position.v1` | `solana.kamino.obligation_position.v2` | 1 | pending |
+| `kamino_reserve.v1` | `solana.kamino.reserve_config.v2` | 1 | pending |
+| `kamino_scope.v1` | `oracle.kamino_scope.benchmark.v2` | 2 | open classification |
+| `marginfi_reserve.v1` | `solana.marginfi.reserve_config.v2` | 1 | pending |
+| `marginfi_liquidation.v1` | `solana.marginfi.liquidation.v2` | 1 | land directly at v2 if still unshipped |
+| `drift_liquidation.v1` | `solana.drift.liquidation.v2` | 1 | pending |
+| `mango_v4_liquidation.v1` | `solana.mango_v4.liquidation.v2` | 1 | pending |
+| `mango_v4_oracle_config.v1` | `solana.mango_v4.oracle_config.v2` | 1 | pending |
+| `loopscale_loan.v1` | `solana.loopscale.loan.v2` | 1 | pending |
+| `loopscale_loan_collateral.v1` | `solana.loopscale.loan_collateral.v2` | 1 | pending |
+| `jupiter_lend_liquidation.v1` | `solana.jupiter_lend.liquidation.v2` | 1 | pending |
+| `fluid_vault_config.v1` | `solana.jupiter_lend.vault_config.v2` | 2 | open source name |
+| `dex_xstock_swaps.v1` | `solana.aggregate.xstock_swap.v2` | 4 | pending |
+| `clmm_pool_state.v1` | `solana.whirlpool.pool_state.v2` + `solana.raydium_clmm.pool_state.v2` | 3 | split needed |
+| `dlmm_pool_state.v1` | `solana.meteora_dlmm.pool_state.v2` | 1 | land directly at v2 if still unshipped |
+| `raydium_pool_metadata.v1` | `solana.raydium.pool_metadata.v2` | 1 | pending |
+| `pool_snapshot.v1` | `solana.raydium_v4.pool_snapshot.v2` | 1 | pending |
+| `v5_tape.v1` | `oracle.aggregate.tape.v2` | 2 | open vocabulary |
+| `pyth.v1` | `oracle.pyth.benchmark.v2` | 2 | pending |
+| `pyth_publisher.v1` | `oracle.pyth.publisher_component.v2` | 2 | pending |
+| `pyth_poster_post.v1` | `oracle.pyth.posting.v2` | 2 | pending |
+| `pyth_poster_tx.v1` | `oracle.pyth.posting_detail.v2` | 2 | open glossary |
+| `chainlink_data_streams.v1` | `oracle.chainlink.report.v2` | 2 | pending |
+| `redstone.v1` | `oracle.redstone.benchmark.v2` | 2 | pending |
+| `oracle_context.v1` | `oracle.aggregate.context.v2` | 2 | open record type |
+| `jito_tip_floor.v1` | `solana.jito.tip_floor.v2` | 1 | pending |
+| `solana_priority_fees.v1` | `solana.aggregate.priority_fee.v2` | 1 | pending |
+| `jito_bundles.v1` | `solana.jito.bundle.v2` | 1 | pending |
+| `jito_bundle_tape.v1` | `solana.jito.bundle_tape.v2` | 1 | land directly at v2 if still unshipped |
+| `validator_client.v1` | `solana.validator.client_label.v2` | 1 | land directly at v2 if still unshipped |
+| `evm_liquidation.v1` | `evm.aggregate.liquidation.v2` | 1 | pending |
+| `cex_perp_funding_multi.v1` | `cex.aggregate.perp_funding.v2` | 1 | pending |
+| `cex_stock_perp_tape.v1` | `cex.aggregate.xstock_perp_tape.v2` | 4 | pending |
+| `cex_stock_perp_ohlcv.v1` | `cex.aggregate.xstock_perp_ohlcv.v2` | 4 | pending |
+| `kraken_funding.v1` | `cex.kraken.funding.v2` | 1 | pending |
+| `deribit_iv.v1` | `volatility.deribit.iv.v2` | 1 | pending |
+| `geckoterminal_ohlcv.v1` | `dex_agg.geckoterminal.ohlcv.v2` | 1 | pending |
+| `cme_intraday_1m.v1` | `tradfi_deriv.cme.bar_1m.v2` | 1 | pending |
+| `cboe_indices.v1` | `volatility.cboe.index.v2` | 1 | pending |
+| `yahoo.v1::Bar` | `equity.yahoo.bar_1d.v2` | 1 | pending |
+| `yahoo_corp_actions.v1` | `equity.yahoo.corp_action.v2` | 1 | pending |
+| `earnings.v1` | `equity.aggregate.earnings.v2` | 2 | open source |
+| `backed.v1` | `news.backed_rss.corp_action.v2` | 2 | open domain |
+| `backed_nav_strikes.v1` | `equity.backed.nav_strike.v2` | 1 | pending |
+| `nasdaq_halts.v1` | `news.nasdaq.halt.v2` | 1 | pending |
+| `fred_macro.v1` | `macro.fred.calendar.v2` | 2 | pending |
+| `fred_macro_extended.v1` | `macro.fred.series.v2` | 2 | pending |
+| `edgar_8k.v1` | `news.sec.filing.v2` | 2 | open filing type |
+| `xstock_holders.v1` | `solana.aggregate.holders.v2` | 1 | pending |
+
+## Open Decisions
+
+Resolved 2026-05-02 by the manifest-format lock; kept here as a record:
+
+- Manifest granularity: one TOML per source-fetcher cluster.
+- Budget units: optional `max_requests_per_run`, `max_provider_credits_per_run`, `max_usd_per_day`; runner trips on whichever populated cap is breached first; uncapped axes are logged.
+- `backfill_complete(...)` supports `min_rows_per_day`.
+- `workflow_run` retention: keep forever until row volume proves costly.
+
+Still open:
+
+- Cross-source aggregate source naming: `aggregate` vs more specific source names. Lean: `aggregate`.
+- Backed Finance domain split: news feed vs equity NAV. Lean: `news.backed_rss.*` and `equity.backed.*`.
+- `kamino_scope` classification. Lean: `oracle.kamino_scope.benchmark.v2`.
+- Manifest resiliency fields: keep retry/alert/validation policy inline in each source manifest, or split reusable policy profiles into a separate runner config.
+- Alerting severity: fixed severity per source tier vs SLO-style burn rate based on freshness/provider error-budget consumption.
+- Proxy failover semantics: route to fastest healthy provider by default, or require quorum/cross-check for high-integrity sources where provider disagreement is worse than latency.
+
+## Anti-Goals
+
+- No cross-language SDK; parquet remains the interface.
+- No query layer; consumers use DuckDB, Polars, pyarrow, etc.
+- No multi-host coordination yet.
+- No hard dependency on Airflow/Dagster/Temporal for v0.2; keep evaluating them only if the in-house runner grows beyond the locked narrow shape.
+- No workflow UI beyond existing operational metrics and a CLI/operator status view.
+- No silent best-effort degradation for canonical datasets. If Scryer serves stale, partial, or validation-failed data, that state must be explicit in parquet metadata, status output, and alerts.
+
+## Iteration Log
+
+- 2026-05-01: locked schema namespace taxonomy and workflow runner methodology; created v0.2 plan.
+- 2026-05-02: compacted this doc to operational status, queues, blockers, and migration index.
+- 2026-05-02: shipped M2.1 (`SchemaId` + closed-domain enum + uniqueness gate) and M1.1 (source manifest format lock + `ops/sources/kraken-trades.toml` worked example).
+- 2026-05-02: expanded platform plan with production resiliency track after reviewing Airflow/Dagster/Prefect/Temporal, data observability, API gateway, and SRE alerting patterns.
+- 2026-05-02: shipped M1.2 (`scryer-manifest` parser/validator crate) and closed M1.3 (`ops/sources/kraken-trades.toml` parses cleanly under the validator). Added `KNOWN_V1_SCHEMAS` registry to `scryer-schema` so v1 schema strings are resolvable from manifests without recreating the list.

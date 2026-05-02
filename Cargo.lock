@@ -6523,6 +6523,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "scryer-manifest"
+version = "0.1.0"
+dependencies = [
+ "scryer-schema",
+ "serde",
+ "thiserror 1.0.69",
+ "toml 0.8.2",
+]
+
+[[package]]
 name = "scryer-portal"
 version = "0.1.0"
 dependencies = [
