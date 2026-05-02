@@ -99,6 +99,7 @@ Last compacted: 2026-05-02.
 | 88 | 2026-05-02 | `internal.scryer.workflow_run.v2` | First v2-namespace schema; runner attempt checkpoint with closed `status`/`publish_status` vocabularies. Code-shipped, data-pending until M3.3 runner emits rows. |
 | 89 | 2026-05-02 | sensor primitives | New `scryer-sensors` crate evaluates parsed `Sensor` against `(now, prev_fire_at, DatasetState)` and returns structured `Decision`/`FireReason`/`HoldReason`. Pure function; runner composes with manifest-level gates. |
 | 90 | 2026-05-02 | runner binary | New `scryer-runner` crate + `bin/scryer-runner` binary (`tick`/`check`/`once`/`dry-run`). Composes manifest parser + sensor evaluator + `internal.scryer.workflow_run.v2` checkpoint + `scryer-store` writer; persistent JSON state file. v0 launchd-driven (single-shot tick). |
+| 91 | 2026-05-02 | M3.4 soak prep | Code-shipped, data-pending. `kraken-trades.toml` source label flipped to `kraken:Trades:runner` for soak attribution; `com.adamnoonan.scryer.runner-tick.plist` lands; integration tests exercise `RealCommandRunner` + `ParquetWorkflowRunSink` round-trip; `docs/m3_4_soak_protocol.md` documents pass/fail criteria for the operator-driven 24h+24h soak. |
 
 ## Phase Ledger
 

@@ -1,10 +1,11 @@
 # Manifest schema lock: methodology_log.md "Source manifest format" (2026-05-02).
 #
 # Mirror of com.adamnoonan.scryer.kraken-trades.plist. Lands in
-# read-only/no-behavior-change mode: launchd still drives the fetch on
-# StartInterval=3600. Once the runner ships and parallel soak passes
-# (M3.5), the launchd plist retires and the [workflow] block below
-# becomes the trigger.
+# parallel-soak mode for M3.4: scryer-runner fires this manifest while
+# the legacy launchd plist also fires the same fetch. The two are
+# distinguishable by `_source` (`kraken:Trades:runner` here vs.
+# `kraken:Trades:launchd` in the plist). Once soak passes (M3.5), the
+# launchd plist retires and this manifest is the sole trigger.
 
 id = "kraken-trades"
 description = "Kraken public Trades endpoint, SOLUSD pair, hourly rolling 24h lookback."
@@ -16,7 +17,7 @@ args = [
     "kraken", "trades",
     "--pair", "SOLUSD",
     "--lookback-secs", "86400",
-    "--source", "kraken:Trades:launchd",
+    "--source", "kraken:Trades:runner",
     "--rate-limit-ms", "1000",
 ]
 

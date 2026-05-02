@@ -35,6 +35,7 @@ JSON-RPC proxy under `KeepAlive`.
 | `com.adamnoonan.scryer.geckoterminal-trades.plist` | every 900s (15m) | nothing (REST direct) |
 | `com.adamnoonan.scryer.v5-tape.plist` | every 60s | proxy + Helius (parseTransactions) |
 | `com.adamnoonan.scryer.freshness-watchdog.plist` | every 900s (15m) | nothing (reads dataset mtimes; phase 70-A) |
+| `com.adamnoonan.scryer.runner-tick.plist` | every 60s | `~/Library/Application Support/scryer/{bin/scryer-runner,manifests}` (M3.4 soak; multi-manifest tick — see `docs/m3_4_soak_protocol.md`) |
 
 ## Runtime layout
 
