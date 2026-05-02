@@ -2194,10 +2194,12 @@ bid_to_cover       f64 nullable
 
 ## internal.scryer.workflow_run.v2
 
-**Status.** code-shipped 2026-05-02 — phase 88; data-pending until the
-runner (M3.3) emits its first row. First v2-namespace schema; lives in
-`crates/scryer-schema/src/workflow_run.rs` and is registered in
-`KNOWN_V2_SCHEMAS`.
+**Status.** done 2026-05-02 — phase 88 (code) + phase 92 (data). First
+canonical partition: `dataset/internal.scryer/workflow_run/v2/year=2026/month=05/day=02.parquet`,
+written by the live M3.4 runner fire of `kraken-trades` (status =
+succeeded, publish_status = published). First v2-namespace schema;
+lives in `crates/scryer-schema/src/workflow_run.rs` and is registered
+in `KNOWN_V2_SCHEMAS`.
 
 **Purpose.** One row per workflow attempt. The runner writes a row at
 attempt start (`status = "running"`) and updates terminal fields on

@@ -47,6 +47,22 @@
     <dict>
         <key>RUST_LOG</key>
         <string>info</string>
+        <!--
+            scry is staged in Application Support; launchd's default
+            PATH does not include user-staged dirs, so the runner's
+            spawn of `scry` (by name, per the manifest `command` lock)
+            would otherwise fail. Prepend the staging dir.
+        -->
+        <key>PATH</key>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+        <!--
+            Stamps the `runner_host` column on every workflow_run row.
+            macOS launchd does not export $HOSTNAME by default, so set
+            it explicitly here rather than at the runner's hostname
+            fallback (which would otherwise resolve to `unknown-host`).
+        -->
+        <key>HOSTNAME</key>
+        <string>samachi-mac</string>
     </dict>
 
     <key>ProcessType</key>
