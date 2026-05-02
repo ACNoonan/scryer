@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use scryer_fetch_solana::{
     canonical_xstock_chain_map, mints, poll_kamino_scope_once, CollateralFilter,
-    FluidVaultConfigsFetcher, FluidVaultConfigsFetcherConfig, JupiterLendLiquidationsFetcher,
+    EnhancedSwapsFetcher, EnhancedSwapsFetcherConfig, FluidVaultConfigsFetcher,
+    FluidVaultConfigsFetcherConfig, JupiterLendLiquidationsFetcher,
     JupiterLendLiquidationsFetcherConfig, KaminoLiquidationsFetcher,
     KaminoLiquidationsFetcherConfig, PoolMetadata, ReserveSymbolMap, SupplyMintFilter,
     SwapsFetcher, SwapsFetcherConfig, SCOPE_PDA,
@@ -113,6 +114,113 @@ pub async fn run_swaps(args: SwapsArgs) -> Result<()> {
     println!(
         "swaps fetched: rows_added={} rows_deduped={} partitions_written={}",
         stats.rows_added, stats.rows_deduped, stats.partitions_written
+    );
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+pub struct SwapsHeliusEnhancedArgs {
+    /// Path to a JSON file with `pool_address`, optional
+    /// `sol_mint` / `usdc_mint` overrides. Same shape as
+    /// `scry solana swaps`'s pool-metadata file.
+    #[arg(long)]
+    pub pool_metadata: PathBuf,
+    /// Window start. `YYYY-MM-DD`, RFC 3339, or unix seconds.
+    #[arg(long)]
+    pub start: String,
+    /// Window end. Same formats as `--start`.
+    #[arg(long)]
+    pub end: String,
+    /// Helius API key. Overrides `HELIUS_API_KEY` env var.
+    #[arg(long, env = "HELIUS_API_KEY")]
+    pub helius_api_key: String,
+    /// `_source` label stamped on every emitted row. Default
+    /// `helius:enhanced:transactions:type=SWAP`. Override for
+    /// run-specific labels (e.g.
+    /// `helius:enhanced:lvr-180d-2026-05-01`) so consumers can
+    /// scope queries via `_source LIKE '...'`.
+    #[arg(long, default_value = "helius:enhanced:transactions:type=SWAP")]
+    pub source: String,
+    /// Sustained delay between successive page calls (ms). Default
+    /// 200ms (= 5 req/s); raise to 1000+ for the most conservative
+    /// rate-limit posture.
+    #[arg(long, default_value_t = 200)]
+    pub rate_limit_ms: u64,
+    /// Helius enhanced API caps at 100 txs/call; this flag is
+    /// exposed for testing and lower-volume probes.
+    #[arg(long, default_value_t = 100)]
+    pub limit_per_call: u32,
+    /// Number of retries on transient failures (HTTP 429 / 5xx)
+    /// before propagating the error. Default 5; exponential
+    /// backoff at 1s/2s/4s/8s/16s.
+    #[arg(long, default_value_t = 5)]
+    pub retry_max: u32,
+    #[arg(long, default_value_t = 1000)]
+    pub retry_initial_backoff_ms: u64,
+    /// Per-request HTTP timeout (s).
+    #[arg(long, default_value_t = 30)]
+    pub request_timeout_secs: u64,
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
+    pub dataset: PathBuf,
+    /// Venue string under `dataset/`. Defaults to
+    /// `scryer_store::venue::SOLANA_RAYDIUM_V4`.
+    #[arg(long, default_value = scryer_store::venue::SOLANA_RAYDIUM_V4)]
+    pub venue: String,
+}
+
+pub async fn run_swaps_helius_enhanced(args: SwapsHeliusEnhancedArgs) -> Result<()> {
+    let bytes = std::fs::read(&args.pool_metadata)
+        .with_context(|| format!("reading {}", args.pool_metadata.display()))?;
+    let meta_file: PoolMetadataFile = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing {}", args.pool_metadata.display()))?;
+
+    let pool_address = meta_file.pool_address;
+    let sol_mint = meta_file
+        .sol_mint
+        .unwrap_or_else(|| mints::WSOL.to_string());
+    let usdc_mint = meta_file
+        .usdc_mint
+        .unwrap_or_else(|| mints::USDC.to_string());
+
+    let start_ts = crate::parse_unix_seconds(&args.start).context("parsing --start")?;
+    let end_ts = crate::parse_unix_seconds(&args.end).context("parsing --end")?;
+    if end_ts <= start_ts {
+        anyhow::bail!("--end ({end_ts}) must be > --start ({start_ts})");
+    }
+
+    let mut cfg = EnhancedSwapsFetcherConfig::new(args.helius_api_key.clone());
+    cfg.source_label = args.source.clone();
+    cfg.sol_mint = sol_mint;
+    cfg.usdc_mint = usdc_mint;
+    cfg.rate_limit_ms = args.rate_limit_ms;
+    cfg.retry_max = args.retry_max;
+    cfg.retry_initial_backoff_ms = args.retry_initial_backoff_ms;
+    cfg.request_timeout = std::time::Duration::from_secs(args.request_timeout_secs);
+    cfg.limit_per_call = args.limit_per_call;
+
+    let fetcher = EnhancedSwapsFetcher::new(cfg).context("building EnhancedSwapsFetcher")?;
+    tracing::info!(
+        pool = %pool_address,
+        start_ts,
+        end_ts,
+        rate_limit_ms = args.rate_limit_ms,
+        limit_per_call = args.limit_per_call,
+        "fetching swaps via Helius enhanced API"
+    );
+    let swaps = fetcher
+        .fetch_window(&pool_address, start_ts, end_ts)
+        .await
+        .context("fetcher.fetch_window")?;
+    tracing::info!(swaps = swaps.len(), "fetched; writing");
+
+    let ds = Dataset::new(&args.dataset);
+    let stats = ds
+        .write::<swap::v1::Swap>(&args.venue, Some(&pool_address), &swaps)
+        .context("Dataset::write")?;
+    println!(
+        "swaps-helius-enhanced fetched: rows_added={} rows_deduped={} partitions_written={} \
+         pool={} venue={}",
+        stats.rows_added, stats.rows_deduped, stats.partitions_written, pool_address, args.venue,
     );
     Ok(())
 }

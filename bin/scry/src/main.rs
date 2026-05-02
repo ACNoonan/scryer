@@ -475,6 +475,15 @@ enum V5tapeTarget {
 enum SolanaTarget {
     /// Fetch Raydium-v4 swaps from a window and write through scryer-store.
     Swaps(solana_cmd::SwapsArgs),
+    /// Fetch swaps via Helius enhanced `/v0/addresses/{pool}/transactions
+    /// ?type=SWAP` (server-side swap-only filter, ~100 swaps per call).
+    /// Phase 78 LVR-unblock pivot — drops the credit cost from ~1
+    /// credit per non-swap sig (the phase-4 vault-delta path) to
+    /// ~1 credit per CALL, making 180d high-volume-pool backfills
+    /// fit a 9M-credit budget. `_source =
+    /// "helius:enhanced:transactions:type=SWAP"` distinguishes from
+    /// vault-delta rows.
+    SwapsHeliusEnhanced(solana_cmd::SwapsHeliusEnhancedArgs),
     /// Fetch Kamino Klend liquidation events from a window.
     KaminoLiquidations(solana_cmd::KaminoLiquidationsArgs),
     /// Fetch Jupiter Lend (Fluid Vaults) liquidation events from a window.
@@ -610,6 +619,7 @@ async fn main() -> Result<()> {
         },
         Command::Solana(c) => match c.target {
             SolanaTarget::Swaps(a) => solana_cmd::run_swaps(a).await,
+            SolanaTarget::SwapsHeliusEnhanced(a) => solana_cmd::run_swaps_helius_enhanced(a).await,
             SolanaTarget::KaminoLiquidations(a) => solana_cmd::run_kamino_liquidations(a).await,
             SolanaTarget::JupiterLendLiquidations(a) => {
                 solana_cmd::run_jupiter_lend_liquidations(a).await

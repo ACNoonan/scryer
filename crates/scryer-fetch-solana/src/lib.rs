@@ -37,6 +37,7 @@ pub mod parse_transactions;
 pub mod pool_snapshots;
 pub mod priority_fees;
 pub mod sig_paginate;
+pub mod swaps_helius_enhanced;
 pub mod types;
 pub mod xstock_holders;
 
@@ -66,6 +67,9 @@ pub use kamino_scope_tape::{
 pub use parse::parse_swap;
 pub use parse_transactions::{parse_all, parse_transactions_with_retry, ParseTxsConfig, BATCH_SIZE};
 pub use sig_paginate::{get_signatures_in_window, SigPaginateConfig};
+pub use swaps_helius_enhanced::{
+    EnhancedSwapsFetcher, EnhancedSwapsFetcherConfig, EnhancedSwapsPage,
+};
 pub use types::{mints, HeliusInstruction, ParsedTx, PoolMetadata, SignatureInfo};
 
 use std::time::Duration;

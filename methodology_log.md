@@ -2443,6 +2443,191 @@ kraken-trades work.
 
 ---
 
+## LVR-unblock pivot v2 — Helius enhanced addresses-API path — 2026-05-01 (locked)
+
+**Locked correction to the previous LVR-unblock pivot section.**
+Flipside Crypto's data API requires a sales-call demo for access
+(operator confirmed 2026-05-01); the "free self-signup" assumption
+in the v1 pivot was wrong. The actually-free path that works for
+the LVR-unblock case ships at phase 78: Helius's enhanced
+`/v0/addresses/{addr}/transactions?type=SWAP` endpoint.
+
+### Why this works where parseTransactions did not
+
+The phase-4 vault-delta fetcher pays 1 Helius credit per SIGNATURE
+parsed via the `POST /v0/transactions` batch endpoint. On Raydium
+SOL/USDC v4 (~30 sigs/sec sustained), most sigs are non-swap
+activity (LP ops, oracle updates, MEV-bot probes, aggregator
+pass-throughs); the budget burns on noise.
+
+The enhanced `GET /v0/addresses/{addr}/transactions?type=SWAP`
+endpoint applies the swap-only filter **server-side** and returns
+fully-parsed swap events (up to 100 per call). Per Helius's public
+pricing model: **1 credit per call** rather than 1 credit per
+returned tx. At 100 swaps/call, the per-swap cost effectively
+collapses to 0.01 credits — three orders of magnitude cheaper than
+parseTransactions for high-volume pools.
+
+Live probe 2026-05-01 against `58oQChx...`:
+- `?type=SWAP&limit=10` returned 10 fully-parsed swap txs spanning
+  45 seconds = ~13 swaps/sec at peak hours.
+- All 10 had `type=SWAP` server-side; sources spanned `RAYDIUM`,
+  `OKX_DEX_ROUTER`, `PUMP_AMM` (= every aggregator path that
+  touched the pool, not just direct-Raydium swaps — broader
+  coverage than vault-delta-on-direct-program).
+- Rate-limit headroom appeared comfortable at 5+ req/s; default
+  rate is 200ms (5 req/s).
+
+### Locked design
+
+1. **New module:** `scryer-fetch-solana::swaps_helius_enhanced`.
+   Exposes `EnhancedSwapsFetcherConfig`, `EnhancedSwapsFetcher`,
+   `EnhancedSwapsPage`, plus `decode_page` / `parse_tx_to_swap`
+   pure decoders for testing.
+2. **Endpoint:** `GET https://api.helius.xyz/v0/addresses/{pool}/
+   transactions?api-key=KEY&type=SWAP&limit=100[&before=SIG]`.
+   Pagination via the `before=` cursor (newest-first, walk
+   backward).
+3. **Continuation envelope:** when the recent N internal sigs
+   contain no `type=SWAP` matches, Helius returns `{"error":
+   "Failed to find events within the search period. To continue
+   search, query the API again with the `before-signature`
+   parameter set to <SIG>."}` instead of an empty array. The
+   decoder extracts the cursor from the trailing word and emits
+   an empty-page-with-cursor so the walker keeps paginating
+   without false termination.
+4. **Direction decoder:** maps `events.swap.{nativeInput,
+   nativeOutput, tokenInputs, tokenOutputs}` to `swap.v1::Side`.
+   - `nativeInput` non-null + matching USDC `tokenOutputs[*]` →
+     `Side::SellSol`. `sol_amount = nativeInput.amount / 1e9`;
+     `usdc_amount = matching_tokenOutput.rawTokenAmount.tokenAmount
+     / 10^decimals`.
+   - `nativeOutput` non-null + matching USDC `tokenInputs[*]` →
+     `Side::BuySol`. Symmetric mapping.
+   - Else → skip with `skipped_pair_mismatch` counter
+     incremented. Skipped txs are aggregator-routed swaps that
+     touched the pool as one hop of a multi-hop route where the
+     user's outer `events.swap` doesn't show the SOL/USDC leg.
+     Acknowledged: those legs are NOT captured — see trade-off
+     below.
+5. **Schema reuse:** `swap.v1::Swap` unchanged. Dedup_key
+   (`signature`) byte-equal across enhanced-API and
+   parseTransactions paths.
+6. **`_source` discipline:** enhanced-API rows carry
+   `_source = "helius:enhanced:transactions:type=SWAP"` (or a
+   run-specific override like
+   `helius:enhanced:lvr-180d-2026-05-01`). Distinct from the
+   `helius:parseTransactions` rows that the phase-4 vault-delta
+   path emits. Consumers scope queries via `_source LIKE
+   'helius:enhanced:%'`.
+7. **CLI:** `scry solana swaps-helius-enhanced --pool-metadata FILE
+   --start DATE --end DATE [--rate-limit-ms 200] [--limit-per-call
+   100] [--source LABEL] [--dataset DIR]`.
+
+### Trade-off acknowledged
+
+**Lose:** Helius's `events.swap` captures the user's OUTER trade,
+not every individual hop in an aggregator-routed multi-hop swap.
+For a swap like "user buys MEMECOIN paying SOL, aggregator routes
+SOL → USDC via this pool then USDC → MEMECOIN via another pool",
+`events.swap` shows SOL → MEMECOIN at the OUTER level; the inner
+SOL/USDC leg through this pool is NOT decoded into a
+`swap.v1::Swap` row by the enhanced-API path. The vault-delta
+path WOULD capture this leg (preTokenBalances/postTokenBalances
+detect the pool's balance change regardless of outer-level swap
+shape).
+
+**Empirical finding 2026-05-02 (5-min tight smoke window
+2026-05-02 02:05-02:10 UTC, 250ms rate-limit):** 8 pages, 30 raw
+txs returned by the enhanced API for this pool, **25 skipped at
+the events.swap pair-mismatch gate, 2 emitted as `swap.v1::Swap`
+rows**. Skip rate ≈ 83%. The skipped txs are aggregator-routed
+swaps (sources: PUMP_AMM, OKX_DEX_ROUTER, etc.) where
+`events.swap` shows the user's NET outer trade (e.g., SOL →
+memecoin) rather than the SOL/USDC inner pool hop. **The
+enhanced-API path captures only the direct-Raydium swaps and
+the multi-hop-aggregator swaps whose outer leg happens to be
+SOL/USDC.**
+
+**Spot-check methodology (revised against the empirical finding):**
+Run the enhanced-API path against the 26h vault-delta archive
+window (2026-04-25 14:14 → 2026-04-26 16:04, ground-truth from
+the legacy Python fetcher); compare row counts. **Acceptance
+gate: ≥ 50% match.** This is materially looser than the 90% in
+v1 because the empirical 5-min skip rate signals that even ≥50%
+will be aggressive for this pool. If the spot-check yields
+<50%, the enhanced-API path is **not viable as the LVR-unblock
+sole-source backfill** and the operator should fall back to one
+of: (a) vault-delta on a credit-budget-sized sub-window only
+(~3-7 days at observed sig rates), (b) pay for a commercial DEX
+index (Allium / Dune Premium / Birdeye Pro), or (c) a hybrid
+panel (enhanced-API full 180d for direct + outer-aggregator
+swaps + vault-delta on a 1-week sub-window for the
+inner-hop-completeness audit).
+
+**Coverage trade-off summary:** the enhanced-API path is
+strictly the right answer when (i) the analysis tolerates
+direct + outer-aggregator coverage only, OR (ii) the credit
+budget is too tight for vault-delta even on a sub-window. For
+LVR magnitude analyses where every pool-touching swap matters,
+this path will not be sufficient on its own — the operator
+should plan accordingly.
+
+**Gain:** orders-of-magnitude cheaper than parseTransactions on
+high-volume pools; minutes-to-hours wall-clock instead of days;
+free at the 9M-credit budget; fully-parsed swap events with no
+vault-delta math required.
+
+### Spot-check methodology (locked)
+
+1. Take the 26h archive parquet at
+   `~/Documents/quant-work/data/archive/exploratory-2026-04-26/raydium_solusdc_swaps.parquet`
+   (vault-delta-extracted via legacy Python fetcher; ground-truth
+   for the 26h window 2026-04-25 14:14 → 2026-04-26 16:04).
+2. Run `scry solana swaps-helius-enhanced --start 2026-04-25T14:14:00Z
+   --end 2026-04-26T16:04:00Z --source helius:enhanced:spot-check`
+   into a temp dataset root.
+3. Compare row count via DuckDB:
+   ```
+   archive_rows / enhanced_rows
+   ```
+4. **Acceptance: ≥ 90% match → proceed with 180d backfill.
+   < 90% → fall back to vault-delta on the held-out window only
+   (~5d worth of credits at observed rates), accept truncated
+   coverage, document gap in phase row.**
+
+### Future-fetcher policy (revised)
+
+Future Solana-pool backfills follow this decision tree:
+
+1. **Estimate sig rate** via 2-page probe (cheap; ~0 cost).
+2. **If sig rate × budget headroom × 5-10% swap-rate ≤ available
+   Helius credits AND vault-delta inner-hop-completeness is
+   load-bearing:** use `scry solana swaps` (parseTransactions
+   path).
+3. **If sig rate exceeds budget OR vault-delta-completeness is
+   not load-bearing:** use `scry solana swaps-helius-enhanced`
+   (enhanced-API path). Faster, cheaper, broader source-program
+   coverage; acceptable for magnitude-scale analyses.
+4. **Spot-check** any non-parseTransactions backfill against a
+   vault-delta sub-window before committing the panel.
+
+### Decision-log row
+
+Lands with phase 79 (enhanced-API fetcher + CLI subcommand +
+methodology entry + spot-check procedure). Phase 78
+(parallel-agent: xStock comparator-panel forward-tape ignition +
+Kraken Futures historical backfill) shipped concurrently and
+consumes the next-after-phase-77 slot; phase 79 is this work.
+The v1 Flipside pivot section above stays in the methodology
+log as the audit-trail record of why we evaluated and rejected
+that path (access barrier discovered post-evaluation); the
+Flipside import adapter at phase 77 stays in the codebase as a
+generic SQL-source import path useful for future paid sources
+(Dune / Allium / etc.) without code change.
+
+---
+
 ## Done definition — code-shipped vs data-shipped — 2026-05-01 (locked)
 
 ### Why this lock exists
@@ -2655,6 +2840,204 @@ their own phase-log rows recording row counts + bytes + per-symbol
 breakdowns. Methodology-only because windowing is an analytical
 constraint that lives in the methodology log, while the backfill
 runs are operational events that live in the phase log.
+
+---
+
+## Paper-4 Phase-A capture spec — slot-resolution xStock AMM panel — 2026-05-01 (locked)
+
+### Why this lock exists
+
+Paper 4 (`reports/paper4_oracle_conditioned_amm/plan.md`) Phase A
+needs ≥6–9 months of slot-resolution AMM data (xStock pool state,
+swap tape, Jito bundle landings, validator-client stratification).
+Per the plan §12 sequencing the writing window opens ~16–18 months
+out (post-grant Milestone 4). Three of the four inputs are
+clock-dependent — Jito's bundle history is finite, validator-client
+labelling has no public archive, and slot-resolution pool-state is
+materially cheaper to capture forward than to replay from the swap
+tape — so capture has to start now or the writing window opens on a
+0-day panel.
+
+This row locks (a) the four schemas the Phase-A panel composes from,
+(b) the mint allowlist they all share, (c) the relationship to the
+2026-05-01 xStock comparator-panel window, and (d) the new fetcher
+crate that hosts the push-based Solana account-subscription daemon.
+
+### Locked mint allowlist
+
+The 8 xStock mints in `soothsayer/src/soothsayer/universe.py`:
+
+- SPYx, QQQx, AAPLx, GOOGLx, NVDAx, TSLAx, HOODx, MSTRx
+
+GLDx and TLTx are admissible if Backed lists them during the panel;
+amendment lands as a follow-up methodology row that names the mint
+addresses and the listing date — no schema change required (mint is
+a row-level filter, not a column).
+
+### Locked schemas
+
+Four schemas, all with `_dedup_key` defined in `scryer-schema` per
+hard rule #4. Schema specs land in `docs/schemas.md` as a follow-up
+to this row (one schema = one section, in the order below).
+
+1. **`clmm_pool_state.v1`** — per-(pool, slot) snapshot of Orca
+   Whirlpool + Raydium CLMM pools touching xStock mints. Columns:
+   `pool_pubkey`, `slot`, `block_time`, `dex_program`,
+   `sqrt_price_x64`, `liquidity`, `tick_current`,
+   `fee_growth_global_0`, `fee_growth_global_1`, `fee_protocol`,
+   `protocol_fee_owed_0`, `protocol_fee_owed_1`, plus the standard
+   `_schema_version` / `_fetched_at` / `_source` triplet.
+   `_dedup_key = (pool_pubkey, slot)`. The four `u128` fields
+   (`sqrt_price_x64`, `liquidity`, `fee_growth_global_0/1`) are
+   stored as `LargeUtf8` decimal strings, matching the
+   `jupiter_lend_liquidation.v1` precedent (arrow has no native
+   `u128`; `Decimal128(38, 0)` would lose leading digits at
+   `u128::MAX`).
+2. **`dlmm_pool_state.v1`** — sibling schema for Meteora DLMM (bin
+   semantics are not a column-level superset of CLMM). Columns:
+   `pool_pubkey`, `slot`, `block_time`, `active_id`, `bin_step`,
+   `reserve_x`, `reserve_y`, `protocol_share`,
+   `volatility_accumulator`, plus the standard triplet.
+   `_dedup_key = (pool_pubkey, slot)`. Two-schema split (rather than
+   one nullable-column schema) preserves dedup-key honesty per hard
+   rule #4 and avoids cross-DEX semantic drift.
+3. **`jito_bundle_tape.v1`** — sibling of (not a v2 extension of)
+   `jito_tip_floor.v1`, and a *distinct schema* from the existing
+   `jito_bundles.v1` (the latter is per-signature liquidation-panel
+   enrichment built for Paper 2). Per-bundle rows for every bundle
+   observed at slot `t`. Columns: `slot`, `block_time`,
+   `bundle_uuid`, `tx_sigs` (comma-joined `LargeUtf8`, matching the
+   `marginfi_reserve.v1` `oracle_keys` precedent — see phase 69
+   row in `docs/phase_log.md` for the LargeUtf8-everywhere
+   rationale), `tip_lamports`, `landed` (bool), `leader_pubkey`,
+   plus the standard triplet.
+   `_dedup_key = (slot, bundle_uuid)`. Naming chosen explicitly to
+   avoid collision with `jito_bundles.v1`: different source endpoint
+   (slot-stream vs sig-lookup), different dedup key, different
+   row-unit.
+4. **`validator_client.v1`** — per-epoch leader→client mapping;
+   consumers denormalize to per-slot at read time. Columns: `epoch`,
+   `leader_pubkey`, `client_label` (`String`, validated against the
+   enum `{bam, jito-agave, frankendancer, agave-vanilla, unknown}` at
+   write time), `client_version` (nullable), plus the standard
+   triplet. `_dedup_key = (epoch, leader_pubkey)`. Per-epoch (not
+   per-slot) storage avoids ~432K row-multiplication per epoch with
+   no information gain; consumers join via `(slot → epoch →
+   leader_pubkey → client_label)` at read time.
+
+### Pool-state schema coexistence — three non-overlapping schemas
+
+The `scryer-schema` crate now hosts three pool-state-flavored schemas
+with deliberately disjoint semantics. Listed for the benefit of future
+agents who might be tempted to "consolidate":
+
+- **`pool_snapshot.v1`** (existing, phase 16) — hourly vault-balance
+  snapshot for a single Solana DEX pool (Raydium-v4 SOL/USDC). Source:
+  `meta.preTokenBalances` of the first swap of each hour. Keyed by
+  `(hour, src_signature)`. Used by `quant-work/lvr/` LVR backfill.
+- **`clmm_pool_state.v1`** (new, this row) — per-(pool, slot) Whirlpool
+  + Raydium CLMM tick-state snapshot. Source: account-subscription /
+  `getMultipleAccounts` polling. Keyed by `(pool_pubkey, slot)`.
+- **`dlmm_pool_state.v1`** (new, this row) — per-(pool, slot) Meteora
+  DLMM bin-state snapshot. Source: same as CLMM. Keyed by
+  `(pool_pubkey, slot)`. Distinct schema (not a column-superset of
+  CLMM) because DLMM's bin-aggregated reserve representation is
+  semantically incompatible with CLMM's tick-current-and-liquidity
+  representation.
+
+Different source / cadence / dedup-key tuples → different schemas per
+hard rule #4. No future schema should consolidate these without a new
+methodology row.
+
+### Source / cadence
+
+| Schema | Source | Cadence | Backfillable? |
+|---|---|---|---|
+| `clmm_pool_state.v1` | Solana account-subscription (Geyser) via proxy; 60s RPC `getMultipleAccounts` polled fallback | per-slot ideal, 60s floor | No (forward-only — replay from swap tape would be O(swaps) per pool, dominantly more expensive than account-sub forward-capture) |
+| `dlmm_pool_state.v1` | Same source/cadence as `clmm_pool_state.v1` | Same | Same |
+| `jito_bundle_tape.v1` | Jito Block Engine API (`bundles` + searcher endpoints) | per-slot | **Forward-only.** Jito's historical access is finite; pre-capture bundles are unrecoverable. |
+| `validator_client.v1` | RPC `getVersion` against leader → community labeller cross-check (e.g. Helius validators API or Stakewiz) | per-epoch refresh | Forward-only past the public-history horizon of the labeller (~current epoch + a small window). |
+
+Geyser provider choice (Helius vs Triton vs Yellowstone vs operator-run
+node) is **not locked in this row** — it is a proxy/operational
+decision that lands in the per-schema methodology row when the fetcher
+ships, since hard rule #5 says provider details live in their layer
+only.
+
+### `dex_xstock_swaps.v1` backfill range — relationship to the 2026-05-01 xStock comparator-panel window
+
+The 2026-05-01 "xStock comparator-panel window" lock pinned the
+`dex_xstock_swaps.v1` historical backfill at `[2025-11-01,
+2026-05-01)` for the soothsayer paper-3 oracle-divergence window.
+Paper 4 needs the full xStock-listing history to characterize LVR
+across early thin-liquidity regimes.
+
+**This row supersedes the historical-backfill *start* for
+`dex_xstock_swaps.v1` from 2025-11-01 to 2025-07-14 (xStock
+launch).** End-of-historical handoff to the forward-poll cursor is
+unchanged. The soothsayer paper-3 panel reads the
+`[2025-11-01, 2026-05-01)` sub-window of the same parquet — no
+analytical-scope change, the earlier rows are simply additionally
+present.
+
+The `cex_stock_perp_*` and `backed_nav_strikes` portions of the
+2026-05-01 lock are unchanged.
+
+### New fetcher crate — `scryer-fetch-solana-pool-state`
+
+The Geyser/account-subscription forward-capture pattern is push-based
+and does not fit the existing pull-based `scryer-fetch-*` crates
+(which all assume a polling write-side daemon shape). Lands as a new
+crate under `crates/scryer-fetch-solana-pool-state/` with its own
+write-side daemon binary.
+
+Provider auth/retry/quota/rate-limit lives in this crate (or in the
+proxy crate if Geyser is routed via `scryer-proxy`) per hard rule
+#5; not in `scry`, not in `scryer-store`, not in consumers. The
+60s polled fallback path uses the existing proxy.
+
+### Validator-client labeller cross-check
+
+`getVersion` returns the leader's self-reported client string, which
+is informative but spoofable. The locked cross-check is to compare
+against a community labeller (Helius validators API or equivalent)
+on every epoch refresh and emit `client_label = "unknown"` when the
+two disagree. Disagreement rate is itself a Phase-A diagnostic —
+plan §11 R4 already acknowledges BAM stake-share evolves through
+the panel and the unknown-rate is the right floor for that
+uncertainty.
+
+### Reproducibility caveat
+
+Hard rule #7 (re-running a fetch over the same window yields
+identical content modulo `_fetched_at`) holds for the two pool-state
+schemas and the swap-tape backfill. It **does not hold** for
+`jito_bundle_tape.v1` and `validator_client.v1` past their
+public-history horizons — both are forward-only-capturable. Phase-log
+rows for their forward-poll launches must explicitly note the start
+timestamp and that pre-start data is missing-by-construction (same
+shape as the `cex_stock_perp_tape.v1` / `backed_nav_strikes.v1`
+carve-out in the 2026-05-01 comparator-panel window lock).
+
+### Capture-order rationale
+
+P0 ordering inside this lock — `jito_bundle_tape.v1` and
+`validator_client.v1` first because every day deferred is a day of
+unrecoverable data loss; `clmm_pool_state.v1` + `dlmm_pool_state.v1`
+second because forward-capture is materially cheaper than replay but
+the cost of deferral grows linearly not catastrophically;
+`dex_xstock_swaps.v1` promotion last because the historical window is
+fully backfillable from GeckoTerminal at deferred-cost.
+
+### Decision-log row
+
+Lands as a methodology + spec row (multiple schemas + a new crate);
+the actual fetcher implementations and backfill runs ship their own
+phase-log rows. The four schemas land in `docs/schemas.md` as a
+follow-up, and a wishlist row records the four outstanding items
+(plus the `dex_xstock_swaps.v1` backfill-range tightening) until
+each schema's first-data-shipped phase row demotes it per the
+"Done definition" lock.
 
 ---
 
