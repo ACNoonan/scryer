@@ -96,6 +96,7 @@ Last compacted: 2026-05-02.
 | 85 | 2026-05-02 | `SchemaId` type | Closed-domain enum, parser, and uniqueness gate in `scryer-schema`. |
 | 86 | 2026-05-02 | source manifest format | Locked TOML schema; `ops/sources/kraken-trades.toml` worked example. |
 | 87 | 2026-05-02 | manifest parser/validator | New `scryer-manifest` crate parses + validates `ops/sources/<id>.toml` against the manifest lock and `KNOWN_V1_SCHEMAS`/`SchemaId` registries. |
+| 88 | 2026-05-02 | `internal.scryer.workflow_run.v2` | First v2-namespace schema; runner attempt checkpoint with closed `status`/`publish_status` vocabularies. Code-shipped, data-pending until M3.3 runner emits rows. |
 
 ## Phase Ledger
 

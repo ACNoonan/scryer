@@ -221,10 +221,14 @@ fn validate_segment(kind: &'static str, segment: &str) -> Result<(), SchemaIdErr
 
 /// Registry of every v2 schema ID locked or shipped to date.
 ///
-/// The list is empty until Wave-1 migrations begin. Adding an entry is
-/// part of merging the v2 schema; the `known_v2_schemas_*` tests
-/// enforce that every entry parses, validates, and is unique.
-pub const KNOWN_V2_SCHEMAS: &[SchemaId] = &[];
+/// Adding an entry is part of merging the v2 schema; the
+/// `known_v2_schemas_*` tests enforce that every entry parses,
+/// validates, and is unique. Wave-1 mechanical renames are not yet
+/// landed; the only initial entry is the runner checkpoint schema
+/// (`internal.scryer.workflow_run.v2`, M3.1).
+pub const KNOWN_V2_SCHEMAS: &[SchemaId] = &[
+    SchemaId::new_static(Domain::Internal, "scryer", "workflow_run", 2),
+];
 
 #[cfg(test)]
 mod tests {

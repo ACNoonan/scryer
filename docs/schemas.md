@@ -2187,3 +2187,65 @@ bid_to_cover       f64 nullable
 **Dedup.** `_dedup_key = cusip`.
 
 **CLI.** `scry treasury auctions --start DATE --end DATE`.
+
+---
+
+# Platform / runner (v2)
+
+## internal.scryer.workflow_run.v2
+
+**Status.** code-shipped 2026-05-02 — phase 88; data-pending until the
+runner (M3.3) emits its first row. First v2-namespace schema; lives in
+`crates/scryer-schema/src/workflow_run.rs` and is registered in
+`KNOWN_V2_SCHEMAS`.
+
+**Purpose.** One row per workflow attempt. The runner writes a row at
+attempt start (`status = "running"`) and updates terminal fields on
+completion. Dataset-level health views (last successful publish,
+current lag, retry depth, exhausted attempts, validation status) are
+all derived from this table.
+
+**Identity.** `run_id` is opaque, runner-generated, unique per attempt;
+ULID recommended for monotonic time-prefix. `_dedup_key = run_id` so
+the start row and terminal update row of one attempt collapse.
+
+```
+run_id                  string         opaque, ULID/UUID; unique per attempt
+manifest_id             string         kebab-case manifest id (matches ops/sources/<id>.toml)
+step_index              i32            0 for [fetch] or [[workflow.steps]][0]; n for steps[n]
+manifest_revision       string nullable  optional content hash of manifest at trigger time
+sensor_expression       string         raw sensor string (e.g. "interval(3600s)")
+attempt                 i32            1-based attempt counter
+retry_of_run_id         string nullable  prior failed run_id when this is a retry
+triggered_at_unix_secs  i64            sensor fire time
+started_at_unix_secs    i64    nullable  step start time; null if cancelled before start
+finished_at_unix_secs   i64    nullable  step finish time; null while running
+duration_ms             i64    nullable  finished - started, in ms
+status                  string         closed: running/succeeded/failed/timed_out/cancelled/skipped
+exit_code               i32    nullable
+error_class             string nullable  low-cardinality classifier (e.g. "transport.timeout")
+error_message           string nullable  truncated diagnostic
+requests_made           i64    nullable
+provider_credits        f64    nullable
+usd_spent               f64    nullable
+rows_written            i64    nullable
+partitions_written      i64    nullable
+publish_status          string nullable  closed: pending/published/validation_failed/dead_letter
+runner_version          string         scryer build identifier
+runner_host             string         operator hostname
+```
+
+**Closed vocabularies.** `status` and `publish_status` are validated by
+`workflow_run::v2::is_canonical_status` and
+`is_canonical_publish_status`; the runner is expected to call those
+helpers before constructing a row.
+
+**Field optionality rationale.** Identity, trigger, sensor, attempt
+counters, status, and runner provenance are NOT NULL because every
+row is meaningful only when all of them are present. Cost, output,
+publish state, and exit diagnostics are nullable so the runner can
+fill them in feature by feature without a schema bump (additive
+nullable columns stay within the same major version).
+
+**CLI.** Written by the workflow runner only; no manual `scry`
+invocation. The runner binary is M3.3.
