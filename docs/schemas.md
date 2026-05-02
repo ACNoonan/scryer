@@ -721,6 +721,110 @@ different partition cadence.
 
 ---
 
+# DEX pool state
+
+Three pool-state-flavored schemas coexist with deliberately disjoint
+semantics — see `methodology_log.md` "Pool-state schema coexistence —
+three non-overlapping schemas" (2026-05-01 lock) for the consolidation
+rationale. `pool_snapshot.v1` (hourly Raydium-v4 vault balances) is
+its own thing further down; `clmm_pool_state.v1` and
+`dlmm_pool_state.v1` are the per-slot CLMM/DLMM tick/bin-state
+captures spec'd here.
+
+## clmm_pool_state.v1
+
+**Status.** proposed — methodology entry locked
+2026-05-01 ("Paper-4 Phase-A capture spec"). Schema-only; fetcher in
+the new `scryer-fetch-solana-pool-state` crate ships under a
+subsequent phase.
+
+**Source.** Solana account state for Orca Whirlpool + Raydium CLMM
+pools touching the 8 xStock mints. Push-based forward capture via a
+Geyser account-subscription stream; 60s `getMultipleAccounts` polled
+fallback for periods when the subscription stream is unavailable.
+
+- Orca Whirlpools program: `whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc`
+- Raydium CLMM program: `CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK`
+
+`sqrt_price_x64` is read from Whirlpool's `sqrt_price` field and
+Raydium's `sqrt_price_x64` field (both Q64.64 representations).
+`fee_growth_global_0/1` reads from Whirlpool's `fee_growth_global_a/b`
+or Raydium's `fee_growth_global_0_x64 / 1_x64`. Cross-DEX field
+nomenclature is normalized to `0/1` at decode time.
+
+```
+pool_pubkey            string
+slot                   u64    → i64
+block_time             i64
+dex_program            string  // 'orca_whirlpools' | 'raydium_clmm'
+sqrt_price_x64         u128   → LargeUtf8 decimal string
+liquidity              u128   → LargeUtf8 decimal string
+tick_current           i32
+fee_growth_global_0    u128   → LargeUtf8 decimal string
+fee_growth_global_1    u128   → LargeUtf8 decimal string
+fee_protocol           i32    nullable  // u16 in Whirlpool; not in Raydium pool_state directly
+protocol_fee_owed_0    i64               // u64 → i64; saturating
+protocol_fee_owed_1    i64
+```
+
+**`u128` storage.** Decimal-string in arrow, matching the
+`jupiter_lend_liquidation.v1` precedent. Rust-side type is `u128`;
+on-disk type is `LargeUtf8` (decimal). `Decimal128(38, 0)` would lose
+leading digits at `u128::MAX`.
+
+**Dedup.** `_dedup_key = "clmm_pool_state:" + pool_pubkey + ":" + slot`.
+
+**Storage.** `dataset/solana_dex/clmm_pool_state/v1/dex={orca_whirlpools|raydium_clmm}/year=Y/month=M/day=D.parquet`.
+Daily, keyed by DEX (account-subscription streams run as separate
+daemons per program).
+
+**CLI.** `scry solana clmm-pool-state {watch | poll}
+--pools <FILE> --proxy-url URL [--dataset DIR]` — surface pinned in
+the methodology log; concrete CLI lands with the fetcher phase.
+
+---
+
+## dlmm_pool_state.v1
+
+**Status.** proposed — methodology entry locked
+2026-05-01 ("Paper-4 Phase-A capture spec"). Schema-only; fetcher in
+the new `scryer-fetch-solana-pool-state` crate ships under a
+subsequent phase.
+
+**Source.** Solana account state for Meteora DLMM pools touching the
+8 xStock mints. Push-based forward capture via a Geyser
+account-subscription stream; 60s `getMultipleAccounts` polled fallback
+identical in shape to `clmm_pool_state.v1`.
+
+- Meteora DLMM program: `LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo`
+
+DLMM bin-state semantics differ from CLMM (active-bin pointer +
+bin-step + per-bin reserves) — sibling schema is the right shape per
+hard rule #4, not a column-superset of `clmm_pool_state.v1`.
+
+```
+pool_pubkey                string
+slot                       u64    → i64
+block_time                 i64
+active_id                  i32              // signed bin index
+bin_step                   i32              // u16 upstream
+reserve_x                  u64    → i64    // active-bin reserve, token X
+reserve_y                  u64    → i64    // active-bin reserve, token Y
+protocol_share             i32    nullable
+volatility_accumulator     i64    nullable
+```
+
+**Dedup.** `_dedup_key = "dlmm_pool_state:" + pool_pubkey + ":" + slot`.
+
+**Storage.** `dataset/solana_dex/dlmm_pool_state/v1/year=Y/month=M/day=D.parquet`.
+Daily, no key (single DEX program).
+
+**CLI.** `scry solana dlmm-pool-state {watch | poll}
+--pools <FILE> --proxy-url URL [--dataset DIR]` — surface pinned in
+the methodology log; concrete CLI lands with the fetcher phase.
+
+---
+
 # Holders & on-chain panels
 
 ## xstock_holders.v1
@@ -1076,6 +1180,13 @@ Dual-write daemon: posts to on-chain PDA + writes parquet at
 
 **Status.** proposed — methodology entry needed (item 7).
 
+**Distinct from `jito_bundle_tape.v1`** (this file, "Solana fees &
+bundles"). This schema is per-signature enrichment, joined back to a
+source liquidation panel; `jito_bundle_tape.v1` is the slot-keyed
+per-bundle stream for Paper 4. Naming-collision rationale lives in
+`methodology_log.md` "Paper-4 Phase-A capture spec — slot-resolution
+xStock AMM panel — 2026-05-01 (locked)".
+
 **Source.** Jito Block Engine API:
 `GET https://mainnet.block-engine.jito.wtf/api/v1/bundles/transaction/<sig>`
 returns `{bundle_id, slot, validator, landed: bool, accept_time, ...}`.
@@ -1164,6 +1275,130 @@ jito_tip_max_lamports         i64 nullable
 
 **CLI.** `scry solana priority-fees --start DATE --end DATE --proxy-url URL`
 (window of slots, not continuous).
+
+---
+
+## jito_bundle_tape.v1
+
+**Status.** proposed — methodology entries locked 2026-05-01
+("Paper-4 Phase-A capture spec" phase-80 + source amendment
+phase-81). Schema-only; fetcher ships under a subsequent phase.
+
+**Distinct from `jito_bundles.v1`** (per-signature liquidation-panel
+enrichment, sig-keyed, built for Paper 2). This schema is the
+slot-keyed per-bundle tape for Paper 4's bundle-conditional LVR
+realisation: every bundle observed landing at slot `t`, regardless
+of which liquidation-panel signatures it does or doesn't contain.
+
+**Source — on-chain heuristic** (per phase-81 amendment;
+`mainnet.block-engine.jito.wtf` does not expose a per-slot bundle
+enumeration endpoint). For each landed slot the fetcher walks
+`getBlock(slot, transactionDetails:"full",
+maxSupportedTransactionVersion:0, rewards:false)` via
+`scryer-proxy` and identifies bundle landings by:
+
+- Detecting the **lead-tip-paying tx**: any non-vote tx whose
+  `postBalances[i] - preBalances[i] > 0` for one of the 8 tip
+  pubkeys (tip pubkeys pulled live via `getTipAccounts` per CLAUDE.md
+  hard rule #8 — never retyped).
+- Grouping the **bundle**: the maximal run of adjacent non-vote txs
+  ending at the lead-tip-paying tx. Jito-BAM places bundle txs
+  contiguously and pays the tip in the bundle's last tx.
+
+The fetcher lives in `scryer-fetch-solana` (next to
+`solana_priority_fees.rs` which already does the matching getBlock
+walk + tip-account detection); not in `scryer-fetch-jito` (the
+canonical-Jito-API crate) because the source is Solana RPC + an
+on-chain heuristic, not a Jito Block Engine call.
+
+```
+slot              u64    → i64
+block_time        i64
+bundle_id         string  // synthetic: "{slot}:{lead_tx_sig}"
+lead_tx_sig       string  // first base58 sig of the bundle group
+tx_sigs           string  // comma-joined base58 sigs in landing order (includes lead_tx_sig)
+tip_lamports      i64     // sum of tip transfers from the bundle to tip_account
+tip_account       string  // which of the 8 tip pubkeys received the tip
+leader_pubkey     string  // block leader for this slot
+```
+
+Comma-joined `LargeUtf8` for `tx_sigs` (rather than Arrow `ListArray`)
+follows the `marginfi_reserve.v1` `oracle_keys` precedent — see
+phase-69 row in `docs/phase_log.md` for the LargeUtf8-everywhere
+rationale. Consumers split on `,` to recover the list; base58 sigs
+never contain commas so no escaping is required.
+
+**Dedup.** `_dedup_key = "jito_bundle_tape:" + slot + ":" + lead_tx_sig`.
+
+**Storage.** `dataset/jito/bundle_tape/v1/year=Y/month=M/day=D.parquet`.
+Daily, no key.
+
+**Heuristic limitations** (`bundle_id` is synthetic, not Jito's
+canonical `bundle_uuid`):
+
+- Adjacency-based grouping is approximate; a non-bundle tx landing
+  between two bundles will be mis-grouped. Empirical false-grouping
+  rate to be characterized post-launch.
+- **`landed=false` bundles are NOT capturable on-chain** by
+  construction — submitted-but-not-included bundles leave no block
+  trace. Schema reflects this by omitting the `landed` column
+  entirely. Consumers requiring "attempts vs. landings" cuts must
+  use a paid indexer (Helius enriched / Allium / Dune); see Paper-4
+  plan §11.
+
+**Reproducibility caveat.** Forward-capturable from `getBlock`'s
+finalized-commitment window onward; re-runs over the same `[start,
+end)` slot range produce identical content modulo `_fetched_at`,
+modulo Solana's own re-org / fork window (~32 slots at finalized).
+Pre-capture history is whatever the proxy's RPC providers retain
+(public-tier Solana RPC retention is ~24h-7d depending on provider;
+historical backfill beyond that needs a warehoused-block source).
+
+**CLI.** `scry solana jito-bundle-tape watch [--start DATE] [--end DATE]
+[--proxy-url URL] [--dataset DIR]` — surface pinned in the
+methodology log; concrete CLI lands with the fetcher phase.
+
+---
+
+## validator_client.v1
+
+**Status.** proposed — methodology entry locked
+2026-05-01 ("Paper-4 Phase-A capture spec"). Schema-only; fetcher
+ships under a subsequent phase.
+
+**Source.** Two sources, joined per epoch: (a) Solana RPC
+`getVersion` against each leader's advertised gossip endpoint
+(self-reported, informative-but-spoofable); (b) a community labeller
+(Helius validators API or Stakewiz) for cross-validation. Disagreement
+between (a) and (b) emits `client_label = "unknown"` rather than
+picking a side; the unknown-rate is itself a Phase-A diagnostic per
+plan §11 R4.
+
+**Row-unit decision.** Per-epoch, NOT per-slot. Avoids ~432K
+row-multiplication per epoch with no information gain. Consumers
+denormalize at read time via `(slot → epoch → leader_pubkey →
+client_label)`.
+
+```
+epoch              u64    → i64
+leader_pubkey      string
+client_label       string  // 'bam' | 'jito-agave' | 'frankendancer' | 'agave-vanilla' | 'unknown'
+client_version     string  nullable
+```
+
+**Dedup.** `_dedup_key = "validator_client:" + epoch + ":" + leader_pubkey`.
+
+**Storage.** `dataset/solana_validator/client_label/v1/year=YYYY.parquet`.
+Yearly, no key (low row count: ~180 epochs × ~1500 leader-pubkeys =
+~270K rows/year).
+
+**Reproducibility caveat.** Forward-only past the public-history
+horizon of the labeller (~current epoch + a small window). Same
+missing-by-construction convention as `jito_bundle_tape.v1`.
+
+**CLI.** `scry solana validator-client {refresh | one-shot}
+[--proxy-url URL] [--dataset DIR]` — surface pinned in the
+methodology log; concrete CLI lands with the fetcher phase.
 
 ---
 

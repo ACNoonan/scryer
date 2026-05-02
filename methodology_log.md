@@ -3041,6 +3041,143 @@ each schema's first-data-shipped phase row demotes it per the
 
 ---
 
+## Paper-4 Phase-A capture spec — `jito_bundle_tape.v1` source amendment — 2026-05-01 (locked)
+
+### Why this amendment exists
+
+Phase 80's `jito_bundle_tape.v1` lock implicitly assumed Jito's public
+Block Engine API exposes a per-slot bundle-enumeration endpoint
+returning canonical `bundle_uuid` values. **It doesn't.** Confirmed
+via direct read of `docs.jito.wtf/lowlatencytxnsend/` 2026-05-01: the
+only public bundle-query endpoints are `getBundleStatuses` /
+`getInflightBundleStatuses` (require known bundle IDs, max 5 per
+request, 1 req/s/IP), `bundles/transaction/{sig}` (sig → bundle
+metadata, used by the existing per-signature `jito_bundles.v1`
+fetcher), and `getTipAccounts`. None enumerate "every bundle that
+landed at slot t."
+
+Hard rule #2 says "schemas are append-only within a major version
+... old data stays at the old version forever." Spirit-of-the-rule
+is preserved here because no data has shipped at the phase-80 schema
+definition (phase 80 was doc + schema-types only). This row amends
+the v1 lock in place rather than bumping to v2; the phase-80 row
+stays unchanged in the audit trail.
+
+### Audit-killed alternatives
+
+- **(B) Per-tx `bundles/transaction/{sig}` slot-walk.** Would yield
+  canonical `bundle_uuid`. Rejected: 1 req/s/IP × ~1000 txs/slot =
+  ~1000s/slot of API time per slot. Forward-poll cannot keep up; the
+  6-9 month backfill has the same cost wall.
+- **(C) Paid indexer (Helius enriched blocks / Allium / Dune).**
+  Would yield canonical `bundle_uuid` plus `landed=false` semantics.
+  Rejected for v0.1 — adds a new vendor dependency for marginal
+  analytical gain (Paper 4's E3 cut joins by tx signature, not by
+  canonical bundle UUID; see "Locked design" below).
+- **(D) Defer 51a until a public per-slot endpoint exists.** Rejected
+  because deferral defeats the entire reason 51a is P0 — Jito's
+  history is finite; every day deferred is unrecoverable data.
+
+### Locked design — on-chain heuristic capture
+
+Source moves from "Jito Block Engine API" to **on-chain heuristic via
+`getBlock(slot)` through `scryer-proxy`**, mirroring the
+`solana_priority_fees.v1` (phase 43) slot-walk pattern. The fetcher's
+home consequently moves from `scryer-fetch-jito` to
+`scryer-fetch-solana` (where `solana_priority_fees.rs` already
+implements the matching getBlock walk + tip-account detection).
+
+**Bundle identification.** A bundle landing is detected by:
+
+1. Walking each landed slot's full block via
+   `getBlock(slot, transactionDetails:"full",
+   maxSupportedTransactionVersion:0, rewards:false)`.
+2. For each non-vote tx in the block, scanning `accountKeys +
+   loadedAddresses` for the 8 tip-account pubkeys (pulled live via
+   `getTipAccounts` per CLAUDE.md hard rule #8 — never retyped from
+   truncated display).
+3. A tx with `postBalances[i] - preBalances[i] > 0` for one of the
+   tip pubkeys is the **lead-tip-paying tx** of a candidate bundle.
+4. The bundle group is the maximal run of adjacent non-vote txs
+   ending at the lead-tip-paying tx (Jito-BAM places bundle txs
+   contiguously and pays the tip in the bundle's last tx; the
+   leader places the whole bundle adjacently in the block).
+
+**Heuristic limitations** (documented in the schema doc-block so
+consumers see them at first read):
+
+- Adjacency-based grouping is approximate; a non-bundle tx that
+  lands between two bundles will be mis-grouped. Empirical false-
+  grouping rate is the right thing to characterize once forward-poll
+  has captured enough slots; expected to be small under typical BAM
+  scheduling.
+- `landed=false` bundles (submitted but not included) are NOT
+  capturable on-chain by construction — the field is dropped. Paper-4
+  consumers requiring "bundle attempts vs. landings" cuts must use a
+  paid indexer; document the gap in plan §11.
+
+### Schema field amendments
+
+Original phase-80 field set (now superseded): `slot`, `block_time`,
+`bundle_uuid`, `tx_sigs`, `tip_lamports`, `landed`, `leader_pubkey`.
+
+**Locked phase-81 field set:**
+
+```
+slot              i64
+block_time        i64
+bundle_id         string  // synthetic: format!("{slot}:{lead_tx_sig}")
+lead_tx_sig       string  // first base58 sig of the bundle group; basis of bundle_id
+tx_sigs           string  // comma-joined base58 sigs in landing order, including lead_tx_sig
+tip_lamports      i64     // sum of tip transfers from the bundle to the tip account
+tip_account       string  // which of the 8 tip pubkeys received the tip
+leader_pubkey     string  // block leader for this slot
++ standard meta triplet
+```
+
+Changes vs. phase 80:
+
+- **Dropped** `bundle_uuid` (canonical UUID not observable on-chain).
+- **Added** `bundle_id` (synthetic; stable across re-fetches because
+  `lead_tx_sig` is on-chain and slot-pinned).
+- **Added** `lead_tx_sig` (explicit column makes joins to other
+  per-sig schemas direct without a string-split-take-first).
+- **Added** `tip_account` (free byproduct of the heuristic; informative
+  for analysis — different tip accounts may correlate with different
+  searcher cohorts).
+- **Dropped** `landed` (always-true on-chain by construction).
+
+`_dedup_key = "jito_bundle_tape:" + slot + ":" + lead_tx_sig`.
+
+### Storage path unchanged
+
+`dataset/jito/bundle_tape/v1/year=Y/month=M/day=D.parquet`. Daily,
+no key. Per-slot row count is small (~5-50 bundles per slot at
+current Solana volume); daily partitions remain right-sized.
+
+### Reproducibility note
+
+Re-running a window over the same `[start, end)` slot range yields
+identical content modulo `_fetched_at`, **modulo Solana's own
+re-org / fork window** (typically <32 slots; Jito's confirmed-block
+finality applies). Backfill runs that cross a re-org boundary may
+see the ~32-slot tip drift between fetches; consumers using
+finalized commitment via the proxy avoid this. Document the chosen
+commitment level in the fetcher's phase-log row.
+
+### Decision-log row
+
+Methodology amendment to a phase-80 schema lock; no data shipped at
+the prior schema; in-place amendment per hard rule #2 spirit.
+`docs/schemas.md`'s `jito_bundle_tape.v1` section is rewritten to
+match the locked field set; `crates/scryer-schema/src/jito_bundle_tape.rs`
+is rewritten the same way; phase-80 schema-types row stays unchanged
+in the audit trail. Wishlist sub-item 51a's "highest priority"
+ranking and the "fetcher in `scryer-fetch-solana`" home are both
+recorded here.
+
+---
+
 ## Decision log + Specification log
 
 Both logs moved to `docs/phase_log.md` 2026-04-29. The Decision log is

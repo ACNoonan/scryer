@@ -53,6 +53,7 @@ don't re-propose.
 | 47 | Locked, **not yet shipped** — Priority 0 paper-3 event panel (full entry below) |
 | 48 | Done — phase 67 (`decode_v11` + nullable `bid_price`/`ask_price`/`mid_price`/`last_traded_price` columns on `chainlink_data_streams.v1`; v11 reports now fully decode rather than landing as cadence-only stubs) |
 | 49 | First slice shipped — phase 66 (cadence audit + chainlink launchd plist + CLI `--once`); 49a code shipped phase 71 (Pyth Benchmarks backfill, ≥90d run pending operator-side); sub-items 49b (Kamino Scope ≥90d) / 49c (RedStone permaweb ≥90d) / 49d (chainlink ≥90d run + soothsayer consumer cutover) outstanding (full entry below) |
+| 51 | Schemas + methodology + spec landed — phase 80 + phase 81 amendment (Paper-4 Phase-A slot-resolution xStock AMM panel: `clmm_pool_state.v1` / `dlmm_pool_state.v1` / `jito_bundle_tape.v1` / `validator_client.v1` + new `scryer-fetch-solana-pool-state` crate locked; sub-items 51a / 51b / 51c / 51d / 51e outstanding — full entry below) |
 
 ---
 
@@ -121,6 +122,106 @@ Schema + source detail: `docs/schemas.md#marginfi_liquidationv1`.
 **Effort.** ~4–5 hours (more involved than Kamino's because of the
 event-emitted field set and the multi-oracle-key conf-haircut
 capture).
+
+---
+
+## 51. Paper-4 Phase-A capture — slot-resolution xStock AMM panel
+
+Phase 77 landed the methodology row + four schema specs in
+`docs/schemas.md` + the `scryer-schema` modules (`clmm_pool_state.v1`,
+`dlmm_pool_state.v1`, `jito_bundle_tape.v1`, `validator_client.v1`)
+gated behind the new fetcher crate `scryer-fetch-solana-pool-state`.
+The four fetchers + the `dex_xstock_swaps.v1` backfill-range tightening
+ship as separate phases per the capture-order rationale in
+`methodology_log.md` "Paper-4 Phase-A capture spec — slot-resolution
+xStock AMM panel — 2026-05-01 (locked)".
+
+### 51a. `jito_bundle_tape.v1` forward-poll daemon
+
+Highest priority — Jito's bundle history is finite and every day
+deferred is unrecoverable data loss.
+
+- New fetcher in `scryer-fetch-solana` (Block Engine API is HTTP, no
+  account-subscription).
+- New `scry solana jito-bundle-tape watch` CLI.
+- New launchd plist `com.adamnoonan.scryer.jito-bundle-tape` (cadence
+  TBD per fetcher phase — likely sub-second slot-stream poll, not
+  StartInterval-driven).
+- Phase-log row at forward-poll launch must record start timestamp +
+  the missing-by-construction caveat for pre-start data.
+
+Schema + source detail: `docs/schemas.md#jito_bundle_tapev1`.
+
+### 51b. `validator_client.v1` per-epoch refresh
+
+Forward-only past the public-history horizon of the labeller (~current
+epoch + a small window) — same urgency tier as 51a.
+
+- New fetcher (likely in `scryer-fetch-solana` or a small new module
+  depending on whether the community labeller call shares a crate
+  with `getVersion` infra).
+- New `scry solana validator-client {refresh | one-shot}` CLI.
+- New launchd plist `com.adamnoonan.scryer.validator-client-refresh`
+  at per-epoch cadence (~2 days; epoch ~432K slots × 0.4s).
+- Cross-validation: `getVersion` self-report ↔ community labeller;
+  `client_label = "unknown"` on disagreement.
+
+Schema + source detail: `docs/schemas.md#validator_clientv1`.
+
+### 51c. `clmm_pool_state.v1` forward-capture (Whirlpool + Raydium CLMM)
+
+Forward-capture is materially cheaper than swap-replay; cost of
+deferral grows linearly so this is P0 but a tier below 51a/51b.
+
+- New crate `scryer-fetch-solana-pool-state` (push-based Geyser
+  account-subscription + 60s `getMultipleAccounts` polled fallback).
+- Geyser provider choice (Helius vs Triton vs Yellowstone vs
+  operator-run node) is **not yet locked** — lands in the per-fetcher
+  methodology row when the crate ships, per hard rule #5.
+- New `scry solana clmm-pool-state {watch | poll}` CLI.
+- New launchd plist `com.adamnoonan.scryer.clmm-pool-state-watch`
+  (KeepAlive daemon, not StartInterval — push-based).
+- Pool allowlist computed at startup from a top-K-by-TVL Whirlpool +
+  Raydium-CLMM scan filtered by the 8 xStock mints; refreshed on
+  daemon restart.
+
+Schema + source detail: `docs/schemas.md#clmm_pool_statev1`.
+
+### 51d. `dlmm_pool_state.v1` forward-capture (Meteora DLMM)
+
+Same crate + daemon shape as 51c; sibling schema (bin-state, not
+tick-state). Lands together with 51c if the Geyser surface accepts
+program multiplexing cleanly; otherwise as a follow-up phase.
+
+Schema + source detail: `docs/schemas.md#dlmm_pool_statev1`.
+
+### 51e. `dex_xstock_swaps.v1` backfill-range tightening + forward-poll plist
+
+Promotes the existing code-shipped `dex_xstock_swaps.v1` (phase 36) to
+data-shipped per the 2026-05-01 "Done definition" lock. Two
+sub-deliveries:
+
+- **Backfill.** Run `scry solana dex-xstock-swaps --start 2025-07-14
+  --end <forward-cursor-handoff>` per the methodology row's
+  supersession of the 2026-05-01 xStock comparator-panel window
+  (start moves from 2025-11-01 to 2025-07-14 = xStocks launch).
+  Cost-probe with a 1-day run before the full window per the existing
+  Helius cost-guardrail pattern.
+- **Forward poll.** New launchd plist
+  `com.adamnoonan.scryer.dex-xstock-swaps` mirroring
+  `com.adamnoonan.scryer.geckoterminal-trades.plist` at ≤900s cadence.
+
+No schema or fetcher code change for 51e — both already exist as of
+phase 36.
+
+### Effort
+
+- 51a: ~4–6 hours (single REST endpoint, similar to phase-23 Pyth tape).
+- 51b: ~6–8 hours (two sources joined per epoch + cross-validation
+  logic).
+- 51c + 51d: ~12–18 hours together (new crate; Geyser provider choice
+  + push-based daemon shape are net-new architecture surface).
+- 51e: ~2–3 hours (backfill run + plist; both well-trodden patterns).
 
 ---
 
