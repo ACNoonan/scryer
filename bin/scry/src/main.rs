@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 
+mod analytics_cmd;
 mod backed_cmd;
 mod cboe_cmd;
 mod cex_funding_cmd;
@@ -145,6 +146,11 @@ enum Command {
     /// silent daemon outages surface as a non-zero `launchctl list`
     /// exit code + (optionally) a macOS notification.
     Freshness(freshness_cmd::FreshnessArgs),
+    /// Analytics — derived datasets computed from canonical parquet.
+    /// First subcommand: `workflow-runs` (M3.7), a per-day rollup of
+    /// the runner's `internal.scryer.workflow_run.v2` checkpoint
+    /// table.
+    Analytics(analytics_cmd::AnalyticsCmd),
 }
 
 #[derive(Parser, Debug)]
@@ -722,6 +728,7 @@ async fn main() -> Result<()> {
         },
         Command::PythPoster(a) => pyth_poster_cmd::run_pyth_poster(a).await,
         Command::Freshness(a) => freshness_cmd::run_freshness(a).await,
+        Command::Analytics(c) => analytics_cmd::run_analytics(c).await,
     }
 }
 

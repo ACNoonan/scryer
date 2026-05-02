@@ -1,0 +1,36 @@
+# M3.7. First analytics workflow under the runner: a per-day rollup
+# of the runner's own checkpoint table. Self-referential by design —
+# the input is `internal.scryer.workflow_run.v2`, and the output
+# (`internal.scryer.workflow_run_summary.v2`) is the first derived
+# v2 schema.
+#
+# Cadence: fires at 00:30 UTC, summarizing the prior day. Pegging the
+# summary to the prior day avoids the partial-day-boundary problem —
+# yesterday's partition is closed by the time we sum it. The 30-min
+# offset gives any straggling 23:59-bucket fires from the prior day
+# room to land before the analytics command reads.
+#
+# This manifest is the operational test-bed for the `daily(<HH:MM>Z)`
+# sensor: M3.4/M3.5/M3.6 only exercised `interval(...)`. If the
+# analytics row for "yesterday" lands in `internal.scryer/
+# workflow_run_summary/v2/` shortly after 00:30Z, the daily sensor
+# is proven end-to-end against real launchd cadence.
+
+id = "analytics-workflow-runs"
+description = "Per-day rollup of internal.scryer.workflow_run.v2 by manifest_id. M3.7 first analytics workflow."
+schema_ids = ["internal.scryer.workflow_run_summary.v2"]
+
+[fetch]
+command = "scry"
+args = [
+    "analytics", "workflow-runs",
+    "--source", "scry:analytics:workflow-runs:runner",
+]
+
+[freshness]
+# 25h ceiling: a successful daily fire should land within 24h of the
+# prior fire, plus a 1h grace window for clock skew / launchd jitter.
+sla_secs = 90000
+
+[workflow]
+sensor = "daily(00:30Z)"

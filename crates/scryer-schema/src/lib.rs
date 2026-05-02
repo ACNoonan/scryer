@@ -73,6 +73,7 @@ pub mod trade;
 pub mod v5_tape;
 pub mod validator_client;
 pub mod workflow_run;
+pub mod workflow_run_summary;
 pub mod xstock_holders;
 pub mod yahoo;
 pub mod yahoo_corp_actions;

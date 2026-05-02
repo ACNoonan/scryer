@@ -228,6 +228,7 @@ fn validate_segment(kind: &'static str, segment: &str) -> Result<(), SchemaIdErr
 /// (`internal.scryer.workflow_run.v2`, M3.1).
 pub const KNOWN_V2_SCHEMAS: &[SchemaId] = &[
     SchemaId::new_static(Domain::Internal, "scryer", "workflow_run", 2),
+    SchemaId::new_static(Domain::Internal, "scryer", "workflow_run_summary", 2),
 ];
 
 #[cfg(test)]

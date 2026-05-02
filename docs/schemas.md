@@ -2251,3 +2251,37 @@ nullable columns stay within the same major version).
 
 **CLI.** Written by the workflow runner only; no manual `scry`
 invocation. The runner binary is M3.3.
+
+---
+
+## internal.scryer.workflow_run_summary.v2
+
+**Status.** done 2026-05-02 — phase 95 (code) + phase 95 (data). First
+canonical partition: `dataset/internal.scryer/workflow_run_summary/v2/year=2026/month=05/day=02.parquet`,
+populated by `scry analytics workflow-runs --day today` at M3.7.
+First *derived* v2 schema (input is another v2 schema rather than an
+external provider). Lives in
+`crates/scryer-schema/src/workflow_run_summary.rs` and is registered
+in `KNOWN_V2_SCHEMAS`.
+
+**Purpose.** Per-day, per-manifest rollup of
+`internal.scryer.workflow_run.v2`. Drives operator-visible answers
+to "how many fires did manifest X have yesterday?" and "what's the
+success rate?" without re-scanning the full checkpoint table. Daily
+analytics manifest at `daily(00:30Z)` summarizes the prior day.
+
+**Identity.** `_dedup_key = <manifest_id>:<summary_date_unix_secs>`.
+Re-running `scry analytics workflow-runs` over the same day produces
+identical content — idempotent per the canonical-writer rules.
+
+```
+summary_date_unix_secs   i64                unix seconds at UTC midnight of the day being summarized
+manifest_id              string             kebab-case manifest id
+run_count                i64                total fires that day
+succeeded_count          i64                fires with status = "succeeded"
+failed_count             i64                fires with any non-succeeded terminal status
+avg_duration_ms          f64    nullable    mean duration_ms across rows that have one; null when only running/start rows
+last_run_at_unix_secs    i64                max(triggered_at_unix_secs) for the manifest that day
+```
+
+**CLI.** `scry analytics workflow-runs [--day yesterday|today|YYYY-MM-DD]`. The daily-analytics manifest passes no `--day` argument so the default `yesterday` applies.
