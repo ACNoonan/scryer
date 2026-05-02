@@ -17,6 +17,17 @@
     <array>
         <string>/Users/adamnoonan/Library/Application Support/scryer/bin/scryer-runner</string>
         <string>tick</string>
+        <!--
+            M3.6: skip manifests with their own dedicated per-manifest
+            plist. Both plists share the runner's state file, so the
+            sensor evaluator alone almost always avoids double-fires;
+            but the read-state / save-state window is non-zero, and
+            high-cadence manifests would race here. Listing each
+            phase-B manifest by name keeps the multi-manifest tick
+            handling only the low-cadence (phase A) manifests.
+        -->
+        <string>--skip</string>
+        <string>pyth-tape</string>
         <string>--manifests</string>
         <string>/Users/adamnoonan/Library/Application Support/scryer/manifests</string>
         <string>--dataset</string>

@@ -1,0 +1,28 @@
+# M3.6 Phase B proof. Pyth Hermes oracle tape, 60s cadence — exercises
+# the per-manifest tick mode (`scryer-runner tick --only pyth-tape`)
+# rather than the multi-manifest M3.4/M3.5 path. Each high-cadence
+# Phase-B manifest gets its own dedicated launchd plist so per-manifest
+# scheduling rides on launchd's natural skip-if-running behavior; the
+# multi-manifest tick continues to handle the lower-cadence manifests
+# (`kraken-trades`, `geckoterminal-trades`, `redstone-tape`).
+#
+# Soak attribution: legacy plist still loaded with `_source =
+# pyth:hermes:launchd`; this manifest emits `pyth:hermes:runner`.
+
+id = "pyth-tape"
+description = "Pyth Hermes oracle benchmark tape, every 60s. Exercises per-manifest Phase-B tick mode."
+schema_ids = ["pyth.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "pyth", "tape",
+    "--source", "pyth:hermes:runner",
+]
+
+[freshness]
+# 2x cadence — alert if no fresh row inside 120s.
+sla_secs = 120
+
+[workflow]
+sensor = "interval(60s)"

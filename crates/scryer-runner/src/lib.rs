@@ -52,7 +52,7 @@ pub use runtime::{
     ParquetWorkflowRunSink, RealCommandRunner, WorkflowRunSink,
 };
 pub use scryer_sensors::DatasetState;
-pub use state::RunnerState;
+pub use state::{RunnerState, DEFAULT_STATE_DIR_NAME};
 
 /// Inputs to construct an [`Engine`]. The binary populates this from
 /// CLI flags + the dataset-default lookup; tests construct it
@@ -61,9 +61,12 @@ pub use state::RunnerState;
 pub struct EngineOptions {
     pub manifests_dir: PathBuf,
     pub dataset_root: PathBuf,
-    /// Path of the persistent state file. Default:
-    /// `<dataset_root>/.scryer-runner-state.json`.
-    pub state_path: Option<PathBuf>,
+    /// Directory for per-manifest state files. Default:
+    /// `<dataset_root>/.scryer-runner-state/`. M3.6 split state
+    /// into one file per manifest to eliminate the read-modify-write
+    /// race that the multi-manifest tick + per-manifest tick suffered
+    /// from when sharing a single state file.
+    pub state_dir: Option<PathBuf>,
     /// `runner_version` written to every workflow_run row. Set to
     /// the scryer build identifier (e.g. `"scryer 0.2.0+abc1234"`).
     pub runner_version: String,
@@ -72,10 +75,47 @@ pub struct EngineOptions {
 }
 
 impl EngineOptions {
-    fn resolved_state_path(&self) -> PathBuf {
-        self.state_path
+    fn resolved_state_dir(&self) -> PathBuf {
+        self.state_dir
             .clone()
-            .unwrap_or_else(|| self.dataset_root.join(".scryer-runner-state.json"))
+            .unwrap_or_else(|| self.dataset_root.join(DEFAULT_STATE_DIR_NAME))
+    }
+
+    fn legacy_state_path(&self) -> PathBuf {
+        // Pre-M3.6 single-file state lived next to the dataset root.
+        // Migrated to per-manifest files on first load.
+        self.dataset_root.join(".scryer-runner-state.json")
+    }
+}
+
+/// Filter applied at the start of [`Engine::tick`]. Default is "all
+/// manifests"; `only` narrows to a single id; `skip` excludes any
+/// listed id. `only` wins over `skip` when both are set.
+///
+/// Borrows so the binary can build it from CLI args without cloning.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TickFilter<'a> {
+    pub only: Option<&'a str>,
+    pub skip: &'a [String],
+}
+
+impl<'a> TickFilter<'a> {
+    pub fn only(id: &'a str) -> Self {
+        Self {
+            only: Some(id),
+            skip: &[],
+        }
+    }
+
+    pub fn skip(skip: &'a [String]) -> Self {
+        Self { only: None, skip }
+    }
+
+    fn includes(&self, id: &str) -> bool {
+        if let Some(target) = self.only {
+            return id == target;
+        }
+        !self.skip.iter().any(|s| s == id)
     }
 }
 
@@ -92,13 +132,18 @@ pub struct TickResult {
     /// `internal.scryer.workflow_run.v2` row. Does not abort the
     /// tick — other manifests still fire.
     pub error_writing_row: Option<String>,
+    /// Diagnostic surfaced when the engine could not persist the
+    /// per-manifest state file recording this fire's `triggered_at`.
+    /// Does not abort the tick. The next tick will re-evaluate the
+    /// sensor with stale `prev_fire`, which may cause one extra
+    /// fire — preferable to losing the row entirely.
+    pub error_writing_state: Option<String>,
 }
 
 #[derive(Debug)]
 pub struct Engine {
     manifests: Vec<Manifest>,
     state: RunnerState,
-    state_path: PathBuf,
     dataset_root: PathBuf,
     runner_version: String,
     runner_host: String,
@@ -106,17 +151,20 @@ pub struct Engine {
 
 impl Engine {
     /// Discover, parse, validate every `*.toml` under
-    /// `opts.manifests_dir` and load the persistent runner state.
-    /// Manifest-id uniqueness is enforced upstream by the parser
-    /// (`id == file_stem`), so two distinct files cannot share an id.
+    /// `opts.manifests_dir` and prepare the per-manifest state
+    /// directory. Manifest-id uniqueness is enforced upstream by the
+    /// parser (`id == file_stem`), so two distinct files cannot share
+    /// an id. Migrates any pre-M3.6 single-file state into the new
+    /// directory layout on first load.
     pub fn load(opts: EngineOptions) -> Result<Self, EngineError> {
         let manifests = discover_manifests(&opts.manifests_dir)?;
-        let state_path = opts.resolved_state_path();
-        let state = RunnerState::load(&state_path)?;
+        let state_dir = opts.resolved_state_dir();
+        let legacy_state_path = opts.legacy_state_path();
+        let state = RunnerState::new(state_dir);
+        state.migrate_legacy_if_needed(&legacy_state_path)?;
         Ok(Self {
             manifests,
             state,
-            state_path,
             dataset_root: opts.dataset_root,
             runner_version: opts.runner_version,
             runner_host: opts.runner_host,
@@ -131,8 +179,8 @@ impl Engine {
         &self.state
     }
 
-    pub fn state_path(&self) -> &Path {
-        &self.state_path
+    pub fn state_dir(&self) -> &Path {
+        self.state.state_dir()
     }
 
     /// Validate startup invariants without firing anything. Returns a
@@ -146,13 +194,12 @@ impl Engine {
                 self.dataset_root.display(),
             ));
         }
-        if let Some(parent) = self.state_path.parent() {
-            if !parent.exists() {
-                out.push(format!(
-                    "state-file parent `{}` does not exist; runner will create it on first save",
-                    parent.display(),
-                ));
-            }
+        let state_dir = self.state.state_dir();
+        if !state_dir.exists() {
+            out.push(format!(
+                "state directory `{}` does not exist; runner will create it on first fire",
+                state_dir.display(),
+            ));
         }
         out
     }
@@ -160,20 +207,51 @@ impl Engine {
     /// Run one full tick: evaluate every manifest's sensor, fire the
     /// `Fire` decisions, persist checkpoint rows, save state. Returns
     /// per-manifest results in manifest-id order.
+    ///
+    /// `filter` controls which manifests this tick evaluates:
+    ///
+    /// - `TickFilter::default()` evaluates every loaded manifest
+    ///   (the multi-manifest M3.4/M3.5 path).
+    /// - `TickFilter::only(id)` evaluates only the matching manifest
+    ///   (the M3.6 Phase B path: each high-cadence manifest gets its
+    ///   own dedicated launchd plist firing
+    ///   `scryer-runner tick --only <id>` so per-manifest scheduling
+    ///   rides on launchd's natural skip-if-running). When the id
+    ///   doesn't match any loaded manifest, returns
+    ///   `UnknownManifestId` rather than silently no-op'ing.
+    /// - `TickFilter { skip: [...] }` evaluates every manifest
+    ///   *except* those listed. The shared multi-manifest plist uses
+    ///   this to exclude manifests that have their own dedicated
+    ///   plist, avoiding the read-state / save-state race window
+    ///   that would otherwise produce occasional double-fires.
+    ///
+    /// `only` and `skip` may both be set; `only` wins when present.
     pub fn tick<C: CommandRunner + ?Sized, S: DatasetState + ?Sized, W: WorkflowRunSink + ?Sized>(
         &mut self,
         now_unix_secs: i64,
+        filter: TickFilter<'_>,
         runner: &C,
         oracle: &S,
         sink: &W,
     ) -> Result<Vec<TickResult>, EngineError> {
-        let manifest_ids: Vec<String> = self.manifests.iter().map(|m| m.id.clone()).collect();
+        if let Some(id) = filter.only {
+            if !self.manifests.iter().any(|m| m.id == id) {
+                return Err(EngineError::UnknownManifestId {
+                    id: id.to_owned(),
+                });
+            }
+        }
+        let manifest_ids: Vec<String> = self
+            .manifests
+            .iter()
+            .map(|m| m.id.clone())
+            .filter(|id| filter.includes(id))
+            .collect();
         let mut results = Vec::with_capacity(manifest_ids.len());
         for id in manifest_ids {
             let res = self.evaluate_and_fire(&id, now_unix_secs, runner, oracle, sink)?;
             results.push(res);
         }
-        self.state.save(&self.state_path)?;
         Ok(results)
     }
 
@@ -202,7 +280,6 @@ impl Engine {
             runner,
             sink,
         );
-        self.state.save(&self.state_path)?;
         Ok(result)
     }
 
@@ -256,6 +333,7 @@ impl Engine {
                 run_id: None,
                 command_outcome: None,
                 error_writing_row: None,
+                error_writing_state: None,
             });
         };
         let prev_fire = self.state.last_fire(&manifest.id, /* step_index */ 0);
@@ -273,6 +351,7 @@ impl Engine {
                 run_id: None,
                 command_outcome: None,
                 error_writing_row: None,
+                error_writing_state: None,
             }),
         }
     }
@@ -352,9 +431,14 @@ impl Engine {
         let error_writing_row = sink.write_row(&row).err();
 
         // Record the fire regardless of sink outcome: the spawn
-        // happened; rerunning would cause double-fetches. The row
-        // is the audit log; the state file is the suppression gate.
-        self.state.record_fire(&manifest.id, 0, triggered_at_unix_secs);
+        // happened; rerunning would cause double-fetches. The
+        // workflow_run row is the audit log; the per-manifest state
+        // file is the suppression gate.
+        let error_writing_state = self
+            .state
+            .write_last_fire(&manifest.id, 0, triggered_at_unix_secs)
+            .err()
+            .map(|e| e.to_string());
 
         TickResult {
             manifest_id: manifest.id.clone(),
@@ -362,9 +446,9 @@ impl Engine {
             run_id: Some(run_id),
             command_outcome: Some(outcome),
             error_writing_row,
+            error_writing_state,
         }
     }
-
 }
 
 /// Plan that the binary's `dry-run` subcommand prints.
@@ -512,7 +596,7 @@ mod tests {
         EngineOptions {
             manifests_dir: manifests.to_path_buf(),
             dataset_root: dir.join("dataset"),
-            state_path: Some(dir.join("runner-state.json")),
+            state_dir: Some(dir.join("runner-state")),
             runner_version: "scryer-test".to_string(),
             runner_host: "test-host".to_string(),
         }
@@ -573,7 +657,7 @@ sensor = "interval({secs}s)"
         let oracle = StubOracle::empty();
         let sink = CapturingSink::new();
 
-        let results = engine.tick(1_777_400_000, &runner, &oracle, &sink).unwrap();
+        let results = engine.tick(1_777_400_000, TickFilter::default(), &runner, &oracle, &sink).unwrap();
         assert_eq!(results.len(), 1);
         let r = &results[0];
         assert_eq!(r.manifest_id, "kraken-trades");
@@ -593,8 +677,9 @@ sensor = "interval({secs}s)"
         assert_eq!(rows[0].runner_version, "scryer-test");
         assert_eq!(rows[0].runner_host, "test-host");
 
-        // State file persisted across save.
-        let reloaded = RunnerState::load(&dir.path().join("runner-state.json")).unwrap();
+        // Per-manifest state file persists across reloads — open a
+        // fresh RunnerState pointed at the same dir and confirm.
+        let reloaded = RunnerState::new(dir.path().join("runner-state"));
         assert_eq!(reloaded.last_fire("kraken-trades", 0), Some(1_777_400_000));
     }
 
@@ -613,9 +698,9 @@ sensor = "interval({secs}s)"
         let oracle = StubOracle::empty();
         let sink = CapturingSink::new();
 
-        let _first = engine.tick(1_777_400_000, &runner, &oracle, &sink).unwrap();
+        let _first = engine.tick(1_777_400_000, TickFilter::default(), &runner, &oracle, &sink).unwrap();
         // Second tick 30 minutes later — interval is 1h, should hold.
-        let second = engine.tick(1_777_401_800, &runner, &oracle, &sink).unwrap();
+        let second = engine.tick(1_777_401_800, TickFilter::default(), &runner, &oracle, &sink).unwrap();
         assert!(matches!(second[0].decision, Decision::Hold(_)));
         assert_eq!(runner.invocations.borrow().len(), 1, "no second spawn");
         assert_eq!(sink.rows.borrow().len(), 1, "no second row");
@@ -636,12 +721,102 @@ sensor = "interval({secs}s)"
         let oracle = StubOracle::empty();
         let sink = CapturingSink::new();
 
-        engine.tick(1_777_400_000, &runner, &oracle, &sink).unwrap();
-        engine.tick(1_777_400_059, &runner, &oracle, &sink).unwrap();
-        engine.tick(1_777_400_120, &runner, &oracle, &sink).unwrap();
+        engine.tick(1_777_400_000, TickFilter::default(), &runner, &oracle, &sink).unwrap();
+        engine.tick(1_777_400_059, TickFilter::default(), &runner, &oracle, &sink).unwrap();
+        engine.tick(1_777_400_120, TickFilter::default(), &runner, &oracle, &sink).unwrap();
         // Two fires expected: first tick + third tick (60s elapsed).
         assert_eq!(runner.invocations.borrow().len(), 2);
         assert_eq!(sink.rows.borrow().len(), 2);
+    }
+
+    #[test]
+    fn tick_filter_evaluates_only_the_matching_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        write_manifest(&manifests, "alpha.toml", &interval_manifest("alpha", 60));
+        write_manifest(&manifests, "beta.toml", &interval_manifest("beta", 60));
+        let mut engine = Engine::load(make_opts(dir.path(), &manifests)).unwrap();
+        let runner = ScriptedRunner::new(ok_outcome());
+        let oracle = StubOracle::empty();
+        let sink = CapturingSink::new();
+
+        let results = engine
+            .tick(1_777_400_000, TickFilter::only("alpha"), &runner, &oracle, &sink)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].manifest_id, "alpha");
+        assert_eq!(runner.invocations.borrow().len(), 1);
+        assert_eq!(sink.rows.borrow().len(), 1);
+        assert!(engine.state().last_fire("alpha", 0).is_some());
+        assert!(engine.state().last_fire("beta", 0).is_none());
+    }
+
+    #[test]
+    fn tick_filter_with_unknown_only_errors_loudly() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        write_manifest(&manifests, "alpha.toml", &interval_manifest("alpha", 60));
+        let mut engine = Engine::load(make_opts(dir.path(), &manifests)).unwrap();
+        let runner = ScriptedRunner::new(ok_outcome());
+        let oracle = StubOracle::empty();
+        let sink = CapturingSink::new();
+
+        let err = engine
+            .tick(
+                1_777_400_000,
+                TickFilter::only("not-a-manifest"),
+                &runner,
+                &oracle,
+                &sink,
+            )
+            .unwrap_err();
+        assert!(matches!(err, EngineError::UnknownManifestId { .. }));
+    }
+
+    #[test]
+    fn tick_skip_excludes_listed_manifests_but_evaluates_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        write_manifest(&manifests, "alpha.toml", &interval_manifest("alpha", 60));
+        write_manifest(&manifests, "beta.toml", &interval_manifest("beta", 60));
+        write_manifest(&manifests, "gamma.toml", &interval_manifest("gamma", 60));
+        let mut engine = Engine::load(make_opts(dir.path(), &manifests)).unwrap();
+        let runner = ScriptedRunner::new(ok_outcome());
+        let oracle = StubOracle::empty();
+        let sink = CapturingSink::new();
+        let skip = vec!["beta".to_string()];
+
+        let results = engine
+            .tick(1_777_400_000, TickFilter::skip(&skip), &runner, &oracle, &sink)
+            .unwrap();
+        let fired_ids: Vec<_> = results.iter().map(|r| r.manifest_id.clone()).collect();
+        assert_eq!(fired_ids, vec!["alpha".to_string(), "gamma".to_string()]);
+        assert!(engine.state().last_fire("beta", 0).is_none());
+    }
+
+    #[test]
+    fn tick_skip_with_unknown_id_is_a_no_op() {
+        // `--skip nonexistent` should not error: skip lists are
+        // declarative ("don't fire any of these if they exist"), so
+        // a typo or already-removed manifest just no-op's.
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        write_manifest(&manifests, "alpha.toml", &interval_manifest("alpha", 60));
+        let mut engine = Engine::load(make_opts(dir.path(), &manifests)).unwrap();
+        let runner = ScriptedRunner::new(ok_outcome());
+        let oracle = StubOracle::empty();
+        let sink = CapturingSink::new();
+        let skip = vec!["never-existed".to_string()];
+
+        let results = engine
+            .tick(1_777_400_000, TickFilter::skip(&skip), &runner, &oracle, &sink)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].manifest_id, "alpha");
     }
 
     #[test]
@@ -722,7 +897,7 @@ sensor = "interval({secs}s)"
         let runner = ScriptedRunner::new(outcome);
         let oracle = StubOracle::empty();
         let sink = CapturingSink::new();
-        engine.tick(1_777_400_000, &runner, &oracle, &sink).unwrap();
+        engine.tick(1_777_400_000, TickFilter::default(), &runner, &oracle, &sink).unwrap();
         let rows = sink.rows.borrow();
         assert_eq!(rows[0].status, "failed");
         assert_eq!(rows[0].exit_code, Some(2));
@@ -748,7 +923,7 @@ sensor = "interval({secs}s)"
         let runner = ScriptedRunner::new(ok_outcome());
         let oracle = StubOracle::empty();
         let sink = CapturingSink::failing("disk full");
-        let results = engine.tick(1_777_400_000, &runner, &oracle, &sink).unwrap();
+        let results = engine.tick(1_777_400_000, TickFilter::default(), &runner, &oracle, &sink).unwrap();
         assert_eq!(results[0].error_writing_row.as_deref(), Some("disk full"));
         // Fire still recorded.
         assert_eq!(

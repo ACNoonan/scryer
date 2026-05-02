@@ -35,7 +35,8 @@ JSON-RPC proxy under `KeepAlive`.
 | `com.adamnoonan.scryer.geckoterminal-trades.plist` | every 900s (15m) | nothing (REST direct) |
 | `com.adamnoonan.scryer.v5-tape.plist` | every 60s | proxy + Helius (parseTransactions) |
 | `com.adamnoonan.scryer.freshness-watchdog.plist` | every 900s (15m) | nothing (reads dataset mtimes; phase 70-A) |
-| `com.adamnoonan.scryer.runner-tick.plist` | every 60s | `~/Library/Application Support/scryer/{bin/scryer-runner,manifests}` (M3.4 soak; multi-manifest tick — see `docs/m3_4_soak_protocol.md`). Currently drives `kraken-trades` (M3.4), `geckoterminal-trades`, and `redstone-tape` (M3.5 Phase A); the latter two run in parallel-soak with their legacy plists. |
+| `com.adamnoonan.scryer.runner-tick.plist` | every 60s | `~/Library/Application Support/scryer/{bin/scryer-runner,manifests}` (M3.4 soak; multi-manifest tick — see `docs/m3_4_soak_protocol.md`). Currently drives `kraken-trades` (M3.4), `geckoterminal-trades`, and `redstone-tape` (M3.5 Phase A); the latter two run in parallel-soak with their legacy plists. Passes `--skip pyth-tape` so the per-manifest plist below owns it exclusively. |
+| `com.adamnoonan.scryer.runner-pyth-tape.plist` | every 60s | `~/Library/Application Support/scryer/{bin/scryer-runner,manifests}`. M3.6 Phase-B per-manifest plist for `pyth-tape` — `tick --only pyth-tape` so launchd's natural skip-if-running provides per-manifest concurrency control. Pattern for other 60s-cadence Phase-B manifests as they migrate. |
 
 ## Runtime layout
 

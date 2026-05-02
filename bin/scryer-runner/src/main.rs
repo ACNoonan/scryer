@@ -20,7 +20,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use scryer_runner::{
     unix_secs_now, Engine, EngineOptions, FsDatasetState, ParquetWorkflowRunSink,
-    RealCommandRunner,
+    RealCommandRunner, TickFilter,
 };
 use scryer_sensors::Decision;
 
@@ -41,8 +41,11 @@ struct Cli {
     #[arg(long, global = true)]
     dataset: Option<PathBuf>,
 
-    /// Override the runner state-file path. Default:
-    /// `<dataset>/.scryer-runner-state.json`.
+    /// Override the runner state directory. Default:
+    /// `<dataset>/.scryer-runner-state/`. Each manifest gets its own
+    /// `<id>.json` under this directory; the legacy single-file
+    /// state at `<dataset>/.scryer-runner-state.json` is migrated on
+    /// first load and then deleted.
     #[arg(long, global = true)]
     state: Option<PathBuf>,
 
@@ -56,8 +59,26 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Single evaluation pass over every manifest.
-    Tick,
+    /// Single evaluation pass. Without `--only`, every manifest is
+    /// evaluated; with `--only <id>`, only that one. The latter is
+    /// the M3.6 Phase B path: each high-cadence manifest gets its
+    /// own dedicated launchd plist firing
+    /// `scryer-runner tick --only <id>`, so per-manifest scheduling
+    /// rides on launchd's natural skip-if-running rather than
+    /// serializing through a multi-manifest tick.
+    Tick {
+        /// Manifest id to evaluate exclusively. Required for
+        /// per-manifest plists; omit for the multi-manifest tick.
+        #[arg(long)]
+        only: Option<String>,
+        /// Manifest id to exclude from this tick. Repeatable. The
+        /// shared multi-manifest plist passes one `--skip` per
+        /// manifest that has its own dedicated plist, so the two
+        /// plists don't both try to fire the same manifest from a
+        /// shared state file.
+        #[arg(long)]
+        skip: Vec<String>,
+    },
     /// Validate manifests + state-file path; exit non-zero if any fail.
     Check,
     /// Force-fire one manifest, bypassing sensor evaluation.
@@ -81,7 +102,7 @@ fn main() -> Result<()> {
     let opts = EngineOptions {
         manifests_dir: cli.manifests.clone(),
         dataset_root: dataset.clone(),
-        state_path: cli.state.clone(),
+        state_dir: cli.state.clone(),
         runner_version: cli.runner_version.clone(),
         runner_host: hostname_or_unknown(),
     };
@@ -89,7 +110,7 @@ fn main() -> Result<()> {
         Engine::load(opts).with_context(|| format!("loading engine for {}", cli.manifests.display()))?;
     match cli.cmd {
         Cmd::Check => run_check(&engine),
-        Cmd::Tick => run_tick(&mut engine, &dataset),
+        Cmd::Tick { only, skip } => run_tick(&mut engine, &dataset, only.as_deref(), &skip),
         Cmd::Once { id } => run_once(&mut engine, &id, &dataset),
         Cmd::DryRun { id } => run_dry_run(&engine, &id),
     }
@@ -97,9 +118,9 @@ fn main() -> Result<()> {
 
 fn run_check(engine: &Engine) -> Result<()> {
     println!(
-        "scryer-runner check: {} manifest(s) loaded; state file at {}",
+        "scryer-runner check: {} manifest(s) loaded; state directory at {}",
         engine.manifests().len(),
-        engine.state_path().display(),
+        engine.state_dir().display(),
     );
     let warnings = engine.check();
     for w in &warnings {
@@ -109,14 +130,23 @@ fn run_check(engine: &Engine) -> Result<()> {
     Ok(())
 }
 
-fn run_tick(engine: &mut Engine, dataset: &Path) -> Result<()> {
+fn run_tick(
+    engine: &mut Engine,
+    dataset: &Path,
+    only: Option<&str>,
+    skip: &[String],
+) -> Result<()> {
     let runner = RealCommandRunner::new(dataset.to_path_buf());
     let oracle = FsDatasetState::new(dataset.to_path_buf());
     let sink = ParquetWorkflowRunSink::new(dataset.to_path_buf());
+    let filter = TickFilter { only, skip };
     let now = unix_secs_now();
     let results = engine
-        .tick(now, &runner, &oracle, &sink)
-        .context("tick failed")?;
+        .tick(now, filter, &runner, &oracle, &sink)
+        .with_context(|| match only {
+            Some(id) => format!("tick --only {id} failed"),
+            None => "tick failed".to_string(),
+        })?;
     let mut fired = 0usize;
     for r in &results {
         match &r.decision {
