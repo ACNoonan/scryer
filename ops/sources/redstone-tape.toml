@@ -1,0 +1,30 @@
+# M3.5 Phase A. Mirror of com.adamnoonan.scryer.redstone-tape.plist at
+# runner attribution. RedStone public Live feed for the canonical
+# scryer-fetch-redstone symbol set (SPY/QQQ/MSTR by default), polled
+# every 600s. `--label cron-10m` is preserved unchanged so existing
+# `poll_label = 'cron-10m'` queries on the redstone.v1 partition keep
+# working — the `_source` field carries the launchd-vs-runner
+# distinction, not `poll_label`.
+#
+# Soak attribution: legacy plist still loaded with `_source =
+# redstone:gateway:launchd`; this manifest emits
+# `redstone:gateway:runner`.
+
+id = "redstone-tape"
+description = "RedStone gateway tape poll for the canonical SPY/QQQ/MSTR symbol set, every 10 minutes."
+schema_ids = ["redstone.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "redstone", "tape",
+    "--label", "cron-10m",
+    "--source", "redstone:gateway:runner",
+]
+
+[freshness]
+# 2x cadence — alert if no fresh row inside 20 minutes.
+sla_secs = 1200
+
+[workflow]
+sensor = "interval(600s)"

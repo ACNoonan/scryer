@@ -1,0 +1,29 @@
+# M3.5 Phase A. Mirror of com.adamnoonan.scryer.geckoterminal-trades.plist
+# at runner attribution. Free-tier GeckoTerminal Trades endpoint
+# returns ~300 latest pool trades; 900s cadence gives ~4x margin under
+# the ~250 trades/hr observed coverage. Default pool is Raydium-v4
+# SOL/USDC per the scry CLI default. Idempotent — re-runs within the
+# coverage window dedup cleanly on tx_hash.
+#
+# Soak attribution: legacy plist still loaded with `_source =
+# geckoterminal:trades:launchd`; this manifest emits
+# `geckoterminal:trades:runner`. Operator unloads the legacy plist
+# after parallel-soak per `docs/m3_4_soak_protocol.md`.
+
+id = "geckoterminal-trades"
+description = "GeckoTerminal pool-trades poll, default Raydium-v4 SOL/USDC, every 15 minutes."
+schema_ids = ["geckoterminal.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "dexagg", "gt-trades",
+    "--source", "geckoterminal:trades:runner",
+]
+
+[freshness]
+# 2x cadence — alert if no fresh row inside 30 minutes.
+sla_secs = 1800
+
+[workflow]
+sensor = "interval(900s)"

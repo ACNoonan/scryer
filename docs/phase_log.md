@@ -101,6 +101,7 @@ Last compacted: 2026-05-02.
 | 90 | 2026-05-02 | runner binary | New `scryer-runner` crate + `bin/scryer-runner` binary (`tick`/`check`/`once`/`dry-run`). Composes manifest parser + sensor evaluator + `internal.scryer.workflow_run.v2` checkpoint + `scryer-store` writer; persistent JSON state file. v0 launchd-driven (single-shot tick). |
 | 91 | 2026-05-02 | M3.4 soak prep | Code-shipped, data-pending. `kraken-trades.toml` source label flipped to `kraken:Trades:runner` for soak attribution; `com.adamnoonan.scryer.runner-tick.plist` lands; integration tests exercise `RealCommandRunner` + `ParquetWorkflowRunSink` round-trip; `docs/m3_4_soak_protocol.md` documents pass/fail criteria for the operator-driven 24h+24h soak. |
 | 92 | 2026-05-02 | M3.4 closed | Done — code + canonical data. First live runner fire wrote 13,381 SOLUSD trades to `kraken/trades/v1/pair=SOLUSD/year=2026/month=05/day=0[12].parquet` and one `internal.scryer.workflow_run.v2` row (succeeded/published, 16s). `com.adamnoonan.scryer.runner-tick` plist loaded; ticks autonomously, sensor HOLDs within interval. |
+| 93 | 2026-05-02 | M3.5 Phase A | Two manifests added (`geckoterminal-trades.toml`, `redstone-tape.toml`) and staged. Runner-tick auto-discovered both on its next launchd-spawned tick and fired each (`FirstRun` reason, succeeded/published). Legacy `:launchd`-attributed plists remain loaded for parallel-soak; operator retires them after the soak window. Phase B (60s-cadence + proxy-routed plists) deferred to M3.6. |
 
 ## Phase Ledger
 
