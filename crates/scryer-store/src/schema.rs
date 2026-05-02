@@ -23,7 +23,8 @@ use arrow_array::RecordBatch;
 use arrow_schema::ArrowError;
 use scryer_schema::{
     backed, backed_nav_strikes, cboe_indices, cex_perp_funding_multi, cex_stock_perp_ohlcv, cex_stock_perp_tape, chainlink_data_streams, cme_intraday_1m, deribit_iv, dex_xstock_swaps, drift_liquidation, earnings, edgar_8k, evm_liquidation, fluid_vault_config, fred_macro, fred_macro_extended, geckoterminal, geckoterminal_ohlcv,
-    jito_bundles, jito_tip_floor, jupiter_lend_liquidation, kamino_liquidation, kamino_obligation,
+    jito_bundle_tape, jito_bundles, jito_tip_floor, jupiter_lend_liquidation,
+    kamino_liquidation, kamino_obligation,
     kamino_obligation_position, kamino_reserve, kamino_scope, kraken_funding, loopscale_loan,
     loopscale_loan_collateral, mango_v4_liquidation, mango_v4_oracle_config, marginfi_reserve,
     nasdaq_halts,
@@ -386,6 +387,25 @@ impl DatasetSchema for jito_tip_floor::v1::Tick {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         jito_tip_floor::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for jito_bundle_tape::v1::BundleLanding {
+    const DATA_TYPE: &'static str = "bundle_tape";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.block_time
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        jito_bundle_tape::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        jito_bundle_tape::v1::from_record_batch(batch)
     }
 }
 

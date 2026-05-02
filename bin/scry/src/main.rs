@@ -32,6 +32,7 @@ mod evm_cmd;
 mod fred_cmd;
 mod freshness_cmd;
 mod import_cmd;
+mod jito_bundle_tape_cmd;
 mod jito_cmd;
 mod jito_tip_floor_cmd;
 mod kamino_obligations_cmd;
@@ -554,6 +555,13 @@ enum SolanaTarget {
     /// queries `bundles/transaction/{sig}`, and writes one
     /// `jito_bundles.v1` row per signature.
     JitoBundles(jito_cmd::JitoBundlesArgs),
+    /// Per-slot block-walk for `jito_bundle_tape.v1` — emits zero-or-
+    /// more bundle-landing rows per slot via the on-chain heuristic
+    /// (lead-tip-paying tx + maximal preceding non-vote run, capped at
+    /// MAX_BUNDLE_SIZE=5). Wishlist sub-item 51a; methodology phases
+    /// 80 + 81 in `methodology_log.md`. Schedule via launchd
+    /// `StartInterval` paired with `--latest-slots` for forward-poll.
+    JitoBundleTape(jito_bundle_tape_cmd::JitoBundleTapeArgs),
     /// Per-slot block-walk priority-fee + Jito-tip percentile panel.
     /// On-demand window walker: emits one
     /// `solana_priority_fees.v1::Stats` row per non-skipped slot in
@@ -645,6 +653,7 @@ async fn main() -> Result<()> {
             SolanaTarget::DexXstockSwaps(a) => dex_xstock_swaps_cmd::run_dex_xstock_swaps(a).await,
             SolanaTarget::PythPublisher(a) => pyth_publisher_cmd::run_pyth_publisher(a).await,
             SolanaTarget::JitoBundles(a) => jito_cmd::run_jito_bundles(a).await,
+            SolanaTarget::JitoBundleTape(a) => jito_bundle_tape_cmd::run_jito_bundle_tape(a).await,
             SolanaTarget::JitoTipFloor(a) => jito_tip_floor_cmd::run_jito_tip_floor(a).await,
             SolanaTarget::PriorityFees(a) => priority_fees_cmd::run_priority_fees(a).await,
             SolanaTarget::XstockHolders(a) => xstock_holders_cmd::run_xstock_holders(a).await,

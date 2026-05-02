@@ -334,7 +334,9 @@ pub fn percentile(sorted: &[i64], p: f64) -> i64 {
 }
 
 /// Extract the union of static + ALT-loaded account keys for one tx.
-fn collect_account_keys(
+/// Exposed at `pub(crate)` so the sibling `jito_bundle_tape` fetcher
+/// (phase 81) can reuse the same getBlock-tx-walking primitive.
+pub(crate) fn collect_account_keys(
     message: Option<&serde_json::Value>,
     meta_v: Option<&serde_json::Value>,
 ) -> Vec<String> {

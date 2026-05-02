@@ -1354,9 +1354,20 @@ Pre-capture history is whatever the proxy's RPC providers retain
 (public-tier Solana RPC retention is ~24h-7d depending on provider;
 historical backfill beyond that needs a warehoused-block source).
 
-**CLI.** `scry solana jito-bundle-tape watch [--start DATE] [--end DATE]
-[--proxy-url URL] [--dataset DIR]` — surface pinned in the
-methodology log; concrete CLI lands with the fetcher phase.
+**CLI.** `scry solana jito-bundle-tape
+{--start-slot N --end-slot N | --around-slot N [--window-slots 150] | --latest-slots N}
+[--proxy-url URL] [--jito-base-url URL] [--source LABEL] [--dataset DIR]`.
+Flat (no inner subcommand), matching the `priority-fees` idiom.
+Forward-poll via launchd `StartInterval` paired with `--latest-slots N`;
+on-demand event-window walks via `--around-slot`.
+
+**Throughput caveat.** Each getBlock call returns a multi-MB body
+(`transactionDetails: full` is required for tip-balance detection).
+At a typical proxy throughput of ~1-3 getBlock/s, a 60s StartInterval
+cannot fully keep up with Solana's ~150 slots/min cadence — partial
+coverage is the v1 expectation. A long-lived `KeepAlive` daemon with
+internal pacing is the v2 shape if full forward-poll coverage is
+required.
 
 ---
 

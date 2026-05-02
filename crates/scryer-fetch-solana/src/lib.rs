@@ -23,6 +23,7 @@ pub mod error;
 pub mod fluid_vault_configs;
 pub mod kamino_reserves;
 pub mod get_transactions;
+pub mod jito_bundle_tape;
 pub mod jupiter_lend_liquidations;
 pub mod kamino_liquidations;
 pub mod kamino_obligations;
