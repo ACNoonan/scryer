@@ -107,6 +107,14 @@ pub mod venue {
     /// (`soothsayer_v5`, `soothsayer_v6`, ...) so iterations can run
     /// in parallel without colliding.
     pub const SOOTHSAYER_V5: &str = "soothsayer_v5";
+
+    /// First v2-namespace venue: domain-plus-source for the runner
+    /// checkpoint schema. The dot-form mirrors the canonical schema
+    /// id `internal.scryer.workflow_run.v2` so the dataset path is
+    /// `dataset/internal.scryer/workflow_run/v2/...`. Other v2
+    /// schemas will follow this `<domain>.<source>` venue convention
+    /// once Wave-1 migrations land (M2.3).
+    pub const INTERNAL_SCRYER: &str = "internal.scryer";
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

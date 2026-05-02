@@ -29,7 +29,7 @@ use scryer_schema::{
     loopscale_loan_collateral, mango_v4_liquidation, mango_v4_oracle_config, marginfi_reserve,
     nasdaq_halts,
     oracle_context, pool_snapshot, pyth, pyth_poster_post, pyth_poster_tx, pyth_publisher,
-    raydium_pool_metadata, redstone, solana_priority_fees, swap, trade, v5_tape, xstock_holders, yahoo, yahoo_corp_actions, FromArrowError,
+    raydium_pool_metadata, redstone, solana_priority_fees, swap, trade, v5_tape, workflow_run, xstock_holders, yahoo, yahoo_corp_actions, FromArrowError,
 };
 
 /// Time granularity of a dataset's partitioning. Each schema picks
@@ -1095,5 +1095,33 @@ impl DatasetSchema for pyth_poster_tx::v1::TxRecord {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         pyth_poster_tx::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for workflow_run::v2::WorkflowRun {
+    /// `dataset/internal.scryer/workflow_run/v2/year=Y/month=M/day=D.parquet`.
+    /// First v2-namespace schema; partition layout follows the
+    /// `<domain>.<source>` venue convention locked in
+    /// `crates/scryer-store/src/lib.rs::venue::INTERNAL_SCRYER`.
+    const DATA_TYPE: &'static str = "workflow_run";
+    const SCHEMA_MAJOR: u32 = 2;
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        // Partition by trigger time, not finish time: it's monotonic
+        // across retries of the same attempt and answers the
+        // operator's "when was this work scheduled" question without
+        // post-hoc joins.
+        self.triggered_at_unix_secs
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        workflow_run::v2::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        workflow_run::v2::from_record_batch(batch)
     }
 }

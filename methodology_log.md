@@ -47,6 +47,7 @@ Compact index of locked architectural decisions. It keeps operational invariants
 | Schema namespace taxonomy | 2026-05-01 | v2 names use `<domain>.<source>.<record_type>.v<n>` with closed domain enum. |
 | Workflow runner | 2026-05-01 | Manifest-declared sensor workflows checkpoint to parquet. |
 | Source manifest format | 2026-05-02 | One `ops/sources/<id>.toml` per source-fetcher cluster, locked key set, optional workflow block. |
+| v2 dataset path layout | 2026-05-02 | v2 schemas live at `dataset/<domain>.<source>/<record_type>/v<n>/...`; `<domain>.<source>` is the venue arg to `Dataset::write`. |
 
 ## Core Architecture
 
@@ -214,3 +215,10 @@ Anti-rules:
 ## Append Rule
 
 Add new decisions as short dated sections below this line. Keep old detail out of this file unless it changes an operational invariant.
+
+### v2 Dataset Path Layout — 2026-05-02
+
+- v2 schemas use the path layout `dataset/<domain>.<source>/<record_type>/v<n>/year=Y/month=M/day=D.parquet`.
+- The dot-form venue (`<domain>.<source>`) is the `venue` argument to `scryer_store::Dataset::write` and mirrors the canonical schema id directly.
+- First instance: `internal.scryer.workflow_run.v2` writes to `dataset/internal.scryer/workflow_run/v2/...` via the `INTERNAL_SCRYER` venue constant.
+- Wave-1 v2 migrations follow the same convention; M2.2 (Rust module layout) is independent and still pending.

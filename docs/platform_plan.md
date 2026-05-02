@@ -16,6 +16,7 @@ Production resiliency lens added 2026-05-02: the v0.2 platform should become a d
 - Shipped code: `KNOWN_V1_SCHEMAS` registry in `scryer-schema` and the `scryer-manifest` parser/validator crate (M1.2).
 - Shipped code: `internal.scryer.workflow_run.v2` schema in `crates/scryer-schema/src/workflow_run.rs`, registered in `KNOWN_V2_SCHEMAS` (M3.1). First v2-namespace schema; data-pending until the runner (M3.3) emits its first row.
 - Shipped code: `scryer-sensors` crate (M3.2) — pure evaluator returning structured `Decision`/`FireReason`/`HoldReason` for the four sensor kinds the manifest parser already validates. Runner-blind: callers supply `now`, `prev_fire_at`, and a `DatasetState` oracle.
+- Shipped code: `scryer-runner` library + `scryer-runner` binary (M3.3). v0 is launchd-driven: `scryer-runner tick` is a single evaluation pass over every manifest, dispatching due fires synchronously, writing one `internal.scryer.workflow_run.v2` row per attempt via `scryer-store`, and persisting last-fire state to `<dataset>/.scryer-runner-state.json`. Subprocess invocation passes the dataset root via `SCRYER_DATASET`, sidestepping `--dataset` flag-placement coupling. Retries, timeouts, heartbeats, daemon mode, validation gates, and graceful shutdown remain on the PR.* track.
 - First worked manifest: `ops/sources/kraken-trades.toml` (M1.1, read-only — launchd still drives the fetch; now exercised by the `scryer-manifest` round-trip test).
 - Current source operation: launchd plists + `scry` subcommands.
 - Target source operation: `ops/sources/*.toml` manifests + workflow runner.
@@ -81,7 +82,7 @@ Core production rules:
 | M2.6 | Wave 4 high-volume migrations | pending | M2.5 |
 | M3.1 | `internal.scryer.workflow_run.v2` | done 2026-05-02 — `crates/scryer-schema/src/workflow_run.rs` (code-shipped, data-pending until M3.3) | M2.1 |
 | M3.2 | Sensor primitives | done 2026-05-02 — `crates/scryer-sensors` (pure evaluator + `DatasetState` trait) | none |
-| M3.3 | Runner binary | pending | M1.2, M3.1, M3.2 |
+| M3.3 | Runner binary | done 2026-05-02 — `crates/scryer-runner` + `bin/scryer-runner` (tick/check/once/dry-run; launchd-driven v0) | M1.2, M3.1, M3.2 |
 | M3.4 | First workflow proof + soak | pending | M3.3 |
 | M3.5 | Launchd Phase A migration | pending | M3.4 |
 | M3.6 | Launchd Phase B migration | pending | M3.5 |
@@ -204,3 +205,4 @@ Still open:
 - 2026-05-02: shipped M1.2 (`scryer-manifest` parser/validator crate) and closed M1.3 (`ops/sources/kraken-trades.toml` parses cleanly under the validator). Added `KNOWN_V1_SCHEMAS` registry to `scryer-schema` so v1 schema strings are resolvable from manifests without recreating the list.
 - 2026-05-02: shipped M3.1 (`internal.scryer.workflow_run.v2` schema). First v2-namespace entry in `KNOWN_V2_SCHEMAS`; runner attempt-checkpoint row with closed `status` and `publish_status` vocabularies. Cost/output/publish columns are nullable so the runner can fill them in feature by feature without a schema bump.
 - 2026-05-02: shipped M3.2 (`scryer-sensors` evaluator). Stateless decision function over `(Sensor, now, prev_fire_at, DatasetState)`. Locked the no-data / unknown-state policy: `partitions_aged` fires when no partitions exist (bootstrap-or-broken is the condition this sensor exists to surface); `backfill_complete` holds when the oracle cannot answer (avoids triggering downstream work blindly).
+- 2026-05-02: shipped M3.3 (`scryer-runner` library + binary). Locked v0 operational shape: launchd-driven single-shot `tick` rather than long-running daemon, sequential per-tick fire dispatch, no in-engine retry/timeout/heartbeat. Runner sets `SCRYER_DATASET` env var on spawned processes (manifests don't carry `--dataset` and the parser already rejects it). v2 dataset path locked: `dataset/<domain>.<source>/<record_type>/v<n>/...`, instantiated by `internal.scryer.workflow_run.v2` → `dataset/internal.scryer/workflow_run/v2/year=Y/month=M/day=D.parquet`. Other v2 schemas will follow the same convention as Wave-1 lands.

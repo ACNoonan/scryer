@@ -6606,6 +6606,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "scryer-runner"
+version = "0.1.0"
+dependencies = [
+ "scryer-manifest",
+ "scryer-schema",
+ "scryer-sensors",
+ "scryer-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "scryer-runner-bin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "scryer-runner",
+ "scryer-sensors",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "scryer-schema"
 version = "0.1.0"
 dependencies = [

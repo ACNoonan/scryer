@@ -1,0 +1,24 @@
+[package]
+name = "scryer-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Manifest-driven workflow runner: discover ops/sources, evaluate sensors, dispatch scry, checkpoint to internal.scryer.workflow_run.v2."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+scryer-manifest = { path = "../scryer-manifest" }
+scryer-schema = { path = "../scryer-schema" }
+scryer-sensors = { path = "../scryer-sensors" }
+scryer-store = { path = "../scryer-store" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
