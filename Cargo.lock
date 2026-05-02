@@ -6615,6 +6615,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "scryer-sensors"
+version = "0.1.0"
+dependencies = [
+ "scryer-manifest",
+]
+
+[[package]]
 name = "scryer-store"
 version = "0.1.0"
 dependencies = [

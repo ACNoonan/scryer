@@ -22,6 +22,7 @@ members = [
     "crates/scryer-fetch-xstocks",
     "crates/scryer-manifest",
     "crates/scryer-schema",
+    "crates/scryer-sensors",
     "crates/scryer-store",
     "crates/scryer-portal",
     "crates/scryer-portal-shell",
