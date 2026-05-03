@@ -1,3 +1,13 @@
+# PAUSED 2026-05-03. The `.toml.paused` extension keeps this file out
+# of `*.toml` glob discovery in `scryer-runner` and `scryer deploy`.
+# Resume by renaming back to `.toml` and re-running `scryer deploy`.
+# See wishlist Item 54 for the gating dependency: soothsayer-side
+# methodology is being revisited and the publisher daemon may be
+# redone. Scryer-side schema/fetcher/CLI remain shipped (phase 110)
+# and will work unchanged if the wire format holds; if it changes,
+# this manifest stays paused until the new shape lands as
+# `oracle.soothsayer_v6.band_tape.v3` (or a new venue).
+#
 # Wishlist 54 — `oracle.soothsayer_v6.band_tape.v2` forward poll.
 # Methodology: `methodology_log.md` "Soothsayer Lending-track Band
 # Tape — 2026-05-03". Schema:

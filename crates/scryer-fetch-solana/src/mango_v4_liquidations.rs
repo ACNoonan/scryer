@@ -406,6 +406,7 @@ mod tests {
             transaction_error: None,
             account_data: Vec::new(),
             instructions: vec![ix],
+            logs: vec![],
         }
     }
 

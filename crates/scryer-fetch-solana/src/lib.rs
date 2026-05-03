@@ -35,6 +35,7 @@ pub mod pyth_publisher;
 pub mod loopscale_loans;
 pub mod mango_v4_liquidations;
 pub mod mango_v4_oracle_configs;
+pub mod marginfi_liquidations;
 pub mod marginfi_reserves;
 pub mod parse;
 pub mod parse_transactions;

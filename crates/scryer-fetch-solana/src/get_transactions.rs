@@ -104,6 +104,11 @@ struct MetaInner {
     pre_token_balances: Vec<RpcTokenBalance>,
     #[serde(default, rename = "postTokenBalances")]
     post_token_balances: Vec<RpcTokenBalance>,
+    /// Program log lines (`getTransaction` `meta.logMessages`).
+    /// Anchor-event decoders scrape `Program data: <base64>` lines
+    /// from this field. Empty when the upstream returns no logs.
+    #[serde(default, rename = "logMessages")]
+    log_messages: Vec<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -247,9 +252,15 @@ async fn get_one(
 
 fn convert_to_parsed_tx(r: GetTxResult, signature: String) -> ParsedTx {
     let mut inner_by_parent: HashMap<u32, Vec<HeliusInstruction>> = HashMap::new();
-    let (transaction_error, raw_inner, pre_tb, post_tb) = match r.meta {
-        Some(m) => (m.err, m.inner_instructions, m.pre_token_balances, m.post_token_balances),
-        None => (None, Vec::new(), Vec::new(), Vec::new()),
+    let (transaction_error, raw_inner, pre_tb, post_tb, logs) = match r.meta {
+        Some(m) => (
+            m.err,
+            m.inner_instructions,
+            m.pre_token_balances,
+            m.post_token_balances,
+            m.log_messages,
+        ),
+        None => (None, Vec::new(), Vec::new(), Vec::new(), Vec::new()),
     };
     for block in raw_inner {
         let ixs = block.instructions.into_iter().map(convert_ix).collect();
@@ -295,6 +306,7 @@ fn convert_to_parsed_tx(r: GetTxResult, signature: String) -> ParsedTx {
         fee_payer,
         account_data,
         instructions,
+        logs,
     }
 }
 

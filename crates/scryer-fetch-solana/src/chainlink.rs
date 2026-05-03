@@ -1061,6 +1061,7 @@ mod tests {
             fee_payer: "HFn8GnPADiny6XqUoWE8uRPPxb29ikn4yTuPa9MF2fWJ".to_string(),
             account_data: vec![],
             instructions: vec![outer],
+            logs: vec![],
         };
         let meta = Meta::new(
             scryer_schema::chainlink_data_streams::v1::SCHEMA_VERSION,
@@ -1152,6 +1153,7 @@ mod tests {
             fee_payer: "Router1111111111111111111111111111111111111".to_string(),
             account_data: vec![],
             instructions: vec![outer],
+            logs: vec![],
         };
         let meta = Meta::new(
             scryer_schema::chainlink_data_streams::v1::SCHEMA_VERSION,

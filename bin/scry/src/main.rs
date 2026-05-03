@@ -45,6 +45,7 @@ mod kraken_cmd;
 mod loopscale_loans_cmd;
 mod mango_v4_liquidations_cmd;
 mod mango_v4_oracle_configs_cmd;
+mod marginfi_liquidations_cmd;
 mod marginfi_reserves_cmd;
 mod nasdaq_intraday_cmd;
 mod oracle_context_cmd;
@@ -592,6 +593,16 @@ enum SolanaTarget {
     /// filtered by the parent Group pubkey. Writes to
     /// dataset/mango_v4/oracle_configs/v1/year=Y/month=M/day=D.parquet.
     MangoV4OracleConfigs(mango_v4_oracle_configs_cmd::MangoV4OracleConfigsArgs),
+    /// MarginFi-v2 liquidation event panel. Walks
+    /// `getSignaturesForAddress(MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA)`
+    /// over `[--start, --end]`, fetches each tx via proxy-routed
+    /// `getTransaction(jsonParsed)` (logs are required for the Anchor
+    /// `LendingAccountLiquidateEvent` decode), and writes one
+    /// `marginfi_liquidation.v1::Liquidation` row per liquidate IX to
+    /// `dataset/marginfi/liquidations/v1/year=Y/month=M/day=D.parquet`.
+    /// Optional `--bank-registry-json` resolves bank-PDA → asset
+    /// symbol/decimals/oracle for in-row enrichment.
+    MarginfiLiquidations(marginfi_liquidations_cmd::MarginfiLiquidationsArgs),
     /// MarginFi-v2 Bank-account snapshot. One-shot
     /// `getProgramAccounts` against `MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA`
     /// with a Bank-disc memcmp filter; per-Bank decode + xStock
@@ -736,6 +747,9 @@ async fn main() -> Result<()> {
             }
             SolanaTarget::MangoV4OracleConfigs(a) => {
                 mango_v4_oracle_configs_cmd::run_mango_v4_oracle_configs(a).await
+            }
+            SolanaTarget::MarginfiLiquidations(a) => {
+                marginfi_liquidations_cmd::run_marginfi_liquidations(a).await
             }
             SolanaTarget::MarginfiReserves(a) => {
                 marginfi_reserves_cmd::run_marginfi_reserves(a).await

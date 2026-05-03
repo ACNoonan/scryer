@@ -229,9 +229,11 @@ resolves.
 **Source.** Solana mainnet, MarginFi-v2 program `MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA` (verified on-chain 2026-04-29). Anchor IX `lending_account_liquidate` (disc `[214,169,151,213,251,167,86,219]`). Direct IX accounts: `[group, asset_bank, liab_bank, liquidator_marginfi_account, authority (signer), liquidatee_marginfi_account, bank_liquidity_vault_authority, bank_liquidity_vault, bank_insurance_vault, token_program]`. Oracle accounts arrive via `remaining_accounts` gated by the `liquidatee_accounts: u8` and `liquidator_accounts: u8` count hints in the IX args. IX args: `asset_amount: u64`, `liquidatee_accounts: u8`, `liquidator_accounts: u8`.
 
 Per-event decode pulls from three sources:
-1. The Anchor `LendingAccountLiquidateEvent` (disc `[166,160,249,154,183,39,23,242]`) for liquidatee account/authority, both banks, both mints, pre/post f64 health, and pre/post `LiquidationBalances` (four f64 balances per side).
+1. The Anchor `LendingAccountLiquidateEvent` (disc `[166,160,249,154,183,39,23,242]`), decoded from `meta.logMessages` `Program data: <base64>` lines, for liquidatee account/authority, both banks, both mints, pre/post f64 health, and pre/post `LiquidationBalances` (four f64 balances per side).
 2. The outer transaction for `signature`, `slot`, `block_time`, `fee_payer`, and `liquidator` (top-level signer).
-3. Inner SPL Token Transfer instructions for native-unit `asset_amount_seized`, `liquidator_fee_paid`, and `insurance_fund_fee_paid` — these are *not* in the event.
+3. Outer-tx token-balance changes (`meta.{pre,post}TokenBalances` synthesized via `ParsedTx::account_data`) for `asset_amount_seized` (native u64) — the liquidator's net positive delta in `asset_mint` for that tx.
+
+`liquidator_fee_paid` and `insurance_fund_fee_paid` are reserved at `0` in v1; a follow-on phase populates them once `marginfi_reserve.v1` (or the fetcher's bank registry) carries the bank's `liquidity_vault_authority` / `insurance_vault_authority` PDA pubkeys (the IDL exposes `_bump` only, and the authority PDAs are needed to disambiguate token-account deltas).
 
 Oracle prices are *not* in-row; `asset_oracle` and `liab_oracle` pubkeys are carried as join keys for `oracle_context.v1` cross-source enrichment, resolved from the most recent `marginfi_reserve.v1::Bank.config.oracle_keys[0]` snapshot for each bank.
 
@@ -254,10 +256,10 @@ liab_mint                       string
 liab_symbol                     string
 liab_decimals                   u8
 liab_oracle                     string  // same lookup for liab_bank
-asset_amount_seized             u64     // native units; from inner SPL Token Transfer to liquidator
+asset_amount_seized             u64     // native units; liquidator's net positive delta in asset_mint from outer-tx {pre,post}TokenBalances
 asset_amount_seized_decimal     f64     // human-readable; pre_balances.liquidatee_asset_balance − post_balances.liquidatee_asset_balance from the event
-liquidator_fee_paid             u64     // native units; from inner SPL Token Transfer
-insurance_fund_fee_paid         u64     // native units; from inner SPL Token Transfer to bank_insurance_vault
+liquidator_fee_paid             u64     // native units; reserved at 0 in v1 — pending bank liquidity_vault_authority PDA capture
+insurance_fund_fee_paid         u64     // native units; reserved at 0 in v1 — pending bank insurance_vault_authority PDA capture
 fee_payer                       string  // outer-tx fee payer (Jito-bundle OEV join key)
 pre_health                      f64     // event.liquidatee_pre_health; sub-1.0 = liquidatable
 post_health                     f64     // event.liquidatee_post_health; expected ~1.0 after partial liquidation

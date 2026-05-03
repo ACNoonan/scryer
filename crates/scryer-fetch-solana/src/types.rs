@@ -61,6 +61,15 @@ pub struct ParsedTx {
     /// callers that only need `account_data` (swap.v1 fetcher).
     #[serde(default)]
     pub instructions: Vec<HeliusInstruction>,
+    /// Raw program log lines from `meta.logMessages` (proxy-routed
+    /// `getTransaction(jsonParsed)` path). Used by Anchor-event decoders
+    /// like `marginfi_liquidations.rs` that need to scrape `Program
+    /// data: <base64>` lines emitted by `emit!()`. Empty when the
+    /// fetcher came from a path that doesn't surface logs (Helius
+    /// parseTransactions today). See methodology entry "Anchor Event
+    /// Decode From Logs".
+    #[serde(default)]
+    pub logs: Vec<String>,
 }
 
 /// One Helius parsed-tx instruction. `data` is base58-encoded

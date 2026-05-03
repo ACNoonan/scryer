@@ -113,6 +113,7 @@ mod tests {
                 token_balance_changes: changes,
             }],
             instructions: vec![],
+            logs: vec![],
         }
     }
 

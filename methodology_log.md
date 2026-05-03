@@ -53,6 +53,7 @@ Compact index of locked architectural decisions. It keeps operational invariants
 | Cross-process partition write lock | 2026-05-02 | `Dataset::write` holds an exclusive `flock(2)` on `<partition>.lock` across the entire read → merge_dedup → tmp-write → rename cycle, and tmp filenames are per-process unique (`<path>.<pid>.<counter>.tmp`). Multiple writers (e.g. concurrent `scryer-runner` ticks) targeting the same partition serialize at the file lock instead of corrupting parquet or silently dropping rows. |
 | Proxy capability-mismatch fanout | 2026-05-02 | Disposition vocabulary expanded from {Ok, Exhausted, Throttled, Transient, Permanent} to add `CapabilityMismatch`. Plan-tier resource caps (e.g. QuickNode discover plan capping `getMultipleAccounts` at 5 accounts via JSON-RPC code -32615) trigger immediate sibling-provider fanout for the affected call without quarantining the upstream and without consuming the per-call retry budget. Classifier inspects JSON-RPC `error.code` regardless of HTTP status. |
 | Soothsayer Lending-track band tape | 2026-05-03 | `oracle.soothsayer_v6.band_tape.v2` mirrors on-chain `PriceUpdate` PDAs via `soothsayer-consumer` path-dep; one schema across profiles, partition key `profile=lending|amm`, dedup `(symbol, publish_slot)`. |
+| Anchor event decode from logs | 2026-05-03 | Anchor `emit!` events flow through `ParsedTx.logs` from `meta.logMessages`; decoded by base64 + 8-byte disc match + Borsh. Proxy-routed `getTransaction(jsonParsed)` is the canonical source. First used in `marginfi_liquidation.v1`. |
 
 ## Core Architecture
 
@@ -149,14 +150,24 @@ Kamino liquidation, Jupiter/Fluid liquidation, and Fluid vault config schemas we
 
 Backed NAV indicative quotes are raw source data and belong in scryer. Backed RSS corp actions and Backed NAV strikes are different source/domain concepts and should remain separate in v2 naming.
 
+### Anchor Event Decode From Logs
+
+Anchor `emit!()` events are written to a transaction's `meta.logMessages` as `Program data: <base64>` lines. The base64-decoded payload is the 8-byte event discriminator followed by Borsh-serialized event fields.
+
+- Use the proxy-routed `getTransaction(jsonParsed)` path. `meta.logMessages` flows through `crate::types::ParsedTx::logs` (`Vec<String>`), populated by `crate::get_transactions::convert_to_parsed_tx`. Helius `parseTransactions` does not surface raw logs in the same shape, so log-event consumers should prefer `--use-get-transaction` or a separate code path.
+- For each candidate log line of form `Program data: <base64>`, base64-decode, validate the leading 8-byte discriminator against the IDL-pinned event disc, then Borsh-deserialize the remaining bytes into the typed event struct.
+- Borsh-decode primitives for marginfi-style events: `pubkey = [u8; 32]`, `Option<T> = u8 tag (0=None, 1=Some) + T if Some`, `f64 = 8 little-endian bytes`. Fixed-size composite types have no length prefix.
+- `marginfi_liquidation.v1` is the first scryer fetcher to use this pattern. Future Anchor-event consumers should reuse the log-walk + disc-match + Borsh-decode primitives that ship with `marginfi_liquidations.rs`.
+
 ### MarginFi-v2
 
 - Program/IDL facts must be pinned before decode work.
 - `marginfi_reserve.v1` captures Bank config and oracle wiring.
 - `marginfi_liquidation.v1` row content, post-2026-05-03 amendment after IDL pre-flight:
-  - From the Anchor `LendingAccountLiquidateEvent`: liquidatee account/authority/banks/mints, `liquidatee_pre_health` / `liquidatee_post_health` (f64), and the four pre/post f64 balances in `LiquidationBalances`.
-  - From the outer tx: signature, slot, block_time, fee_payer (Jito-bundle OEV join key), top-level signer (= liquidator).
-  - From inner SPL Token Transfer instructions: `asset_amount_seized` (native u64), `liquidator_fee_paid` (native u64), `insurance_fund_fee_paid` (native u64). The Anchor event does *not* carry these.
+  - From the Anchor `LendingAccountLiquidateEvent` (decoded from `meta.logMessages`): liquidatee account/authority/banks/mints, `liquidatee_pre_health` / `liquidatee_post_health` (f64), and the four pre/post f64 balances in `LiquidationBalances`.
+  - From the outer tx: `signature`, `slot`, `block_time`, `fee_payer` (Jito-bundle OEV join key), top-level signer (= `liquidator`).
+  - From outer-tx token-balance changes (`meta.{pre,post}TokenBalances` synthesized into `ParsedTx::account_data`): `asset_amount_seized` (native u64) is the liquidator's net positive delta in `asset_mint` for that tx.
+  - Reserved at `0` in v1: `liquidator_fee_paid` and `insurance_fund_fee_paid` (native u64). These require resolving the bank's `liquidity_vault_authority` and `insurance_vault_authority` PDAs to look up vault token-account deltas, and `marginfi_reserve.v1` does not currently capture those authority pubkeys (it captures `liquidity_vault` and `insurance_vault` token accounts only). A follow-on phase extends `marginfi_reserve.v1` (or the fetcher's bank registry) with the authority pubkeys; until then, these two columns ship as fixed `0` and the schema docstring marks them as such.
   - Oracle prices are *not* in-row. Per the `kamino_liquidation.v1` precedent, oracle context flows through `oracle_context.v1` cross-source joins. The row carries `asset_oracle` and `liab_oracle` pubkeys (resolved from the most recent `marginfi_reserve.v1::Bank.config.oracle_keys[0]` snapshot for each bank) as join keys.
 - IDL facts pinned 2026-05-03 from `idl/marginfi/marginfi-v2.json`:
   - IX `lending_account_liquidate` disc `[214,169,151,213,251,167,86,219]`; args `asset_amount: u64`, `liquidatee_accounts: u8`, `liquidator_accounts: u8` (the two u8s are remaining-accounts count hints, not seized amounts).

@@ -8,12 +8,12 @@ Last compacted: 2026-05-02.
 
 | Priority | Item | Status | Next Action |
 |---|---|---|---|
-| P0 | 47 `marginfi_liquidation.v1` | locked, not shipped | Implement event panel from MarginFi-v2 logs/Anchor events. |
+| P0 | 47 `marginfi_liquidation.v1` | code-shipped (phase 111) | Promote to Done after first live marginfi liquidation tx lands a non-empty `dataset/marginfi/liquidations/v1/` partition. Follow-on: extend `marginfi_reserve.v1` (or a sidecar bank registry) with `liquidity_vault_authority` / `insurance_vault_authority` PDAs to populate the two reserved-at-0 fee columns. |
 | P1.5 | 49 oracle coverage-inversion historical panel | partially shipped | Finish 49a operator run; implement/run 49b-49d. |
 | P2 | 53 `nasdaq_halts_intraday.v1` | code-shipped + runner-live | Wait for first halt within Yahoo's 7d horizon to land bars; promote to Done when one halt event has captured bars in canonical dataset. |
 | P3 | 42 soothsayer relay scaffold | in flight, cross-repo | Coordinate with soothsayer; do not treat as scryer-only. |
 | P3 | 43 relay daemon mirror tape | in flight, cross-repo | Depends on item 42. |
-| P3 | 54 `oracle.soothsayer_v6.band_tape.v2` | code-shipped + runner-live (phase 110), data-pending | Wait for the soothsayer-side publisher daemon (M6_REFACTOR Phase A5 step 2) to start publishing on devnet; first row at `dataset/oracle.soothsayer_v6/band_tape/v2/profile=lending/...` promotes to Done. Mainnet promotion follows soothsayer Phase A8. |
+| — | 54 `oracle.soothsayer_v6.band_tape.v2` | **paused 2026-05-03** — see Blocked / Gated | Soothsayer-side methodology under revisit; publisher daemon may be redone. Do not invest further on this item until the new methodology lands. |
 | P4 | 36 `dex_treasury_swaps.v1` | gated | Wait for multi-class scope decision. |
 | P4 | 38 `treasury_auction.v1` | gated | Wait for multi-class scope decision. |
 
@@ -28,7 +28,8 @@ Code shipped, canonical data still landing or pending. Per Hard Rule #9 in `CLAU
 | 53 `nasdaq_halts_intraday.v1` | Code + runner shipped phase 109 (2026-05-03) | ≥1 halt event from `nasdaq_halts.v1` within Yahoo's 7d horizon produces non-empty 1m bars at `nasdaq/halts_intraday/v1/` | awaiting-event — last known halts were 2026-04-24, already outside horizon | 2026-05-03 |
 | 52 `volatility.yahoo.single_stock_iv.v2` | Forward-poll runner shipped phase 107 (2026-05-03); first canonical fire same day | (a) ~20 forward weekends accrued in `volatility.yahoo/single_stock_iv/v2/`, OR (b) paid-venue sibling manifest covering 2014→ | awaiting-accrual — 1 weekend captured, ~19 to go | 2026-05-03 |
 | 49d `chainlink_data_streams.v1` ≥90d historical | Forward-poll runner-live; historical range backfill not yet launched | 90d of `chainlink/data_streams/v1/` partitions across the chosen range, non-empty | awaiting-launch — gated on a 7d spike test before 90d commitment, due to Verifier-program RPC volume | n/a |
-| 54 `oracle.soothsayer_v6.band_tape.v2` | Code + manifest shipped phase 110 (2026-05-03); runner-tick fires `soothsayer-band-tape` every 60s — emits zero rows pre-publisher because PDAs don't exist yet | ≥1 row at `dataset/oracle.soothsayer_v6/band_tape/v2/profile=lending/...` after the cross-repo publisher daemon (soothsayer M6_REFACTOR Phase A5 step 2) goes live on devnet | awaiting cross-repo soothsayer publisher daemon | 2026-05-03 |
+| 54 `oracle.soothsayer_v6.band_tape.v2` | Code + manifest shipped phase 110 (2026-05-03); manifest paused same day (renamed `.toml.paused`, staged copy removed) so runner-tick is no longer firing. Schema/fetcher/CLI remain in tree | Resume only after soothsayer-side methodology revisit lands. If the post-A4 wire format is preserved the existing v2 schema works as-is; if profile/regime/wire semantics change, the resume bump is `oracle.soothsayer_v6.band_tape.v3` (or a new venue), not a v2 row | **paused — methodology-dependent** (see Blocked / Gated) | 2026-05-03 |
+| 47 `marginfi_liquidation.v1` | Code shipped phase 111 (2026-05-03): schema crate, fetcher (`marginfi_liquidations.rs`) with Anchor-event-from-logs decode, CLI subcommand `scry solana marginfi-liquidations`. Two extensions to shared infra: `ParsedTx::logs` (from `meta.logMessages`) and the Anchor-event log-decode pattern | ≥1 marginfi liquidation tx within an operator-run window writes a non-empty `marginfi/liquidations/v1/` partition under `_source=rpc:getTransaction:marginfi-liquidations` | awaiting-launch — operator backfill not yet started; no marginfi liquidations observed in canonical scryer data yet. v1 ships with `liquidator_fee_paid` / `insurance_fund_fee_paid` reserved at 0 pending bank vault-authority PDA capture in `marginfi_reserve.v1` | 2026-05-03 |
 
 ## Item 47 - `marginfi_liquidation.v1`
 
@@ -69,7 +70,7 @@ Critical carry-forward: Pyth Benchmarks uses the range endpoint and locked 4 req
 |---|---|---|
 | 42 relay scaffold + Verifier-CPI integration | in flight | Program-side work; coordinate outside scryer. |
 | 43 `chainlink_streams_relay_tape.v1` | in flight | Depends on relay scaffold; mirror tape lives in scryer once source exists. |
-| 54 `oracle.soothsayer_v6.band_tape.v2` mirror | scryer-side code-shipped + runner-live phase 110 (2026-05-03); awaiting publisher daemon | Single venue across Lending + AMM, partition key `profile=lending|amm`. Decode delegated to the `soothsayer-consumer` path-dep so the byte-offset layout has one source of truth. AMM rows land in the same venue once soothsayer Phase B clears M6a. |
+| 54 `oracle.soothsayer_v6.band_tape.v2` mirror | **paused 2026-05-03** — soothsayer-side methodology under revisit | Scryer-side schema/fetcher/CLI are in tree (phase 110); manifest is parked at `ops/sources/soothsayer-band-tape.toml.paused`. Resume after the new soothsayer methodology lands; if wire format changes, the scryer-side schema is at risk of a v3 bump. Do not coordinate further with the soothsayer publisher work until the methodology is settled. |
 
 ## Blocked / Gated
 
@@ -78,6 +79,7 @@ Critical carry-forward: Pyth Benchmarks uses the range endpoint and locked 4 req
 | 45 Phemex OHLCV | blocked | Public kline endpoint requires non-US/VPN/auth path; ticker endpoint works. |
 | 36 `dex_treasury_swaps.v1` | gated | Multi-class scope decision. |
 | 38 `treasury_auction.v1` | gated | Multi-class scope decision. |
+| 54 `oracle.soothsayer_v6.band_tape.v2` | paused — methodology-dependent | Soothsayer-side methodology under revisit; publisher daemon likely to be redone. Resume only after the new methodology lands and locks the wire format. Scryer-side code is shipped and dormant (manifest at `ops/sources/soothsayer-band-tape.toml.paused`). |
 
 ## Item 53 - `nasdaq_halts_intraday.v1`
 
@@ -101,13 +103,11 @@ Critical carry-forward: Pyth Benchmarks uses the range endpoint and locked 4 req
 
 ## Item 54 — `oracle.soothsayer_v6.band_tape.v2`
 
-- Status: code-shipped + runner-live phase 110 (2026-05-03), data-pending. Soothsayer-side publisher daemon (M6_REFACTOR Phase A5 step 2) is the gating dependency on the producer side; until it goes live, runner fires emit zero rows because the PDAs don't exist yet.
-- Methodology: `Soothsayer Lending-track Band Tape — 2026-05-03`. Schema reference: `docs/schemas.md#oraclesoothsayer_v6band_tapev2`.
-- Operational reason: soothsayer's M6b2 per-symbol_class Mondrian shipped 2026-05-03 across artefact + Python serving + Rust serving + on-chain wire format (`profile_code` byte at PriceUpdate offset 4). The publisher daemon now needs a parquet receipt tape so downstream consumers (Kamino-fork lending, MarginFi reserve evaluators, paper-3 protocol semantics) can backtest against a real on-chain receipt history rather than re-deriving from `data/processed/m6b2_lending_artefact_v1.parquet` (which is the *predicted* band, not the *served* band).
-- Venue split decision (deviating from the original hand-off prompt): single venue `oracle.soothsayer_v6` across both Lending and AMM profiles, partition key `profile=lending|amm`. Same row shape, same fetcher, same decode contract — venue multiplicity adds no analytic value. Mirrors `clmm_pool_state.v1`'s `dex={...}` partition-key pattern.
-- Decode contract: delegates to the `soothsayer-consumer` path-dep at `../soothsayer/crates/soothsayer-consumer`. The byte-offset layout lives there as the single source of truth (same crate the on-chain Anchor program uses); scryer never re-implements it.
-- Forward path: `ops/sources/soothsayer-band-tape.toml` runs `scry solana soothsayer-band-tape` every 60s on the multi-manifest `runner-tick` plist. PDAs derive at startup from `--symbols × --program-id` (default devnet `AgXLLTmUJEVh9EsJnznU1yJaUeE9Ufe7ZotupmDqa7f6`); SPY-PDA derivation verified by unit test against the live devnet `HfMaU9Qa54fp1V3uh11Qec81RgKUgzT6mxvFkmZ6V3LH`.
-- AMM-track carry-forward: Phase B (`profile_code = 2`) reuses this fetcher unchanged; rows land under the same venue at `profile=amm/`. No second venue, no second schema id, no second manifest unless freshness SLAs diverge.
+- **Status: paused 2026-05-03 — methodology-dependent.** Soothsayer-side methodology is being revisited; the publisher daemon may be redone. Do not invest further on this item until the new methodology lands and the wire format is settled.
+- Pause shape: scryer-side code remains in tree at phase 110 (schema `oracle.soothsayer_v6.band_tape.v2`, fetcher `scryer-fetch-solana::soothsayer_band_tape`, CLI `scry solana soothsayer-band-tape`, methodology row, schema doc, `KNOWN_V2_SCHEMAS` registry entry, `ORACLE_SOOTHSAYER_V6` venue constant, `DatasetSchema` impl). The runner manifest is parked at `ops/sources/soothsayer-band-tape.toml.paused` (the `.toml.paused` extension excludes it from `*.toml` glob discovery in `scryer-runner` and `scryer deploy`). The staged copy at `~/Library/Application Support/scryer/manifests/` was removed so `runner-tick` is no longer firing it.
+- Resume path: rename `.toml.paused` back to `.toml`, run `scryer deploy`. If the post-A4 wire format is preserved by the new methodology, the existing v2 schema works unchanged. If profile/regime/wire semantics change, the resume bump is `oracle.soothsayer_v6.band_tape.v3` (or a new venue) — never an in-place v2 edit, per Hard Rule 2.
+- Original methodology lock (still in `methodology_log.md` "Soothsayer Lending-track Band Tape — 2026-05-03"): single venue across Lending + AMM, partition key `profile=lending|amm`, decode delegated to the `soothsayer-consumer` path-dep, dedup `(symbol, publish_slot)`. Keep these for reference; they may need to be amended or replaced when methodology resumes.
+- Original goal (still relevant): a parquet receipt history of what soothsayer's Lending oracle actually published on-chain, separate from soothsayer's *predicted* artefact bytes. Two downstream uses: (1) backtests against served-not-predicted bands; (2) profile-code provenance for replays across the Lending/AMM transition.
 
 ## Retracted
 

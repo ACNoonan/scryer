@@ -356,6 +356,7 @@ mod tests {
                 data: "swap_data".to_string(),
                 inner_instructions: vec![],
             }],
+            logs: vec![],
         }
     }
 
@@ -461,6 +462,7 @@ mod tests {
                 ],
             }],
             instructions: vec![],
+            logs: vec![],
         };
         let rows = extract_swaps(&tx, &default_registry(), &meta());
         assert!(rows.is_empty());
@@ -519,6 +521,7 @@ mod tests {
                 data: "data".into(),
                 inner_instructions: vec![],
             }],
+            logs: vec![],
         };
         let rows = extract_swaps(&tx, &default_registry(), &meta());
         assert_eq!(rows.len(), 1);

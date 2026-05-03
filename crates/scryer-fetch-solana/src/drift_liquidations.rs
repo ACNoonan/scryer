@@ -273,6 +273,7 @@ mod tests {
                 token_balance_changes: vec![],
             }],
             instructions: ixs,
+            logs: vec![],
         }
     }
 
