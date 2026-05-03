@@ -52,6 +52,7 @@ Compact index of locked architectural decisions. It keeps operational invariants
 | Single-stock IV schema | 2026-05-02 | Per-symbol weekend-horizon implied vol lives at `volatility.<venue>.single_stock_iv.v2`, one schema per venue. ATM is the strike nearest spot at the front-week expiry > capture-ts + 7d. Capture daily; analysis consumes Friday-close rows. |
 | Cross-process partition write lock | 2026-05-02 | `Dataset::write` holds an exclusive `flock(2)` on `<partition>.lock` across the entire read → merge_dedup → tmp-write → rename cycle, and tmp filenames are per-process unique (`<path>.<pid>.<counter>.tmp`). Multiple writers (e.g. concurrent `scryer-runner` ticks) targeting the same partition serialize at the file lock instead of corrupting parquet or silently dropping rows. |
 | Proxy capability-mismatch fanout | 2026-05-02 | Disposition vocabulary expanded from {Ok, Exhausted, Throttled, Transient, Permanent} to add `CapabilityMismatch`. Plan-tier resource caps (e.g. QuickNode discover plan capping `getMultipleAccounts` at 5 accounts via JSON-RPC code -32615) trigger immediate sibling-provider fanout for the affected call without quarantining the upstream and without consuming the per-call retry budget. Classifier inspects JSON-RPC `error.code` regardless of HTTP status. |
+| Soothsayer Lending-track band tape | 2026-05-03 | `oracle.soothsayer_v6.band_tape.v2` mirrors on-chain `PriceUpdate` PDAs via `soothsayer-consumer` path-dep; one schema across profiles, partition key `profile=lending|amm`, dedup `(symbol, publish_slot)`. |
 
 ## Core Architecture
 
@@ -152,7 +153,15 @@ Backed NAV indicative quotes are raw source data and belong in scryer. Backed RS
 
 - Program/IDL facts must be pinned before decode work.
 - `marginfi_reserve.v1` captures Bank config and oracle wiring.
-- `marginfi_liquidation.v1` should preserve event-time oracle and fee-split facts needed for Paper-3 and OEV joins.
+- `marginfi_liquidation.v1` row content, post-2026-05-03 amendment after IDL pre-flight:
+  - From the Anchor `LendingAccountLiquidateEvent`: liquidatee account/authority/banks/mints, `liquidatee_pre_health` / `liquidatee_post_health` (f64), and the four pre/post f64 balances in `LiquidationBalances`.
+  - From the outer tx: signature, slot, block_time, fee_payer (Jito-bundle OEV join key), top-level signer (= liquidator).
+  - From inner SPL Token Transfer instructions: `asset_amount_seized` (native u64), `liquidator_fee_paid` (native u64), `insurance_fund_fee_paid` (native u64). The Anchor event does *not* carry these.
+  - Oracle prices are *not* in-row. Per the `kamino_liquidation.v1` precedent, oracle context flows through `oracle_context.v1` cross-source joins. The row carries `asset_oracle` and `liab_oracle` pubkeys (resolved from the most recent `marginfi_reserve.v1::Bank.config.oracle_keys[0]` snapshot for each bank) as join keys.
+- IDL facts pinned 2026-05-03 from `idl/marginfi/marginfi-v2.json`:
+  - IX `lending_account_liquidate` disc `[214,169,151,213,251,167,86,219]`; args `asset_amount: u64`, `liquidatee_accounts: u8`, `liquidator_accounts: u8` (the two u8s are remaining-accounts count hints, not seized amounts).
+  - Event `LendingAccountLiquidateEvent` disc `[166,160,249,154,183,39,23,242]`. Event carries f64 balances and f64 health only.
+  - Direct IX accounts: `group, asset_bank, liab_bank, liquidator_marginfi_account, authority (signer), liquidatee_marginfi_account, bank_liquidity_vault_authority, bank_liquidity_vault, bank_insurance_vault, token_program`. Oracle accounts arrive via `remaining_accounts` gated by the two u8 hints.
 - Live reserve validation found no direct xStock Banks; consumers may need Kamino-position indirection.
 
 ### Chainlink Data Streams
@@ -263,3 +272,15 @@ Add new decisions as short dated sections below this line. Keep old detail out o
 - Symbols: SPY, QQQ, AAPL, GOOGL, NVDA, TSLA, MSTR, HOOD by default. GLD, TLT optional and left to the operator-side `--symbols` arg; not in the manifest default.
 - History gating: free venues (`yahoo`) are forward-only. Backfill to 2014 for the §7.1 ladder rung requires a paid venue (OptionMetrics via WRDS or a CBOE archive) and lands as a separate schema id under the same `volatility.<venue>.single_stock_iv.v2` shape — same row layout, different venue label, different `_source`.
 - Done split: shipping the yahoo fetcher closes the code half (per the Done definition); the data half stays `data-pending` until either yahoo accumulates ~20 forward weekends or a paid backfill lands.
+
+### Soothsayer Lending-track Band Tape — 2026-05-03 (item 54)
+
+- Schema id: `oracle.soothsayer_v6.band_tape.v2`. Domain `oracle`, source `soothsayer_v6` per the "Soothsayer venue versioning" lock — the M6_REFACTOR experiment iteration (post-A4 dual-profile wire format) is encoded in the source segment, not as a comment. Lending and AMM ride the same schema; the venue does not split per profile.
+- Profile axis: `profile_code` is a row column AND the partition key (`profile=lending|amm`). One schema, one fetcher, one `DatasetSchema` impl. Precedent: `clmm_pool_state.v1` keys `dex=orca_whirlpools|raydium_clmm` the same way. Sibling venues per profile are rejected — same row shape, same fetcher, same decode contract; venue multiplicity adds no analytic value.
+- Decode contract: `soothsayer-consumer` path-dep at `../soothsayer/crates/soothsayer-consumer`. The fetcher calls `soothsayer_consumer::decode_price_update(account_data)` and never re-implements the byte-offset layout. Discriminator + 128-byte body is verified by the consumer crate; scryer-side mismatches surface as decode-skip + warn, never as a crash. Pre-A4 `profile_code = 0` rows are filtered out — they predate the dual-profile wire format and don't belong in this venue. Cross-language contract is parquet, not bindings — the path-dep is a reader-side decode helper, not an SDK surface, and matches Hard Rule 6 the same way `solana-sdk` does.
+- Universe: ten symbols (SPY, QQQ, AAPL, GOOGL, NVDA, TSLA, MSTR, HOOD, GLD, TLT). PDAs derive deterministically from `seeds = [b"price", symbol_padded_16]`; the address list lives at `ops/sources/data/soothsayer-price-update-pdas.txt` (one `address symbol` per line, mirror of `clmm-pools.txt`).
+- `symbol_class` enrichment: hardcoded in the fetcher, not parsed from soothsayer's artefact JSON. Decoupling the ingest from a soothsayer build artefact keeps `_fetched_at` reproducibility intact under Hard Rule 7. Mapping mirrors the soothsayer M6_REFACTOR A1 lock: `equity_index` (SPY, QQQ); `equity_meta` (AAPL, GOOGL); `equity_highbeta` (NVDA, TSLA, MSTR); `equity_recent` (HOOD); `gold` (GLD); `bond` (TLT).
+- Dedup: `band_tape:{symbol}:{publish_slot}`. `publish_slot` is read from the on-chain account body (not the RPC `context.slot`); a single PDA can carry sequential publishes at different slots, but never two publishes at the same slot. Profile is intentionally not in the dedup key — re-running the same fire produces identical (symbol, publish_slot) tuples regardless of which profile happens to be observed at that account.
+- Cadence: 60s `interval` on the multi-manifest `runner-tick` plist. Per fire = 1 `getMultipleAccounts` (10 PDAs ≤ 100 GMA cap) + 1 `getBlockTime`. Cheap; no dedicated Phase-B plist needed. Freshness `sla_secs = 86_700` (24h + 5×60s slack) so weekly publish cadence does not page operators.
+- Gating: scryer-side ships first as `code-shipped, data-pending` per Hard Rule 9. Promotion to Done waits on a soothsayer-side publisher daemon publish landing under `dataset/oracle.soothsayer_v6/band_tape/v2/profile=lending/...`. Mainnet promotion is downstream of soothsayer M6_REFACTOR.md Phase A8.
+- AMM-track carry-forward: Phase B (`profile_code = 2`) reuses the same fetcher unchanged; the partition key naturally splits AMM rows into `profile=amm/`. No second venue, no second schema id, no second manifest unless freshness SLAs diverge.

@@ -30,6 +30,7 @@
 pub mod finnhub;
 pub mod stooq;
 pub mod yahoo_corp_actions;
+pub mod yahoo_intraday;
 
 use std::time::Duration;
 

@@ -1,0 +1,52 @@
+# Forward-poll for `yahoo/equities_daily/v1` over the Soothsayer
+# universe. Daily fire at 22:00 UTC, after the US-equities close
+# (20:00 UTC EDT / 21:00 UTC EST), gives Stooq's EOD CSV ~1-2h to
+# publish today's bar so Tuesday-morning Soothsayer cron consumers
+# see Monday's `open` value reliably.
+#
+# Why daily, not weekday-only: Stooq is a no-op on weekends (no new
+# bar), but a daily fire keeps `workflow_run.v2` cadence regular and
+# the [freshness] SLA below stays uniform — easier to reason about.
+# Re-pulls dedup cleanly on `(symbol, ts)` per the yahoo.v1 schema.
+#
+# Why post-close, not 14:30 UTC: the source (Stooq daily CSV) only
+# republishes after the US session closes. A 14:30 UTC fire would
+# only ever capture the prior trading day's bar, leaving Monday's
+# bar absent until Tuesday. 22:00 UTC captures the same-day close.
+#
+# Symbol set: the 10-symbol Soothsayer universe used by W5/W6
+# coverage analyses (Paper-1 §6 plus Paper-3 add-ons HOOD/MSTR
+# /GLD/TLT). Operator can extend the list freely; the manifest is
+# the source-of-truth.
+
+id = "equities-daily"
+description = "Daily Stooq EOD OHLCV poll for the Soothsayer 10-symbol universe (SPY,QQQ,AAPL,GOOGL,NVDA,TSLA,HOOD,GLD,TLT,MSTR). Forward-only; lookback=7d for cheap dedup-safe re-pulls."
+schema_ids = ["yahoo.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "equities", "bars",
+    "--symbols", "SPY,QQQ,AAPL,GOOGL,NVDA,TSLA,HOOD,GLD,TLT,MSTR",
+    "--lookback-days", "7",
+    "--source", "stooq:csv:runner",
+]
+
+[criticality]
+tier = "tier-1"
+owner = "@adam"
+consumer_impact = "Daily underlier OHLCV for the Soothsayer Paper-1/Paper-3 analyses (W5 forward-tape coverage and W6 halt-window coarse fallback). Stale = research blocked: Tuesday-morning forward-coverage cron cannot read Monday's open."
+
+[freshness]
+# 25h ceiling: a successful daily fire should land within 24h of the
+# prior fire, plus a 1h grace window for clock skew / Stooq publish
+# lag. Mirrors the analytics-workflow-runs SLA shape.
+sla_secs = 90000
+
+[budget]
+# 10 symbols × 1 Stooq request each × ~500ms rate-limit gap = ~6s
+# wall-clock per fire; cap loosely above observed.
+max_requests_per_run = 30
+
+[workflow]
+sensor = "daily(22:00Z)"

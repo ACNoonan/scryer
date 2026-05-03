@@ -26,9 +26,10 @@ use scryer_schema::{
     jito_bundle_tape, jito_bundles, jito_tip_floor, jupiter_lend_liquidation,
     kamino_liquidation, kamino_obligation,
     kamino_obligation_position, kamino_reserve, kamino_scope, kraken_funding, loopscale_loan,
-    loopscale_loan_collateral, mango_v4_liquidation, mango_v4_oracle_config, marginfi_reserve,
-    nasdaq_halts,
-    oracle_context, pool_snapshot, pyth, pyth_poster_post, pyth_poster_tx, pyth_publisher,
+    loopscale_loan_collateral, mango_v4_liquidation, mango_v4_oracle_config, marginfi_liquidation, marginfi_reserve,
+    nasdaq_halts, nasdaq_halts_intraday,
+    oracle_context, oracle_soothsayer_v6_band_tape,
+    pool_snapshot, pyth, pyth_poster_post, pyth_poster_tx, pyth_publisher,
     raydium_pool_metadata, redstone, single_stock_iv, solana_priority_fees, swap, trade, v5_tape, validator_client, workflow_run, workflow_run_summary, xstock_holders, yahoo, yahoo_corp_actions, FromArrowError,
 };
 
@@ -648,6 +649,25 @@ impl DatasetSchema for cme_intraday_1m::v1::Bar {
     }
 }
 
+impl DatasetSchema for nasdaq_halts_intraday::v1::Bar {
+    const DATA_TYPE: &'static str = "halts_intraday";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("symbol");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.ts
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        nasdaq_halts_intraday::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        nasdaq_halts_intraday::v1::from_record_batch(batch)
+    }
+}
+
 impl DatasetSchema for dex_xstock_swaps::v1::Swap {
     const DATA_TYPE: &'static str = "swaps";
     const PARTITION_KEY_PREFIX: Option<&'static str> = Some("symbol");
@@ -1051,6 +1071,25 @@ impl DatasetSchema for kamino_reserve::v1::Reserve {
     }
 }
 
+impl DatasetSchema for marginfi_liquidation::v1::Liquidation {
+    const DATA_TYPE: &'static str = "liquidations";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.block_time
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        marginfi_liquidation::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        marginfi_liquidation::v1::from_record_batch(batch)
+    }
+}
+
 impl DatasetSchema for marginfi_reserve::v1::Reserve {
     const DATA_TYPE: &'static str = "reserves";
     const PARTITION_KEY_PREFIX: Option<&'static str> = None;
@@ -1288,5 +1327,37 @@ impl DatasetSchema for workflow_run::v2::WorkflowRun {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         workflow_run::v2::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for oracle_soothsayer_v6_band_tape::v2::Row {
+    /// `dataset/oracle.soothsayer_v6/band_tape/v2/profile={lending,amm}/year=Y/month=M/day=D.parquet`.
+    /// Single schema across both Lending and AMM profiles per the
+    /// "Soothsayer Lending-track Band Tape — 2026-05-03" methodology
+    /// entry; partition key `profile` (lending|amm) splits the two at
+    /// write time. Daily granularity matches the publisher cadence
+    /// floor (weekly publish; daily polling tightens freshness signal).
+    const DATA_TYPE: &'static str = "band_tape";
+    const SCHEMA_MAJOR: u32 = 2;
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("profile");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        // Partition by `publish_ts` (the on-chain publish slot's block
+        // time), not `_fetched_at`. Re-runs of the same fire produce
+        // identical (publish_ts, publish_slot) tuples and dedup
+        // naturally; partitioning by publish-time keeps the file
+        // boundary aligned with the publish-timeline question
+        // consumers ask.
+        self.publish_ts
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        oracle_soothsayer_v6_band_tape::v2::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        oracle_soothsayer_v6_band_tape::v2::from_record_batch(batch)
     }
 }

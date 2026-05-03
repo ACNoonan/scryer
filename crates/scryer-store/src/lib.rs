@@ -136,6 +136,14 @@ pub mod venue {
     /// `volatility.cboe`) land as separate constants under their own
     /// schema ids.
     pub const VOLATILITY_YAHOO: &str = "volatility.yahoo";
+
+    /// Soothsayer M6_REFACTOR Phase A4+ on-chain `PriceUpdate` mirror
+    /// venue (wishlist item 54). Schema id
+    /// `oracle.soothsayer_v6.band_tape.v2`; one venue across both
+    /// Lending and AMM profiles, partitioned by `profile=lending|amm`
+    /// at write time. Source segment encodes the experiment iteration
+    /// per the "Soothsayer venue versioning" methodology lock.
+    pub const ORACLE_SOOTHSAYER_V6: &str = "oracle.soothsayer_v6";
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

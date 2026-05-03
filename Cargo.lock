@@ -6581,6 +6581,7 @@ dependencies = [
  "serde_json",
  "snap",
  "solana-sdk",
+ "soothsayer-consumer",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -9351,6 +9352,13 @@ dependencies = [
  "thiserror 2.0.18",
  "wasm-bindgen",
  "zeroize",
+]
+
+[[package]]
+name = "soothsayer-consumer"
+version = "0.0.0"
+dependencies = [
+ "thiserror 2.0.18",
 ]
 
 [[package]]

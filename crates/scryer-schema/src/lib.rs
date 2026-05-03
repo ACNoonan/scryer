@@ -57,10 +57,13 @@ pub mod loopscale_loan;
 pub mod loopscale_loan_collateral;
 pub mod mango_v4_liquidation;
 pub mod mango_v4_oracle_config;
+pub mod marginfi_liquidation;
 pub mod marginfi_reserve;
 pub mod meta;
 pub mod nasdaq_halts;
+pub mod nasdaq_halts_intraday;
 pub mod oracle_context;
+pub mod oracle_soothsayer_v6_band_tape;
 pub mod pool_snapshot;
 pub mod pyth;
 pub mod pyth_poster_post;
@@ -101,6 +104,7 @@ pub const KNOWN_V1_SCHEMAS: &[&str] = &[
     "kamino_reserve.v1",
     "kamino_scope.v1",
     "marginfi_reserve.v1",
+    "marginfi_liquidation.v1",
     "drift_liquidation.v1",
     "mango_v4_liquidation.v1",
     "mango_v4_oracle_config.v1",
@@ -142,6 +146,7 @@ pub const KNOWN_V1_SCHEMAS: &[&str] = &[
     "backed.v1",
     "backed_nav_strikes.v1",
     "nasdaq_halts.v1",
+    "nasdaq_halts_intraday.v1",
     "fred_macro.v1",
     "fred_macro_extended.v1",
     "edgar_8k.v1",

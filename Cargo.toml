@@ -48,6 +48,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 tracing = "0.1"
 thiserror = "1"
+soothsayer-consumer = { path = "../soothsayer/crates/soothsayer-consumer" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

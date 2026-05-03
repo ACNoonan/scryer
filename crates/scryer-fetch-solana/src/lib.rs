@@ -40,6 +40,7 @@ pub mod parse;
 pub mod parse_transactions;
 pub mod pool_snapshots;
 pub mod priority_fees;
+pub mod soothsayer_band_tape;
 pub mod sig_paginate;
 pub mod swaps_helius_enhanced;
 pub mod types;

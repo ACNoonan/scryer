@@ -10,10 +10,25 @@ Last compacted: 2026-05-02.
 |---|---|---|---|
 | P0 | 47 `marginfi_liquidation.v1` | locked, not shipped | Implement event panel from MarginFi-v2 logs/Anchor events. |
 | P1.5 | 49 oracle coverage-inversion historical panel | partially shipped | Finish 49a operator run; implement/run 49b-49d. |
+| P2 | 53 `nasdaq_halts_intraday.v1` | code-shipped + runner-live | Wait for first halt within Yahoo's 7d horizon to land bars; promote to Done when one halt event has captured bars in canonical dataset. |
 | P3 | 42 soothsayer relay scaffold | in flight, cross-repo | Coordinate with soothsayer; do not treat as scryer-only. |
 | P3 | 43 relay daemon mirror tape | in flight, cross-repo | Depends on item 42. |
+| P3 | 54 `oracle.soothsayer_v6.band_tape.v2` | code-shipped + runner-live (phase 110), data-pending | Wait for the soothsayer-side publisher daemon (M6_REFACTOR Phase A5 step 2) to start publishing on devnet; first row at `dataset/oracle.soothsayer_v6/band_tape/v2/profile=lending/...` promotes to Done. Mainnet promotion follows soothsayer Phase A8. |
 | P4 | 36 `dex_treasury_swaps.v1` | gated | Wait for multi-class scope decision. |
 | P4 | 38 `treasury_auction.v1` | gated | Wait for multi-class scope decision. |
+
+## Data-Pending Verification
+
+Code shipped, canonical data still landing or pending. Per Hard Rule #9 in `CLAUDE.md`, items here cannot flip to Done until the verification trigger fires. Add an entry any time a change ships code without landing canonical rows. Promote out — move to **Recently Shipped Pointers** and log a `docs/phase_log.md` row — once the trigger fires.
+
+| Item | What was shipped | Verification trigger | Status / next check | Started |
+|---|---|---|---|---|
+| 49a Pyth Benchmarks 180d backfill | Code phase 71; operator backfill launched 2026-05-03 | Continuous `pyth/oracle_tape/v1/` partitions across `[2025-11-04, 2026-05-03)` with non-empty rows under `_source=pyth:hermes:benchmarks` | running — PID 67593, log `~/Library/Logs/scryer/pyth-backfill-180d-20260503T214657Z.log`; ~18h wall-clock at 4 req/s | 2026-05-03 21:46Z |
+| 51e historical backfill (operator job, separate from wishlist item 51e itself) | Forward-poll runner shipped phase 101; range backfill is a separate operator job | Partitions across `[2025-07-14, 2026-04-28]` for all 8 xStock symbols at `dex_xstock/swaps/v1/symbol={…}/…` under `_source=helius:parseTransactions:backfill` | running — PID 67608, log `~/Library/Logs/scryer/dex-xstock-swaps-backfill-20260503T214659Z.log`; stage-1 sig pagination on SPYx | 2026-05-03 21:46Z |
+| 53 `nasdaq_halts_intraday.v1` | Code + runner shipped phase 109 (2026-05-03) | ≥1 halt event from `nasdaq_halts.v1` within Yahoo's 7d horizon produces non-empty 1m bars at `nasdaq/halts_intraday/v1/` | awaiting-event — last known halts were 2026-04-24, already outside horizon | 2026-05-03 |
+| 52 `volatility.yahoo.single_stock_iv.v2` | Forward-poll runner shipped phase 107 (2026-05-03); first canonical fire same day | (a) ~20 forward weekends accrued in `volatility.yahoo/single_stock_iv/v2/`, OR (b) paid-venue sibling manifest covering 2014→ | awaiting-accrual — 1 weekend captured, ~19 to go | 2026-05-03 |
+| 49d `chainlink_data_streams.v1` ≥90d historical | Forward-poll runner-live; historical range backfill not yet launched | 90d of `chainlink/data_streams/v1/` partitions across the chosen range, non-empty | awaiting-launch — gated on a 7d spike test before 90d commitment, due to Verifier-program RPC volume | n/a |
+| 54 `oracle.soothsayer_v6.band_tape.v2` | Code + manifest shipped phase 110 (2026-05-03); runner-tick fires `soothsayer-band-tape` every 60s — emits zero rows pre-publisher because PDAs don't exist yet | ≥1 row at `dataset/oracle.soothsayer_v6/band_tape/v2/profile=lending/...` after the cross-repo publisher daemon (soothsayer M6_REFACTOR Phase A5 step 2) goes live on devnet | awaiting cross-repo soothsayer publisher daemon | 2026-05-03 |
 
 ## Item 47 - `marginfi_liquidation.v1`
 
@@ -54,6 +69,7 @@ Critical carry-forward: Pyth Benchmarks uses the range endpoint and locked 4 req
 |---|---|---|
 | 42 relay scaffold + Verifier-CPI integration | in flight | Program-side work; coordinate outside scryer. |
 | 43 `chainlink_streams_relay_tape.v1` | in flight | Depends on relay scaffold; mirror tape lives in scryer once source exists. |
+| 54 `oracle.soothsayer_v6.band_tape.v2` mirror | scryer-side code-shipped + runner-live phase 110 (2026-05-03); awaiting publisher daemon | Single venue across Lending + AMM, partition key `profile=lending|amm`. Decode delegated to the `soothsayer-consumer` path-dep so the byte-offset layout has one source of truth. AMM rows land in the same venue once soothsayer Phase B clears M6a. |
 
 ## Blocked / Gated
 
@@ -63,6 +79,17 @@ Critical carry-forward: Pyth Benchmarks uses the range endpoint and locked 4 req
 | 36 `dex_treasury_swaps.v1` | gated | Multi-class scope decision. |
 | 38 `treasury_auction.v1` | gated | Multi-class scope decision. |
 
+## Item 53 - `nasdaq_halts_intraday.v1`
+
+- Status: code-shipped + runner-live 2026-05-03 (phase 109). Data-pending until at least one halt event lands within Yahoo's 7d horizon and gets backfilled by the daily fire — the past-30d halts in `nasdaq_halts.v1` are all on 2026-04-24, just outside the horizon as of ship.
+- Methodology: companion to `nasdaq_halts.v1` per `docs/schemas.md#nasdaq_halts_intradayv1`; FK-keyed via `halt_event_id = Halt::dedup_key()`.
+- Soothsayer consumer: W6 oracle-band coverage during NASDAQ halts (Paper-3 §Structural complement). `VALIDATION_BACKLOG.md` W6 in the soothsayer repo.
+- Source: Yahoo Finance public `/v8/finance/chart` at `interval=1m` (no auth, browser UA only). 7-day rolling backfill horizon — older halts cannot be captured from this source. Promote to a paid intraday venue (Polygon, Tradier, Databento US-equity 1m) if the analysis needs deeper history; the row schema is shared and a sibling fetcher landed under `scryer-fetch-equities` would write to the same partition tree.
+- Forward path: `ops/sources/nasdaq-halts-intraday.toml` runs `scry nasdaq halts-intraday --lookback-days 7` daily at 22:30 UTC under the existing runner-tick plist; FK column lets the same minute-bar be tagged with multiple halt_event_ids when a symbol gets halted multiple times the same day.
+- Symbol scope: every halted symbol in the lookback window — not strictly the Soothsayer 10-symbol universe. Rationale: the Soothsayer universe (SPY, QQQ, AAPL, GOOGL, NVDA, TSLA, HOOD, GLD, TLT, MSTR) had **zero** halts in the past 30 days. A strict scope would produce an empty dataset for months; the fetcher writes bars for any halt and lets Soothsayer-side joins filter as needed.
+- Soft dependency: `nasdaq_halts.v1` must be reasonably fresh. No runner manifest exists for the halts table itself today (operator-fed via `scry rss nasdaq-halts`). Adding a `nasdaq-halts.toml` manifest is straightforward future work; this item ships without it because halt-table freshness has not historically been a problem.
+- Backfill caveat for Soothsayer-side W6 disclosure: bars older than 7 days cannot be retrieved. The shipped row count for past halts will be 0 unless a paid venue is added.
+
 ## Item 52 - `volatility.yahoo.single_stock_iv.v2` (and paid backfill follow-on)
 
 - Status: forward poll live as of 2026-05-03 (phase 107); first runner-driven canonical rows landed (8 symbols, dte=12, `_source=yahoo:options:v7:runner` under `dataset/volatility.yahoo/single_stock_iv/v2/`). Still data-pending per the wishlist's stricter promotion criterion: Done flips after either (a) ~20 forward weekends accumulate, or (b) a paid-venue backfill (OptionMetrics via WRDS or a CBOE archive) lands a sibling `volatility.<paid_venue>.single_stock_iv.v2` manifest with 2014→ coverage.
@@ -71,6 +98,16 @@ Critical carry-forward: Pyth Benchmarks uses the range endpoint and locked 4 req
 - Forward path: `ops/sources/yahoo-single-stock-iv.toml` runs `scry equity-options iv-snapshot --source yahoo` daily under the existing runner-tick plist; one row per symbol per day (8 symbols default, GLD/TLT operator-side).
 - Backfill path (gated, separate work): a paid venue is still required for the §7.1 head-to-head against F0_VIX (2014→). When access is acquired, add a sibling fetcher module (e.g. `tradier.rs`, `optionmetrics.rs`) under `scryer-fetch-equity-options`, register a new `volatility.<venue>.single_stock_iv.v2` schema id, and ship the corresponding manifest. The row shape is shared.
 - Soothsayer consumers (post-data): F0_singleIV ablation rung in the Paper-1 ladder; a per-symbol-IV variant of F1's volatility regressor; the v2 paper's revisit of "what does the right per-symbol implied baseline do?"
+
+## Item 54 — `oracle.soothsayer_v6.band_tape.v2`
+
+- Status: code-shipped + runner-live phase 110 (2026-05-03), data-pending. Soothsayer-side publisher daemon (M6_REFACTOR Phase A5 step 2) is the gating dependency on the producer side; until it goes live, runner fires emit zero rows because the PDAs don't exist yet.
+- Methodology: `Soothsayer Lending-track Band Tape — 2026-05-03`. Schema reference: `docs/schemas.md#oraclesoothsayer_v6band_tapev2`.
+- Operational reason: soothsayer's M6b2 per-symbol_class Mondrian shipped 2026-05-03 across artefact + Python serving + Rust serving + on-chain wire format (`profile_code` byte at PriceUpdate offset 4). The publisher daemon now needs a parquet receipt tape so downstream consumers (Kamino-fork lending, MarginFi reserve evaluators, paper-3 protocol semantics) can backtest against a real on-chain receipt history rather than re-deriving from `data/processed/m6b2_lending_artefact_v1.parquet` (which is the *predicted* band, not the *served* band).
+- Venue split decision (deviating from the original hand-off prompt): single venue `oracle.soothsayer_v6` across both Lending and AMM profiles, partition key `profile=lending|amm`. Same row shape, same fetcher, same decode contract — venue multiplicity adds no analytic value. Mirrors `clmm_pool_state.v1`'s `dex={...}` partition-key pattern.
+- Decode contract: delegates to the `soothsayer-consumer` path-dep at `../soothsayer/crates/soothsayer-consumer`. The byte-offset layout lives there as the single source of truth (same crate the on-chain Anchor program uses); scryer never re-implements it.
+- Forward path: `ops/sources/soothsayer-band-tape.toml` runs `scry solana soothsayer-band-tape` every 60s on the multi-manifest `runner-tick` plist. PDAs derive at startup from `--symbols × --program-id` (default devnet `AgXLLTmUJEVh9EsJnznU1yJaUeE9Ufe7ZotupmDqa7f6`); SPY-PDA derivation verified by unit test against the live devnet `HfMaU9Qa54fp1V3uh11Qec81RgKUgzT6mxvFkmZ6V3LH`.
+- AMM-track carry-forward: Phase B (`profile_code = 2`) reuses this fetcher unchanged; rows land under the same venue at `profile=amm/`. No second venue, no second schema id, no second manifest unless freshness SLAs diverge.
 
 ## Retracted
 
@@ -91,6 +128,7 @@ Use `docs/phase_log.md` for details. Keep this list short and remove entries onc
 | 50 loud-failure ops | 70, 72, 73 | Freshness watchdog, proxy self-clear, and `scryer deploy` are current ops tools. |
 | 51 Paper-4 Phase-A xStock AMM panel | 97, 98, 101, 103, 107 | All five sub-items shipped (jito-bundle-tape, validator-client, dex-xstock-swaps forward-poll, clmm/dlmm pool-state). 51e historical range backfill remains a separate operator job. |
 | 52 yahoo single_stock_iv first runner rows | 107 | Forward poll live; promotion to Done still gated on ~20 weekends or paid-venue backfill. |
+| 54 `oracle.soothsayer_v6.band_tape.v2` | 110 | Code-shipped, runner-live; one venue across Lending+AMM with `profile=lending|amm` partition key. Decode via `soothsayer-consumer` path-dep. Awaiting cross-repo publisher daemon for first row. |
 | LVR Job 2 | 79 | Helius enhanced path supersedes Flipside; 26h spot-check gates 180d run. |
 
 ## Methodology Entries Needed

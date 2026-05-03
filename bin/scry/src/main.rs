@@ -46,6 +46,7 @@ mod loopscale_loans_cmd;
 mod mango_v4_liquidations_cmd;
 mod mango_v4_oracle_configs_cmd;
 mod marginfi_reserves_cmd;
+mod nasdaq_intraday_cmd;
 mod oracle_context_cmd;
 mod pool_snapshots_cmd;
 mod priority_fees_cmd;
@@ -57,6 +58,7 @@ mod redstone_cmd;
 mod rss_cmd;
 mod sec_cmd;
 mod solana_cmd;
+mod soothsayer_band_tape_cmd;
 mod status_cmd;
 mod v5_cmd;
 mod validator_client_cmd;
@@ -168,6 +170,25 @@ enum Command {
     /// counts, last error, and blocked-dependency impact in one
     /// glance. Defaults to text output; `--format json` for tooling.
     Status(status_cmd::StatusArgs),
+    /// Nasdaq-domain fetchers reading from `nasdaq_halts.v1`. v1
+    /// surface: `halts-intraday` (1m Yahoo bars around each halt
+    /// event in the lookback window — Soothsayer W6 unblocker).
+    Nasdaq(NasdaqCmd),
+}
+
+#[derive(Parser, Debug)]
+struct NasdaqCmd {
+    #[command(subcommand)]
+    target: NasdaqTarget,
+}
+
+#[derive(Subcommand, Debug)]
+enum NasdaqTarget {
+    /// 1-minute Yahoo intraday bars around each `nasdaq_halts.v1`
+    /// event in the lookback window. Writes to
+    /// dataset/nasdaq/halts_intraday/v1/symbol={X}/year=Y/month=M/day=D.parquet.
+    /// Yahoo's 1m chart endpoint caps backfill at 7 days.
+    HaltsIntraday(nasdaq_intraday_cmd::HaltsIntradayArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -656,6 +677,13 @@ enum SolanaTarget {
     /// Wishlist 51d. Pool set discovered live via GeckoTerminal
     /// (`dex.id == "meteora"`) unless `--pools-file` is provided.
     DlmmPoolState(dlmm_pool_state_cmd::DlmmPoolStateArgs),
+    /// Single-tick mirror of soothsayer's on-chain `PriceUpdate` PDAs
+    /// for `oracle.soothsayer_v6.band_tape.v2`. Wishlist 54.
+    /// Decodes via the `soothsayer-consumer` path-dep, partitions by
+    /// `profile_code` (`profile=lending|amm`), filters legacy
+    /// `profile_code=0` rows. Schedule via the `runner-tick` plist
+    /// at 60s.
+    SoothsayerBandTape(soothsayer_band_tape_cmd::SoothsayerBandTapeArgs),
 }
 
 #[tokio::main]
@@ -732,6 +760,9 @@ async fn main() -> Result<()> {
             SolanaTarget::DlmmPoolState(a) => {
                 dlmm_pool_state_cmd::run_dlmm_pool_state(a).await
             }
+            SolanaTarget::SoothsayerBandTape(a) => {
+                soothsayer_band_tape_cmd::run_soothsayer_band_tape(a).await
+            }
         },
         Command::Redstone(c) => match c.target {
             RedstoneTarget::Tape(a) => redstone_cmd::run_tape(a).await,
@@ -798,6 +829,9 @@ async fn main() -> Result<()> {
         Command::Freshness(a) => freshness_cmd::run_freshness(a).await,
         Command::Analytics(c) => analytics_cmd::run_analytics(c).await,
         Command::Status(a) => status_cmd::run_status(a).await,
+        Command::Nasdaq(c) => match c.target {
+            NasdaqTarget::HaltsIntraday(a) => nasdaq_intraday_cmd::run_halts_intraday(a).await,
+        },
     }
 }
 

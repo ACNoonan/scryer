@@ -37,12 +37,22 @@ pub struct BarsArgs {
     /// as upstream errors; consumers can ignore.)
     #[arg(long, value_delimiter = ',', required = true)]
     symbols: Vec<String>,
-    /// Window start as `YYYY-MM-DD` UTC.
-    #[arg(long)]
+    /// Window start as `YYYY-MM-DD` UTC. When unset, defaults to
+    /// `--lookback-days` before today (UTC).
+    #[arg(long, default_value = "")]
     start: String,
-    /// Window end as `YYYY-MM-DD` UTC.
-    #[arg(long)]
+    /// Window end as `YYYY-MM-DD` UTC. When unset, defaults to
+    /// today (UTC).
+    #[arg(long, default_value = "")]
     end: String,
+    /// Rolling-window lookback in days when `--start`/`--end` are
+    /// omitted. Used by the daily forward-poll manifest so the
+    /// fetch keeps pulling the most recent N days of bars without
+    /// having to re-stamp dates per fire. Stooq returns the full
+    /// window; the store dedups on `(symbol, ts)` so re-pulls are
+    /// idempotent.
+    #[arg(long, default_value_t = 7)]
+    lookback_days: i64,
     /// Stooq API key. Free, captcha-acquired at
     /// `https://stooq.com/q/d/?s=spy.us&get_apikey`. Defaults to the
     /// `STOOQ_API_KEY` env var (loaded from `./.env` via dotenvy).
@@ -161,6 +171,9 @@ pub async fn run_bars(args: BarsArgs) -> Result<()> {
             "Stooq apikey required; pass --apikey or set STOOQ_API_KEY env var. Acquire one at https://stooq.com/q/d/?s=spy.us&get_apikey"
         );
     }
+    if args.lookback_days <= 0 {
+        anyhow::bail!("--lookback-days must be positive; got {}", args.lookback_days);
+    }
     let cfg = PollConfig {
         request_timeout: Duration::from_secs(args.request_timeout_secs),
         retry_max: args.retry_max,
@@ -177,10 +190,23 @@ pub async fn run_bars(args: BarsArgs) -> Result<()> {
     let now = Utc::now();
     let meta = Meta::new(yahoo::v1::SCHEMA_VERSION, now.timestamp(), &args.source);
 
+    let end = if args.end.is_empty() {
+        now.format("%Y-%m-%d").to_string()
+    } else {
+        args.end.clone()
+    };
+    let start = if args.start.is_empty() {
+        (now - chrono::Duration::days(args.lookback_days))
+            .format("%Y-%m-%d")
+            .to_string()
+    } else {
+        args.start.clone()
+    };
+
     tracing::info!(
         symbols = args.symbols.len(),
-        start = args.start,
-        end = args.end,
+        start = %start,
+        end = %end,
         "fetching Stooq bars"
     );
 
@@ -193,8 +219,8 @@ pub async fn run_bars(args: BarsArgs) -> Result<()> {
             &args.base_url,
             &args.apikey,
             symbol,
-            &args.start,
-            &args.end,
+            &start,
+            &end,
             &meta,
         )
         .await

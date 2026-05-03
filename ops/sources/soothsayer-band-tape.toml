@@ -1,0 +1,59 @@
+# Wishlist 54 — `oracle.soothsayer_v6.band_tape.v2` forward poll.
+# Methodology: `methodology_log.md` "Soothsayer Lending-track Band
+# Tape — 2026-05-03". Schema:
+# docs/schemas.md#oraclesoothsayer_v6band_tapev2.
+#
+# 60s cadence. Each fire is 1 `getMultipleAccounts` (10 PDAs) + 1
+# `getBlockTime` = 2 RPC calls, ~200-500ms wall-clock. Cheap enough
+# to ride on the multi-manifest `runner-tick` plist alongside
+# `clmm-pool-state` / `dlmm-pool-state` / `validator-client` (no
+# dedicated Phase-B plist needed).
+#
+# PDAs derive deterministically from `seeds = [b"price",
+# symbol_padded_16]` against the program ID; the fetcher derives
+# them at startup from `--symbols` × `--program-id`. No static PDAs
+# file needed — the universe is locked at 10 symbols and the seed
+# derivation is verified by a unit test against the live devnet SPY
+# PDA. Mainnet promotion is a `--program-id` flip in this manifest
+# once soothsayer M6_REFACTOR.md Phase A8 lands.
+#
+# Single venue across both Lending (profile_code=1) and AMM
+# (profile_code=2) publishes; the fetcher partitions output by
+# `profile=lending|amm` at write time. AMM goes live in soothsayer
+# Phase B; until then this manifest only sees Lending rows.
+
+id = "soothsayer-band-tape"
+description = "Per-(symbol, publish_slot) mirror of soothsayer's on-chain PriceUpdate PDAs (Lending + AMM profiles)."
+schema_ids = ["oracle.soothsayer_v6.band_tape.v2"]
+
+[fetch]
+command = "scry"
+# `--proxy-url` points at devnet directly because the
+# soothsayer-oracle program is deployed there (Phase A5/A6/A7);
+# the local proxy `providers.json` is mainnet-only. Mainnet
+# promotion (soothsayer M6_REFACTOR.md Phase A8) will flip this
+# to `http://127.0.0.1:8899/rpc` and add a `--program-id` for the
+# mainnet program at the same time.
+args = [
+    "solana", "soothsayer-band-tape",
+    "--proxy-url", "https://api.devnet.solana.com",
+    "--source", "rpc:getMultipleAccounts:soothsayer-band-tape:runner",
+]
+
+[freshness]
+# Publisher cadence is weekly (Friday close). 86400s (= 1 day) +
+# 5×60s slack so daily polling does not page operators when the
+# next publish is days away.
+sla_secs = 86700
+
+[budget]
+# Per fire: 1 getMultipleAccounts + 1 getBlockTime = 2 calls.
+max_requests_per_run = 10
+
+[workflow]
+sensor = "interval(60s)"
+
+[criticality]
+tier = "tier-2"
+owner = "@adam"
+consumer_impact = "Receipt tape for soothsayer's served Lending/AMM bands (Kamino-fork lending, MarginFi reserve evaluators, Paper-3 protocol semantics). Stale = derived dashboards lag behind on-chain truth, not a paging event."

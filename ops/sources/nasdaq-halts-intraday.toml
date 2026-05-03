@@ -1,0 +1,55 @@
+# Wishlist 53. Soothsayer W6 unblocker. Daily fire at 22:30 UTC pulls
+# 1m Yahoo intraday bars around every halt event in the past 7 days
+# of `nasdaq_halts.v1`. Yahoo's 1m chart endpoint hard-caps backfill
+# at 7 days (older halts cannot be recovered from this source); the
+# `--lookback-days` matches that horizon so each fire re-fetches the
+# full retrievable window for cheap dedup-safe recovery.
+#
+# Why 22:30 UTC: 30 min after the equities-daily fire (22:00 UTC),
+# giving Yahoo extra time to flush late-session 1m bars and any
+# resumption-print bars from late-day halts. Re-fires within the
+# day are idempotent (dedup on (halt_event_id, ts)).
+#
+# Soft dependency: `nasdaq_halts.v1` must be reasonably fresh
+# (operator-fed via `scry rss nasdaq-halts` today; no runner
+# manifest exists for the halts table itself). If the halts table
+# goes stale, this manifest still fires successfully but emits zero
+# new bars — surface via consumer-side joins.
+#
+# Default symbol scope is "every halted symbol in the lookback
+# window" — the Soothsayer universe (SPY, QQQ, AAPL, GOOGL, NVDA,
+# TSLA, HOOD, GLD, TLT, MSTR) very rarely halts (zero events in the
+# past 30 days), so a strict-universe scope would produce an empty
+# dataset for months. Soothsayer-side joins filter to whatever
+# subset matters for analysis.
+
+id = "nasdaq-halts-intraday"
+description = "1m Yahoo intraday bars around each halt event in the past 7 days. Daily fire; FK-keyed to nasdaq_halts.v1 via halt_event_id."
+schema_ids = ["nasdaq_halts_intraday.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "nasdaq", "halts-intraday",
+    "--lookback-days", "7",
+    "--source", "yahoo:chart:v8:runner",
+]
+
+[criticality]
+tier = "tier-2"
+owner = "@adam"
+consumer_impact = "Per-halt 1m OHLCV for Soothsayer W6 oracle-band-coverage analysis. Stale = research gap (halt-window coverage analysis stalls); not a paging event. Forward-only beyond Yahoo's 7d horizon."
+
+[freshness]
+# 25h ceiling — daily fire should land within 24h of the prior
+# fire, plus 1h grace.
+sla_secs = 90000
+
+[budget]
+# Empirically <10 halt events/day on average across the entire halt
+# universe; each fire makes one Yahoo call per (symbol, halt_date).
+# 100 caps loosely above any plausible busy day.
+max_requests_per_run = 100
+
+[workflow]
+sensor = "daily(22:30Z)"

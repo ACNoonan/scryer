@@ -224,85 +224,58 @@ resolves.
 
 ## marginfi_liquidation.v1
 
-**Status.** locked 2026-04-29 — methodology entry "MarginFi-v2
-schemas — 2026-04-29 (locked)" in `methodology_log.md`. Phase TBD-B
-implementation pending.
+**Status.** locked 2026-04-29; row shape amended 2026-05-03 after IDL pre-flight (see methodology entry "MarginFi-v2 schemas"). Implementation pending.
 
-**Source.** Solana mainnet, MarginFi-v2 program
-`MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA` (verified on-chain
-2026-04-29; the soothsayer-doc-cited
-`MFv2hWf31Z4i1g2AhULZWnuwvvfuBQg4P4HFcXyFZi5` does not exist on
-mainnet — see methodology entry for verification chain). Anchor IX
-`lending_account_liquidate` (anchor disc to be pulled from
-`idl/marginfi/marginfi-v2.json` at implementation time). Accounts
-include `[marginfi_group, asset_bank, liab_bank,
-liquidator_marginfi_account, liquidatee_marginfi_account,
-asset_oracle, liab_oracle, signer]`. IX arg: `asset_amount: u64`
-(collateral seized, in asset-native units).
+**Source.** Solana mainnet, MarginFi-v2 program `MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA` (verified on-chain 2026-04-29). Anchor IX `lending_account_liquidate` (disc `[214,169,151,213,251,167,86,219]`). Direct IX accounts: `[group, asset_bank, liab_bank, liquidator_marginfi_account, authority (signer), liquidatee_marginfi_account, bank_liquidity_vault_authority, bank_liquidity_vault, bank_insurance_vault, token_program]`. Oracle accounts arrive via `remaining_accounts` gated by the `liquidatee_accounts: u8` and `liquidator_accounts: u8` count hints in the IX args. IX args: `asset_amount: u64`, `liquidatee_accounts: u8`, `liquidator_accounts: u8`.
 
-The conf-haircut prices and pre/post balances are emitted as Anchor
-events (`emit!`) in the program log stream
-(`LendingAccountLiquidateEvent`-style; exact event name pinned via
-IDL). Per-event row reconstructed from event log without re-fetching
-oracle snapshot at trigger time.
+Per-event decode pulls from three sources:
+1. The Anchor `LendingAccountLiquidateEvent` (disc `[166,160,249,154,183,39,23,242]`) for liquidatee account/authority, both banks, both mints, pre/post f64 health, and pre/post `LiquidationBalances` (four f64 balances per side).
+2. The outer transaction for `signature`, `slot`, `block_time`, `fee_payer`, and `liquidator` (top-level signer).
+3. Inner SPL Token Transfer instructions for native-unit `asset_amount_seized`, `liquidator_fee_paid`, and `insurance_fund_fee_paid` — these are *not* in the event.
+
+Oracle prices are *not* in-row; `asset_oracle` and `liab_oracle` pubkeys are carried as join keys for `oracle_context.v1` cross-source enrichment, resolved from the most recent `marginfi_reserve.v1::Bank.config.oracle_keys[0]` snapshot for each bank.
 
 ```
-signature                   string
-slot                        u64
-block_time                  i64
-group                       string  // pubkey of the Group
-liquidator                  string  // top-level signer pubkey
-liquidatee_account          string  // marginfi Account PDA
-liquidatee_authority        string  // owner of the liquidatee Account
-asset_bank                  string  // collateral side
-asset_mint                  string
-asset_symbol                string  // resolved via xStock/SPL registry, "?" otherwise
-liab_bank                   string  // debt side
-liab_mint                   string
-liab_symbol                 string
-asset_amount_seized         u64     // IX arg, in asset native units
-asset_amount_seized_decimal f64     // human-readable, divided by asset decimals
-asset_oracle_price          f64     // (P, conf) at trigger from event
-asset_oracle_conf           f64
-asset_effective_price       f64     // marginfi-effective: asset → P − conf
-liab_oracle_price           f64
-liab_oracle_conf            f64
-liab_effective_price        f64     // marginfi-effective: liability → P + conf
-liquidator_fee_paid         u64     // event-emitted; in asset native units
-insurance_fund_fee_paid     u64     // event-emitted; in asset native units
-fee_payer                   string  // outer-tx fee payer (Jito-bundle join key)
-pre_health                  f64     // (assets·maint − liabs·maint)/equity, sub-1.0 = liquidatable
-post_health                 f64     // expected ~1.0 after partial liquidation
+signature                       string
+ix_index                        u32     // inner-IX index within the tx (dedup component)
+slot                            u64
+block_time                      i64
+group                           string  // event.header.marginfi_group
+liquidator                      string  // top-level signer (outer tx)
+liquidatee_account              string  // event.liquidatee_marginfi_account
+liquidatee_authority            string  // event.liquidatee_marginfi_account_authority
+asset_bank                      string  // event.asset_bank
+asset_mint                      string
+asset_symbol                    string  // resolved via xStock/SPL registry, "?" otherwise
+asset_decimals                  u8      // mint metadata; 0 if unresolved
+asset_oracle                    string  // marginfi_reserve.v1::Bank.config.oracle_keys[0] for asset_bank
+liab_bank                       string  // event.liability_bank
+liab_mint                       string
+liab_symbol                     string
+liab_decimals                   u8
+liab_oracle                     string  // same lookup for liab_bank
+asset_amount_seized             u64     // native units; from inner SPL Token Transfer to liquidator
+asset_amount_seized_decimal     f64     // human-readable; pre_balances.liquidatee_asset_balance − post_balances.liquidatee_asset_balance from the event
+liquidator_fee_paid             u64     // native units; from inner SPL Token Transfer
+insurance_fund_fee_paid         u64     // native units; from inner SPL Token Transfer to bank_insurance_vault
+fee_payer                       string  // outer-tx fee payer (Jito-bundle OEV join key)
+pre_health                      f64     // event.liquidatee_pre_health; sub-1.0 = liquidatable
+post_health                     f64     // event.liquidatee_post_health; expected ~1.0 after partial liquidation
+pre_balances_liquidatee_asset   f64     // pre_balances.liquidatee_asset_balance (raw event)
+pre_balances_liquidatee_liab    f64
+post_balances_liquidatee_asset  f64
+post_balances_liquidatee_liab   f64
 ```
 
-**Dedup.** `_dedup_key = signature + ':' + ix_index` (matches Drift /
-Mango pattern; MarginFi liquidations can in principle bundle
-multiple seizures across asset/liab pairs in one tx).
+**Dedup.** `_dedup_key = signature + ':' + ix_index`. MarginFi liquidations can in principle bundle multiple seizures across asset/liab pairs in one tx; the (sig, ix_index) pair is unique per seizure.
 
-**Storage.** `dataset/marginfi/liquidations/v1/year=Y/month=M/day=D.parquet`.
-venue `marginfi`, data_type `liquidations`, daily, no key
-(event-stream pattern matching `kamino_liquidation.v1`).
+**Storage.** `dataset/marginfi/liquidations/v1/year=Y/month=M/day=D.parquet`. venue `marginfi`, data_type `liquidations`, daily, no key (event-stream pattern matching `kamino_liquidation.v1`).
 
-**Fetcher.** `crates/scryer-fetch-solana/src/marginfi_liquidations.rs`
-(future). `sig_paginate::get_signatures_in_window` (filter: program
-ID, optionally per-Bank PDA for high-density sampling) +
-`parse_transactions::parse_all` + IDL-driven event decode. Use
-`--use-get-transaction` for proxy-routed quota-resilient fallback.
+**Fetcher.** `crates/scryer-fetch-solana/src/marginfi_liquidations.rs` (future). Pipeline: `sig_paginate::get_signatures_in_window` filtered to MarginFi program ID → `parse_transactions::parse_all` (Helius parseTransactions) or proxy-routed `getTransaction` for stage 2 → IDL-driven Anchor event decode for the LendingAccountLiquidateEvent → inner-IX SPL Token Transfer decode for native-unit amounts and fees → `marginfi_reserve.v1` snapshot lookup for `asset_oracle` / `liab_oracle`. Use `--use-get-transaction` for proxy-routed quota-resilient fallback.
 
-**CLI.** `scry solana marginfi-liquidations --start DATE --end DATE
-[--xstock-only | --all] [--group PUBKEY] --proxy-url URL
---helius-api-key KEY [--use-get-transaction]`.
+**CLI.** `scry solana marginfi-liquidations --start DATE --end DATE [--xstock-only | --all] [--group PUBKEY] --proxy-url URL --helius-api-key KEY [--use-get-transaction]`.
 
-**Why a separate panel and not a v2 of `kamino_liquidation.v1`.**
-Two reasons. (1) The `pre_health` / `post_health` semantics are
-MarginFi-specific (computed against the asset-weight-maint /
-liability-weight-maint tuple per Bank, not Kamino's reserve LTV
-gate). Mixing them under one schema would either lose the
-provenance or force a `protocol` discriminator column that consumers
-must filter on every query — same footgun as the `chainlink_data_streams.v1`
-v10/v11 `market_status` mix-up. (2) MarginFi's per-side oracle keys
-are multi-account lists (`bank.config.oracle_keys`) where Kamino's
-are single — the row shape diverges naturally.
+**Why a separate panel and not a v2 of `kamino_liquidation.v1`.** Two reasons. (1) The `pre_health` / `post_health` semantics are MarginFi-specific (computed against the asset-weight-maint / liability-weight-maint tuple per Bank, not Kamino's reserve LTV gate). Mixing them under one schema would either lose the provenance or force a `protocol` discriminator column that consumers must filter on every query — same footgun as the `chainlink_data_streams.v1` v10/v11 `market_status` mix-up. (2) MarginFi's per-side oracle keys are multi-account lists (`bank.config.oracle_keys`) where Kamino's are single — the row shape diverges naturally.
 
 ---
 
@@ -1865,8 +1838,23 @@ throttle that broke item 14 (yfinance issue tracker #2128, #2288,
 
 **Source.** Stooq (Yahoo path replaced — see item 14 caveat).
 
-**CLI.** `scry equities bars --symbols SPY,QQQ,... --start DATE
---end DATE`.
+**CLI.** `scry equities bars --symbols SPY,QQQ,... [--start DATE
+--end DATE | --lookback-days N]`. The lookback form keeps the
+forward-poll manifest static.
+
+**Forward-poll cadence.** `ops/sources/equities-daily.toml` fires
+`daily(22:00Z)` over the 10-symbol Soothsayer universe (SPY, QQQ,
+AAPL, GOOGL, NVDA, TSLA, HOOD, GLD, TLT, MSTR) with
+`--lookback-days 7`. 22:00 UTC is post-NYSE-close in both EDT
+(20:00 UTC) and EST (21:00 UTC), giving Stooq 1–2 h to publish the
+session's EOD bar. Tuesday-morning Soothsayer consumers see the
+prior Monday's `open` reliably. Stooq is EOD-only, so a 14:30 UTC
+fire (NYSE-open + 1 h) would only ever capture the previous
+session — post-close is the correct cadence for this source.
+Freshness SLA is 25 h (`sla_secs = 90000`); enforced by the
+`analytics-freshness-check` manifest writing
+`internal.scryer.freshness_check.v2` rows. Operators query
+`severity != 'ok'` for active alerts.
 
 **Migration note.** Originally proposed via yfinance; bot-detection
 issues forced the Stooq pivot. Existing pinned parquet snapshots in
@@ -2050,6 +2038,68 @@ existing `_source = "nasdaq:rss"`.
 (older Nasdaq RSS, ~2023) and `<ndaq:MarketCategory>` (current) for
 the same `market_category` column — the Wayback backfill needs
 this because older snapshots predate the rename.
+
+---
+
+## nasdaq_halts_intraday.v1
+
+**Status.** code-shipped + runner-live 2026-05-03 (phase 109; wishlist
+item 53). Data-pending until at least one halt event lands within
+Yahoo's 7-day backfill horizon.
+
+**Source.** Yahoo Finance public `/v8/finance/chart` endpoint at
+`interval=1m`. No cookie + crumb auth required (unlike the daily-bar
+path that drove the Stooq pivot for `yahoo.v1`); a browser-shaped
+User-Agent is sufficient. `includePrePost=false` so only regular-
+session bars land. Lives in `scryer-fetch-equities::yahoo_intraday`.
+
+**Backfill horizon.** 7 days. Yahoo's 1m chart endpoint returns
+empty `timestamp[]` for any `period1` older than 7 days back; older
+halts simply cannot be captured from this source. Promote to a paid
+intraday venue (Polygon, Tradier, Databento US-equity 1m) if W6
+analysis needs deeper history; the row schema is shared.
+
+```
+symbol           string  // halted ticker
+halt_event_id    string  // FK = nasdaq_halts.v1::Halt::dedup_key()
+                         //  ("nasdaq_halt:{underlying}:{halt_date}:{halt_time}")
+ts               i64     // unix seconds, minute-aligned UTC
+open             f64
+high             f64
+low              f64
+close            f64
+volume           i64
+```
+
+**Dedup.** `_dedup_key = "nasdaq_halts_intraday:{halt_event_id}:{ts}"`.
+Re-fetches collapse cleanly. Same minute-bar tagged under multiple
+`halt_event_id` values when a symbol gets halted multiple times the
+same day — intentional so per-event joins stay simple. Consumers
+wanting unique bars dedup by `(symbol, ts)` at read time.
+
+**Storage.** `dataset/nasdaq/halts_intraday/v1/symbol={X}/year=Y/month=M/day=D.parquet`.
+Daily, symbol-keyed — matches `cme/intraday_1m`'s pattern.
+
+**CLI.** `scry nasdaq halts-intraday [--lookback-days N (1..=7)]
+[--symbols A,B,...] [--source LABEL]`. Default scope is every
+halted symbol in the lookback window (the Soothsayer 10-symbol
+universe rarely halts; strict scoping would empty the dataset for
+months). Soothsayer-side joins filter to whatever subset matters.
+
+**Forward-poll cadence.** `ops/sources/nasdaq-halts-intraday.toml`
+fires `daily(22:30Z)` — 30 min after `equities-daily`'s 22:00 UTC
+fire so Yahoo has flushed any late-session 1m bars. Freshness SLA
+25 h. Soft dependency: `nasdaq_halts.v1` must be reasonably fresh
+(operator-fed via `scry rss nasdaq-halts` today; no runner manifest
+exists for the halts table itself).
+
+**Crate.** `scryer-fetch-equities::yahoo_intraday` (raw 1m parser
+only — schema-agnostic, reusable for non-halts intraday use cases).
+CLI in `bin/scry/src/nasdaq_intraday_cmd.rs`.
+
+**Soothsayer consumer.** W6 oracle-band coverage during NASDAQ
+halts (Paper-3 §Structural complement). See
+`soothsayer/VALIDATION_BACKLOG.md` W6.
 
 ---
 
@@ -2432,3 +2482,105 @@ captured_at_unix_secs   i64                when the extract job ran
 ```
 
 **CLI.** `scry analytics dead-letter-extract [--day today|yesterday|YYYY-MM-DD] [--manifests DIR]`. Hourly cadence under the runner; idempotent on `run_id`.
+
+---
+
+## oracle.soothsayer_v6.band_tape.v2
+
+**Status.** code-shipped 2026-05-03, data-pending — methodology lock
+`Soothsayer Lending-track Band Tape - 2026-05-03`. Wishlist item 54.
+Promotes to Done after at least one row lands under
+`dataset/oracle.soothsayer_v6/band_tape/v2/profile=lending/...`.
+Soothsayer-side publisher daemon (M6_REFACTOR Phase A5 step 2) is
+the gating dependency on the producer side.
+
+**Purpose.** Mirror of soothsayer's on-chain `PriceUpdate` PDAs into
+a forward-cursor parquet tape. Downstream consumers (Kamino-fork
+lending, MarginFi reserve evaluators, Paper-3 protocol semantics)
+backtest against a real on-chain receipt history rather than
+re-deriving from soothsayer's predicted-band artefact parquet.
+First entry in the `oracle` domain that mirrors a write-side daemon's
+on-chain output (sibling to v5 oracle tape captures, which mirror
+read-side PDAs).
+
+**Source.** Solana on-chain `PriceUpdate` PDAs written by the
+soothsayer-oracle Anchor program. Devnet program ID
+`AgXLLTmUJEVh9EsJnznU1yJaUeE9Ufe7ZotupmDqa7f6`. PDAs derive from
+`seeds = [b"price", symbol_padded_16]` where symbol is ASCII NUL-padded
+to 16 bytes; the fetcher derives PDAs at startup from
+`--symbols × --program-id` (no static address file).
+
+Universe: SPY, QQQ, AAPL, GOOGL, NVDA, TSLA, MSTR, HOOD, GLD, TLT
+(10 symbols).
+
+**Decode contract.** Delegates to the `soothsayer-consumer` crate
+(`#![no_std]` path-dep at `../soothsayer/crates/soothsayer-consumer`)
+via `decode_price_update(account_data)`. The 8-byte Anchor
+discriminator + 128-byte body layout is owned by that crate as the
+single source of truth; scryer never re-implements the byte offsets.
+Pre-A4 publishes naturally decode as `profile_code = 0` and are
+filtered out at the fetcher boundary — they predate the dual-profile
+wire format and don't belong in this venue.
+
+**Profile axis.** Single schema across both Lending (`profile_code=1`)
+and AMM (`profile_code=2`) publishes. Partition key `profile`
+(`profile=lending|amm`) splits the two at write time. Sibling venues
+per profile are explicitly rejected — same row shape, same fetcher,
+same decode contract. AMM rows land here once soothsayer Phase B
+clears the M6a forward-predictor gate.
+
+**Schema id.** `oracle.soothsayer_v6.band_tape.v2`.
+**Venue arg to `Dataset::write`.** `oracle.soothsayer_v6`.
+**Path layout.**
+`dataset/oracle.soothsayer_v6/band_tape/v2/profile={lending,amm}/year=Y/month=M/day=D.parquet`.
+
+```
+symbol               string   e.g. "SPY"
+symbol_class         string   equity_index | equity_meta | equity_highbeta |
+                              equity_recent | gold | bond
+fri_ts               i64      UTC seconds, Friday close anchor
+profile_code         u8       1 = lending, 2 = amm (legacy 0 filtered)
+regime_code          u8       0 = normal, 1 = long_weekend, 2 = high_vol,
+                              3 = shock_flagged
+forecaster_code      u8       per soothsayer-consumer (mondrian = 2)
+exponent             i32      i8 widened for arrow round-trip; conventionally -8
+target_coverage_bps  u16      e.g. 9500 = τ = 0.95
+claimed_served_bps   u16      served τ' = τ + δ(τ)
+buffer_applied_bps   u16      δ(τ) at the request τ
+point                i64      fixed-point price (× 10^exponent)
+lower                i64      band lower (fixed-point)
+upper                i64      band upper (fixed-point)
+fri_close            i64      anchor Friday close (fixed-point)
+publish_ts           i64      UTC seconds — observed publish slot ts
+publish_slot         i64      Solana slot (u64 stored as i64 per repo convention)
+signer               string   publisher pubkey (base58)
+signer_epoch         i64      signer-set epoch (u64 stored as i64)
+pda                  string   PriceUpdate PDA address (base58)
+_schema_version      string   "oracle.soothsayer_v6.band_tape.v2"
+_fetched_at          i64      UTC seconds — getBlockTime(context.slot)
+_source              string   "rpc:getMultipleAccounts:soothsayer-band-tape:runner"
+_dedup_key           string
+```
+
+**Dedup.** `_dedup_key = "band_tape:{symbol}:{publish_slot}"`.
+`publish_slot` is unique per on-chain publish; profile is
+intentionally excluded so re-running a fire after a profile
+transition produces stable keys.
+
+**`symbol_class` enrichment.** Hardcoded in the fetcher (does not
+parse soothsayer's `m6b2_lending_artefact_v1.json`) so ingest
+reproducibility under Hard Rule 7 is decoupled from soothsayer build
+artefacts. Mapping mirrors soothsayer M6_REFACTOR.md A1:
+`equity_index` (SPY, QQQ); `equity_meta` (AAPL, GOOGL); `equity_highbeta`
+(NVDA, TSLA, MSTR); `equity_recent` (HOOD); `gold` (GLD); `bond` (TLT).
+
+**Caveat — published wire vs on-chain account.** The 67-byte Borsh
+`PublishPayload` wire format and the 128-byte on-chain `PriceUpdate`
+account are different; this venue mirrors the **account**, decoded via
+the `getMultipleAccounts` path. Do not confuse the two when
+debugging.
+
+**CLI.**
+`scry solana soothsayer-band-tape [--symbols SPY,...] [--program-id ...] [--profile-codes 1,2] [--source LABEL]`.
+Single-tick fire — schedule via the multi-manifest `runner-tick`
+plist at 60s cadence. Manifest: `ops/sources/soothsayer-band-tape.toml`.
