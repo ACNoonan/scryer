@@ -615,7 +615,11 @@ trader                 string  pubkey
 
 **Dedup.** `_dedup_key = signature + ':' + ix_index`.
 
-**Storage.** `dataset/solana_dex/xstock_swaps/v1/year=Y/month=M/day=D.parquet`.
+**Storage.** `dataset/dex_xstock/swaps/v1/symbol={X}/year=Y/month=M/day=D.parquet`.
+Daily, keyed by `xstock_symbol` (`venue::DEX_XSTOCK` in
+`scryer-store`). Earlier doc revisions named this
+`solana_dex/xstock_swaps/v1`; that path was never used in code or
+shipped data. The path here is canonical.
 
 **CLI.** `scry solana dex-xstock-swaps --start DATE --end DATE
 [--dex ALL|orca,meteora,phoenix,raydium_clmm]
@@ -786,10 +790,15 @@ the methodology log; concrete CLI lands with the fetcher phase.
 
 ## dlmm_pool_state.v1
 
-**Status.** proposed — methodology entry locked
-2026-05-01 ("Paper-4 Phase-A capture spec"). Schema-only; fetcher in
-the new `scryer-fetch-solana-pool-state` crate ships under a
-subsequent phase.
+**Status.** code shipped, data-pending — phase 105 (2026-05-02).
+Methodology entry locked 2026-05-01 ("Paper-4 Phase-A capture
+spec"). Fetcher: `scryer-fetch-solana::dlmm_pool_state` (two-pass
+`getMultipleAccounts`: LbPair → derive BinArray PDA → active-bin
+reserves). Pool list at `ops/sources/data/dlmm-pools.txt` is empty
+at first ship — operator runs `scry solana dlmm-pool-state` (no
+`--pools-file`) to populate from live GeckoTerminal discovery; the
+runner-tick manifest's 300s freshness SLA is the forcing function
+for marking 51d data-shipped.
 
 **Source.** Solana account state for Meteora DLMM pools touching the
 8 xStock mints. Push-based forward capture via a Geyser
@@ -819,9 +828,12 @@ volatility_accumulator     i64    nullable
 **Storage.** `dataset/solana_dex/dlmm_pool_state/v1/year=Y/month=M/day=D.parquet`.
 Daily, no key (single DEX program).
 
-**CLI.** `scry solana dlmm-pool-state {watch | poll}
---pools <FILE> --proxy-url URL [--dataset DIR]` — surface pinned in
-the methodology log; concrete CLI lands with the fetcher phase.
+**CLI.** `scry solana dlmm-pool-state [--pools-file FILE]
+[--proxy-url URL] [--dataset DIR]` — single-tick. Each fire is a
+two-pass `getMultipleAccounts` (LbPair pass + BinArray pass) plus
+`getBlockTime`. Without `--pools-file`, GeckoTerminal discovery
+runs (`dex.id == "meteora"`); with `--pools-file`, only listed
+pubkeys are polled.
 
 ---
 
@@ -2146,6 +2158,68 @@ dvol              f64
 
 ---
 
+## volatility.yahoo.single_stock_iv.v2
+
+**Status.** code-shipped 2026-05-02, data-pending — methodology lock
+`Single-Stock IV Schema - 2026-05-02`. First entry in the
+`volatility` domain outside the queued `deribit_iv.v1` migration.
+Wishlist item 52.
+
+**Purpose.** Per-symbol weekend-horizon implied volatility for the
+Paper-1 ladder: one ATM IV reading per symbol per capture, taken at
+the front-week expiry > capture-ts + 7 days. Forward-only on the
+free `yahoo` venue; paid-venue backfills (OptionMetrics, CBOE) land
+as separate schema ids under the same record-type shape.
+
+**Source.** Yahoo Finance public options endpoint:
+`https://query2.finance.yahoo.com/v7/finance/options/{symbol}`. No
+auth, no key. Returns the next chain by default plus the array of
+all expiry unix timestamps; the fetcher iterates expirations to
+locate the smallest one strictly greater than `capture_ts + 7d` and
+queries that chain by `?date=<unix_secs>`. Yahoo's options endpoint
+has not been observed to hit the bot-detection wall that drove
+`yahoo.v1::Bar` to Stooq, but may need a Databento or Tradier
+fallback if it does (no fallback in v1).
+
+**ATM rule.** The strike whose absolute distance from
+`underlier_close` is minimum at the chosen expiry. Linear
+interpolation and forward-priced ATM are deferred per methodology.
+
+**Schema id.** `volatility.yahoo.single_stock_iv.v2`.
+**Venue arg to `Dataset::write`.** `volatility.yahoo`.
+**Path layout.**
+`dataset/volatility.yahoo/single_stock_iv/v2/year=Y/month=M/day=D.parquet`.
+
+```
+symbol           string         e.g. "AAPL"
+ts               i64            capture wall-clock, unix seconds
+expiry           i32            chosen expiry as days-since-epoch (Date32)
+days_to_expiry   i32            (expiry_unix - ts) / 86400, rounded
+atm_iv           f64            annualized implied vol, percent (e.g. 28.5)
+underlier_close  f64 nullable   spot price the chain was anchored to
+_schema_version  string         "volatility.yahoo.single_stock_iv.v2"
+_fetched_at      i64
+_source          string
+_dedup_key       string
+```
+
+**Dedup.** `_dedup_key = "yahoo:{symbol}:{ts}"`. `days_to_expiry` and
+`expiry` are derived from `ts` and the chain choice and are not in
+the key — re-running the same capture timestamp yields the same row.
+
+**Field optionality rationale.** `underlier_close` is nullable
+because Yahoo occasionally returns the chain without a fresh quote
+block (after-hours, halts, very-illiquid names); the IV reading is
+still useful in those cases.
+
+**CLI.**
+`scry equity-options iv-snapshot --symbols SPY,QQQ,AAPL,GOOGL,NVDA,TSLA,MSTR,HOOD --source yahoo`.
+A future `--start/--end` mode lands when a paid-venue backfill
+fetcher is added; the yahoo venue does not support historical
+chains.
+
+---
+
 ## intl_session_etfs (no new schema)
 
 **Status.** done 2026-04-29 — shipped via existing `yahoo.v1::Bar`
@@ -2285,3 +2359,76 @@ last_run_at_unix_secs    i64                max(triggered_at_unix_secs) for the 
 ```
 
 **CLI.** `scry analytics workflow-runs [--day yesterday|today|YYYY-MM-DD]`. The daily-analytics manifest passes no `--day` argument so the default `yesterday` applies.
+
+---
+
+## internal.scryer.freshness_check.v2
+
+**Status.** done 2026-05-02 — phase 96. First canonical partition:
+`dataset/internal.scryer/freshness_check/v2/year=2026/month=05/day=02.parquet`,
+written by `scry analytics freshness-check` at MX.2. Per-manifest
+staleness audit driven by the manifest's own `[freshness].sla_secs`.
+Lives in `crates/scryer-schema/src/freshness_check.rs`.
+
+**Purpose.** One row per (manifest_id, check_at) pair. Operators
+query `severity != 'ok'` to see active alerts. The runner fires the
+analytics command every 300s; each row records the most recent
+successful workflow_run row for the manifest and computes
+staleness vs the configured SLA.
+
+**Closed `severity` vocabulary.** `ok` (last success within SLA),
+`stale` (last success > SLA ago), `missing` (no successful row in
+the scan window — never fired or only failed), `failing` (most
+recent row was non-succeeded regardless of staleness — surfaces
+"firing on schedule but failing at the upstream call"). Validated
+by `freshness_check::v2::is_canonical_severity`.
+
+```
+check_at_unix_secs           i64                  when the check ran
+manifest_id                  string               kebab-case manifest id
+sla_secs                     i64                  copy of the manifest's [freshness].sla_secs
+last_succeeded_at_unix_secs  i64    nullable      newest succeeded workflow_run.triggered_at
+last_fire_status             string nullable      most recent attempt's status, regardless of success
+staleness_secs               i64    nullable      check_at - last_succeeded_at
+is_stale                     bool                 derived from severity
+severity                     string               closed: ok / stale / missing / failing
+```
+
+**CLI.** `scry analytics freshness-check [--manifests DIR]`. The
+analytics manifest passes the staged manifests dir.
+
+---
+
+## internal.scryer.dead_letter.v2
+
+**Status.** done 2026-05-02 — phase 96. First canonical partition:
+`dataset/internal.scryer/dead_letter/v2/year=2026/month=05/day=02.parquet`,
+written by `scry analytics dead-letter-extract` at MX.3. Failed
+attempts captured with enough context to replay or inspect.
+Lives in `crates/scryer-schema/src/dead_letter.rs`.
+
+**Purpose.** Sibling table to `internal.scryer.workflow_run.v2`.
+Every dead-letter row links back via `run_id` (the dedup key). The
+extract subcommand additionally captures `step_command` +
+`step_args_json` from the live manifest at extract time so a
+replay tool only needs this row, not a manifest snapshot. Renamed
+or deleted manifests get a `step_command = "unknown"` sentinel.
+
+```
+run_id                  string             matches workflow_run.run_id; _dedup_key
+manifest_id             string
+attempt                 i32
+sensor_expression       string             raw sensor that fired (e.g. "interval(60s)")
+triggered_at_unix_secs  i64
+finished_at_unix_secs   i64    nullable
+duration_ms             i64    nullable
+status                  string             original failed terminal status
+exit_code               i32    nullable
+error_class             string nullable    low-cardinality classifier
+error_message           string nullable    truncated stderr tail
+step_command            string             manifest's [fetch].command at extract time
+step_args_json          string             JSON-encoded [fetch].args
+captured_at_unix_secs   i64                when the extract job ran
+```
+
+**CLI.** `scry analytics dead-letter-extract [--day today|yesterday|YYYY-MM-DD] [--manifests DIR]`. Hourly cadence under the runner; idempotent on `run_id`.

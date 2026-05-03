@@ -20,6 +20,11 @@ args = [
     "--source", "pyth:hermes:runner",
 ]
 
+[criticality]
+tier = "tier-0"
+owner = "@adam"
+consumer_impact = "Pyth Hermes oracle benchmark tape. Foundational oracle source for Paper-3, OEV joins, and downstream xStock/equity research. 60s cadence + low SLA mean staleness is highly visible — always page-worthy."
+
 [freshness]
 # 2x cadence — alert if no fresh row inside 120s.
 sla_secs = 120

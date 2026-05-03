@@ -22,6 +22,11 @@ args = [
     "--source", "redstone:gateway:runner",
 ]
 
+[criticality]
+tier = "tier-0"
+owner = "@adam"
+consumer_impact = "RedStone Live oracle tape for SPY/QQQ/MSTR. Foundational equity-oracle input — Paper-3, OEV joins, oracle-disagreement detection all read this. Stale = downstream blocked."
+
 [freshness]
 # 2x cadence — alert if no fresh row inside 20 minutes.
 sla_secs = 1200

@@ -1,0 +1,39 @@
+# MX.3 — Dead-letter parquet.
+#
+# Extracts non-succeeded workflow_run.v2 rows for one UTC day,
+# joins each row with its source manifest's `[fetch]` block to
+# capture `step_command` + `step_args_json`, and emits one
+# `internal.scryer.dead_letter.v2` row per failed run. Replay
+# tooling reads dead_letter rows directly — no manifest snapshot
+# lookup needed — so a renamed/deleted manifest doesn't strand
+# the dead-letter chain.
+#
+# Cadence: hourly. Failures are retried (eventually — PR.2) before
+# reaching the dead-letter stage; capturing once per hour gives
+# enough context to triage without flooding the dead_letter
+# partition with the same failure repeated 60×.
+
+id = "analytics-dead-letter"
+description = "Hourly extract of failed workflow_run rows into dead_letter.v2 with replay context (step_command + step_args_json)."
+schema_ids = ["internal.scryer.dead_letter.v2"]
+
+[fetch]
+command = "scry"
+args = [
+    "analytics", "dead-letter-extract",
+    "--manifests", "/Users/adamnoonan/Library/Application Support/scryer/manifests",
+    "--source", "scry:analytics:dead-letter-extract:runner",
+]
+
+[criticality]
+tier = "tier-2"
+owner = "@adam"
+consumer_impact = "Hourly extract of failed runs (MX.3). Operator triage tool. Stale = harder to triage failures, but the underlying workflow_run.v2 is still authoritative."
+
+[freshness]
+# 2.5x cadence — alert if no fresh extract inside 9000s. Generous
+# because dead-letter is a triage tool, not a real-time alerter.
+sla_secs = 9000
+
+[workflow]
+sensor = "interval(3600s)"

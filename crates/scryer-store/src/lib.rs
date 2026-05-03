@@ -36,10 +36,12 @@ mod partition;
 pub mod schema;
 
 use std::collections::BTreeMap;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arrow_array::RecordBatch;
+use fs4::fs_std::FileExt;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
@@ -101,6 +103,17 @@ pub mod venue {
     /// kamino_scope / pyth / v5_tape / redstone tapes against the
     /// liquidation panels.
     pub const ORACLE_CONTEXT: &str = "oracle_context";
+    /// Per-epoch Solana leader→client mapping for `validator_client.v1`
+    /// (wishlist 51b). Distinct from the `solana` venue (priority-fees,
+    /// scope tape) because client-label data is per-validator metadata,
+    /// not per-slot/per-block.
+    pub const SOLANA_VALIDATOR: &str = "solana_validator";
+    /// Per-(pool, slot) tick/bin state for CLMM/DLMM pools touching
+    /// xStock mints (`clmm_pool_state.v1` + `dlmm_pool_state.v1`,
+    /// wishlist 51c/51d). Distinct from `dex_xstock` (per-tx swap
+    /// prints) because pool-state captures live alongside the
+    /// liquidity-side snapshot, not the trade flow.
+    pub const SOLANA_DEX: &str = "solana_dex";
     /// Soothsayer experiment v5 (Chainlink + Jupiter joined tape).
     /// Per the methodology log "Soothsayer venue versioning" section,
     /// each soothsayer experiment iteration gets its own venue
@@ -115,6 +128,14 @@ pub mod venue {
     /// schemas will follow this `<domain>.<source>` venue convention
     /// once Wave-1 migrations land (M2.3).
     pub const INTERNAL_SCRYER: &str = "internal.scryer";
+
+    /// Free Yahoo Finance options venue for the
+    /// `volatility.yahoo.single_stock_iv.v2` schema (wishlist
+    /// item 52). Per-venue split: paid backfill venues
+    /// (`volatility.tradier`, `volatility.optionmetrics`,
+    /// `volatility.cboe`) land as separate constants under their own
+    /// schema ids.
+    pub const VOLATILITY_YAHOO: &str = "volatility.yahoo";
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -157,8 +178,16 @@ impl Dataset {
         let mut stats = WriteStats::default();
         for (pt, part_rows) in by_partition {
             let path = partition_path_for::<S>(&self.root, venue, partition_key, pt);
-            let existing = read_partition::<S>(&path)?;
             let new_count = part_rows.len();
+            // Hold the per-partition flock across the entire
+            // read → merge → tmp-write → rename cycle. Two concurrent
+            // writers (e.g. `scryer-runner` ticks targeting the shared
+            // `internal.scryer/workflow_run/v2/...` partition) would
+            // otherwise both read the same N-row state and race on
+            // rename, silently dropping rows or producing parquet with
+            // a doubled PAR1 footer.
+            let _guard = PartitionLock::acquire(&path)?;
+            let existing = read_partition::<S>(&path)?;
             let (merged, deduped) = merge_dedup(existing, part_rows, |r| r.dedup_key());
             let batch = S::to_record_batch(&merged)?;
             write_batch_atomic(&path, &batch)?;
@@ -377,9 +406,17 @@ fn open_parquet_reader(
     Ok(Some(builder.build()?))
 }
 
-/// Atomic write: serialize `batch` to `{path}.tmp` (parquet, snappy),
-/// fsync, then rename into place. A `scry` process killed between
-/// `create` and `rename` leaves any prior version of `path` intact.
+/// Atomic write: serialize `batch` to a per-process unique tempfile
+/// (parquet, snappy), fsync, then rename into place. A `scry` process
+/// killed between `create` and `rename` leaves any prior version of
+/// `path` intact.
+///
+/// The tempfile name is `{path}.{pid}.{counter}.tmp` so two concurrent
+/// writers — even if one is unlocked, e.g. a stale process from a
+/// prior run — never share a tmp filename. Cross-writer correctness
+/// across the read-modify-write cycle is the responsibility of
+/// [`PartitionLock`]; the unique tmp name is a defense-in-depth guard
+/// against the doubled-PAR1-footer corruption that bit Phase-B runners.
 fn write_batch_atomic(path: &Path, batch: &RecordBatch) -> Result<(), StoreError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| StoreError::Io {
@@ -417,9 +454,69 @@ fn write_batch_atomic(path: &Path, batch: &RecordBatch) -> Result<(), StoreError
     Ok(())
 }
 
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 fn tmp_path_for(path: &Path) -> PathBuf {
+    let pid = std::process::id();
+    let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut s = path.as_os_str().to_owned();
-    s.push(".tmp");
+    s.push(format!(".{pid}.{n}.tmp"));
+    PathBuf::from(s)
+}
+
+/// Exclusive `flock(2)` (BSD on macOS, `LockFileEx` on Windows) held
+/// on a sidecar `<partition>.lock` file across the whole RMW cycle in
+/// [`Dataset::write`]. Concurrent writers targeting the same partition
+/// — e.g. the Phase-B `scryer-runner` ticks that all checkpoint into
+/// `internal.scryer/workflow_run/v2/...` — block here instead of
+/// trampling each other's reads or renames.
+///
+/// The lock file is created once per partition and never deleted; it
+/// has zero rows and zero impact on parquet readers (extension filter)
+/// and on disk usage. The lock is released when `_guard` drops at the
+/// end of the per-partition iteration.
+struct PartitionLock {
+    file: File,
+}
+
+impl PartitionLock {
+    fn acquire(partition_path: &Path) -> Result<Self, StoreError> {
+        if let Some(parent) = partition_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| StoreError::Io {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
+        let lock_path = lock_path_for(partition_path);
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|e| StoreError::Io {
+                path: lock_path.clone(),
+                source: e,
+            })?;
+        FileExt::lock_exclusive(&file).map_err(|e| StoreError::Io {
+            path: lock_path,
+            source: e,
+        })?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for PartitionLock {
+    fn drop(&mut self) {
+        // Releasing the lock explicitly is cheap and makes the
+        // lifecycle obvious; closing the fd would also release it.
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+fn lock_path_for(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".lock");
     PathBuf::from(s)
 }
 

@@ -1,0 +1,41 @@
+# Wishlist 51b — `validator_client.v1` per-epoch refresh.
+# Methodology row "Paper-4 Phase-A capture spec" (phase 80). Schema:
+# docs/schemas.md#validator_clientv1.
+#
+# Per-epoch data — leader→client mapping is constant within an epoch
+# (~2 days). Hourly cadence is generous and gracefully handles epoch
+# transitions; subsequent fires within the same epoch dedup against
+# existing rows in the store.
+#
+# Low-cadence manifest — runs via the multi-manifest runner-tick.plist
+# (no dedicated per-manifest plist needed). One ~1s wall-clock fire
+# per hour fits comfortably in the 60s tick window.
+#
+# Source attribution: `rpc:getClusterNodes+stakewiz:validators` —
+# joined two-source labelling per the methodology lock. Note the
+# Phase-A diagnostic: ~60% unknown rate observed (most from
+# Stakewiz-tracked validators absent from the proxy provider's
+# gossip view); per the schema doc the unknown-rate is itself the
+# diagnostic.
+
+id = "validator-client"
+description = "Per-epoch Solana leader→client labelling (jito-agave / agave-vanilla / frankendancer / unknown)."
+schema_ids = ["validator_client.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "solana", "validator-client",
+    "--source", "rpc:getClusterNodes+stakewiz:validators+jito:kobe:runner",
+]
+
+[freshness]
+# 2x cadence — alert if no fresh row inside 7200s.
+sla_secs = 7200
+
+[budget]
+# Per fire: 1 getEpochInfo + 1 getClusterNodes + 1 stakewiz GET = 3 reqs.
+max_requests_per_run = 10
+
+[workflow]
+sensor = "interval(3600s)"

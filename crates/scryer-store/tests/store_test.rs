@@ -295,3 +295,69 @@ fn partition_path_format_matches_methodology() {
         .join("day=25.parquet");
     assert!(expected.exists(), "expected file at {}", expected.display());
 }
+
+/// Regression for the cross-process race that bit Phase-B runners:
+/// four `scryer-runner` ticks all calling
+/// `Dataset::write::<WorkflowRun>` against the same
+/// `internal.scryer/workflow_run/v2/...` partition simultaneously
+/// either (a) silently dropped rows because both writers read the same
+/// pre-merge state and the second rename clobbered the first or (b)
+/// produced a parquet file with two trailing PAR1 footers because both
+/// `File::create` calls hit the same `<path>.tmp`.
+///
+/// `Dataset::write` now flocks the partition for the full read →
+/// merge → tmp-write → rename cycle, and the tmp filename is
+/// per-process unique. Threads in this test exercise the same
+/// `flock(2)` path that protects cross-process writers (BSD/POSIX
+/// flock is per-open-file-description, so two `File::open` calls in
+/// two threads produce two descriptions and contend correctly).
+#[test]
+fn concurrent_writers_to_same_partition_lose_no_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ds_root = tmp.path().to_path_buf();
+
+    const THREADS: usize = 16;
+    const ROWS_PER_THREAD: usize = 8;
+    let total_rows = THREADS * ROWS_PER_THREAD;
+
+    std::thread::scope(|s| {
+        for t in 0..THREADS {
+            let root = ds_root.clone();
+            s.spawn(move || {
+                let ds = Dataset::new(root);
+                for i in 0..ROWS_PER_THREAD {
+                    // Per-thread distinct signature; same TS_DAY_A so
+                    // every row lands in the same partition file.
+                    let sig = format!("sig_t{t:02}_i{i:02}");
+                    let row = swap_row(&sig, TS_DAY_A, 1_777_200_000);
+                    ds.write::<swap::Swap>(venue::SOLANA_RAYDIUM_V4, Some(POOL), &[row])
+                        .expect("concurrent write should not corrupt parquet");
+                }
+            });
+        }
+    });
+
+    // Read-back must see every signature exactly once. If the lock
+    // failed we'd see fewer rows; if the tmp race re-emerged we'd
+    // fail to even read the parquet.
+    let ds = Dataset::new(&ds_root);
+    let day = UtcDay::from_unix_seconds(TS_DAY_A).unwrap();
+    let read = ds
+        .read::<swap::Swap>(venue::SOLANA_RAYDIUM_V4, Some(POOL), day)
+        .expect("partition must remain readable under concurrent writes");
+    assert_eq!(
+        read.len(),
+        total_rows,
+        "expected {total_rows} unique rows from {THREADS} concurrent writers, got {}",
+        read.len()
+    );
+
+    let mut sigs: Vec<String> = read.into_iter().map(|r| r.signature).collect();
+    sigs.sort();
+    sigs.dedup();
+    assert_eq!(
+        sigs.len(),
+        total_rows,
+        "every concurrent writer's signature must survive"
+    );
+}

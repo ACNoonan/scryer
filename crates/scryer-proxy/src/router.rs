@@ -56,8 +56,18 @@ pub async fn handle_jsonrpc(
 
     let max_attempts = state.retry.max_attempts_read.max(1) as usize;
     let mut last_error: Option<String> = None;
+    // Attempts that count against the budget: Transient / Throttled /
+    // Exhausted / transport. CapabilityMismatch does NOT consume a
+    // slot — the upstream is healthy, it just can't serve *this*
+    // request shape, so we should walk the entire eligible list
+    // looking for a provider that can. The loop's hard ceiling is
+    // `eligible.len()`, which prevents a misclassification loop.
+    let mut budgeted_attempts: usize = 0;
 
-    for (attempt, provider) in eligible.iter().take(max_attempts).enumerate() {
+    for provider in eligible.iter() {
+        if budgeted_attempts >= max_attempts {
+            break;
+        }
         let res = forward(&state.client, provider, &payload).await;
         let provider_name = provider.name().to_string();
 
@@ -120,6 +130,7 @@ pub async fn handle_jsonrpc(
                             "provider `{provider_name}` exhausted (status {})",
                             r.status
                         ));
+                        budgeted_attempts += 1;
                     }
                     Disposition::Throttled => {
                         let n = provider.record_failure();
@@ -143,6 +154,7 @@ pub async fn handle_jsonrpc(
                             .with_label_values(&["throttled"])
                             .inc();
                         last_error = Some(format!("provider `{provider_name}` throttled"));
+                        budgeted_attempts += 1;
                     }
                     Disposition::Transient => {
                         let n = provider.record_failure();
@@ -164,6 +176,33 @@ pub async fn handle_jsonrpc(
                         last_error = Some(format!(
                             "provider `{provider_name}` transient failure (status {})",
                             r.status
+                        ));
+                        budgeted_attempts += 1;
+                    }
+                    Disposition::CapabilityMismatch => {
+                        // Provider's plan tier can't serve this
+                        // request shape (e.g. QuickNode discover
+                        // plan caps `getMultipleAccounts` at 5
+                        // accounts). Do NOT touch health, quota
+                        // state, or consecutive_failures — the
+                        // upstream is fine for normal traffic. Just
+                        // try the next eligible provider for *this*
+                        // call. Doesn't consume `budgeted_attempts`;
+                        // implicit cap is `eligible.len()`.
+                        state
+                            .metrics
+                            .request_failures_total
+                            .with_label_values(&[&provider_name, "capability_mismatch"])
+                            .inc();
+                        state
+                            .metrics
+                            .retries_total
+                            .with_label_values(&["capability_mismatch"])
+                            .inc();
+                        last_error = Some(format!(
+                            "provider `{provider_name}` capability mismatch (status {}): {}",
+                            r.status,
+                            truncate_for_error(&r.body, 200)
                         ));
                     }
                 }
@@ -190,12 +229,8 @@ pub async fn handle_jsonrpc(
                     .with_label_values(&["transport"])
                     .inc();
                 last_error = Some(format!("provider `{provider_name}` transport error: {e}"));
+                budgeted_attempts += 1;
             }
-        }
-
-        // Skip the post-loop sleep on the last allowed attempt.
-        if attempt + 1 >= max_attempts {
-            break;
         }
     }
 
@@ -218,6 +253,23 @@ fn extract_methods(payload: &Value) -> Result<Vec<String>, ProxyError> {
         return Ok(out);
     }
     Ok(vec![extract_one(payload)?])
+}
+
+/// Trim an upstream body to a sane length for inclusion in an error
+/// message returned to the caller. Keeps the leading window so the
+/// JSON-RPC `error.message` (typically the most useful part) survives.
+/// Cuts on a char boundary to stay UTF-8 safe.
+fn truncate_for_error(body: &str, max: usize) -> String {
+    if body.len() <= max {
+        return body.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = body[..end].to_string();
+    out.push_str("...[truncated]");
+    out
 }
 
 fn extract_one(payload: &Value) -> Result<String, ProxyError> {

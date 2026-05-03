@@ -10,6 +10,7 @@ name = "scry"
 path = "src/main.rs"
 
 [dependencies]
+scryer-manifest = { path = "../../crates/scryer-manifest" }
 scryer-schema = { path = "../../crates/scryer-schema" }
 scryer-store = { path = "../../crates/scryer-store" }
 scryer-fetch-solana = { path = "../../crates/scryer-fetch-solana" }
@@ -28,6 +29,7 @@ scryer-fetch-cex-kraken = { path = "../../crates/scryer-fetch-cex-kraken" }
 scryer-fetch-cex-perps = { path = "../../crates/scryer-fetch-cex-perps" }
 scryer-fetch-deribit = { path = "../../crates/scryer-fetch-deribit" }
 scryer-fetch-cboe = { path = "../../crates/scryer-fetch-cboe" }
+scryer-fetch-equity-options = { path = "../../crates/scryer-fetch-equity-options" }
 scryer-fetch-sec = { path = "../../crates/scryer-fetch-sec" }
 scryer-fetch-evm = { path = "../../crates/scryer-fetch-evm" }
 scryer-fetch-xstocks = { path = "../../crates/scryer-fetch-xstocks" }

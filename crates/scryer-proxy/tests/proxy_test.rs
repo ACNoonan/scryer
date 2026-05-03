@@ -153,6 +153,135 @@ async fn retries_to_next_provider_on_5xx() {
 }
 
 #[tokio::test]
+async fn capability_mismatch_fans_out_without_quarantining_provider() {
+    // Mirrors the QuickNode discover-plan failure mode: a 413 +
+    // JSON-RPC -32615 means "this provider's plan tier can't serve
+    // this request shape". Router must (a) try the next eligible
+    // provider for THIS call and (b) leave the capped provider
+    // healthy + un-quarantined so it keeps serving normal traffic.
+    let capped = MockServer::start().await;
+    let qn_body = json!({
+        "jsonrpc":"2.0","id":1,
+        "error":{
+            "code":-32615,
+            "message":"getMultipleAccounts is limited to a 5 range, upgrade from discover plan"
+        }
+    });
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(413).set_body_json(qn_body))
+        .expect(1)
+        .mount(&capped)
+        .await;
+
+    let healthy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc":"2.0","id":1,"result":[{"data":["base64payload","base64"]}]
+        })))
+        .expect(1)
+        .mount(&healthy)
+        .await;
+
+    let state = make_state(vec![
+        provider("capped", &capped.uri()),
+        provider("healthy", &healthy.uri()),
+    ])
+    .await;
+
+    let app = build_router(state.clone());
+    let (status, body) = post_jsonrpc(
+        app,
+        json!({
+            "jsonrpc":"2.0","id":1,"method":"getMultipleAccounts",
+            "params":[["a","b","c","d","e","f","g","h","i","j","k","l","m","n"]]
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "client should see Helius's 200");
+    assert!(
+        body["result"].is_array(),
+        "client should receive the sibling provider's result, got {body}"
+    );
+
+    // The capped provider stays healthy + un-quarantined — capability
+    // mismatch is per-call, not a provider-health signal.
+    let capped_state = state
+        .registry
+        .providers
+        .iter()
+        .find(|p| p.name() == "capped")
+        .unwrap();
+    assert!(
+        capped_state.is_healthy(),
+        "capped provider must remain healthy"
+    );
+    assert!(
+        !capped_state.is_quarantined(),
+        "capped provider must NOT be quarantined"
+    );
+    assert_eq!(
+        capped_state.consecutive_failures(),
+        0,
+        "capped provider must not accrue consecutive_failures from a capability mismatch"
+    );
+    assert_eq!(
+        capped_state.quota_state(),
+        scryer_proxy::registry::QuotaState::Ok,
+        "capability mismatch must not flip quota state"
+    );
+}
+
+#[tokio::test]
+async fn capability_mismatch_does_not_consume_retry_budget() {
+    // With max_attempts_read = 2, two Transient/Throttled responses
+    // would exhaust the budget. Capability mismatches must NOT count,
+    // so a chain of 3 capped providers + 1 healthy still resolves.
+    let cap_body = json!({
+        "jsonrpc":"2.0","id":1,
+        "error":{"code":-32615,"message":"limited to a 5 range"}
+    });
+
+    let mut capped_servers = Vec::new();
+    for _ in 0..3 {
+        let s = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(413).set_body_json(cap_body.clone()))
+            .expect(1)
+            .mount(&s)
+            .await;
+        capped_servers.push(s);
+    }
+
+    let healthy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc":"2.0","id":1,"result":"served"
+        })))
+        .expect(1)
+        .mount(&healthy)
+        .await;
+
+    let mut providers = vec![];
+    for (i, s) in capped_servers.iter().enumerate() {
+        providers.push(provider(&format!("capped{i}"), &s.uri()));
+    }
+    providers.push(provider("healthy", &healthy.uri()));
+
+    let state = make_state(providers).await;
+    let app = build_router(state);
+
+    let (status, body) = post_jsonrpc(
+        app,
+        json!({"jsonrpc":"2.0","id":1,"method":"getMultipleAccounts","params":[["x"]]}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["result"], json!("served"));
+}
+
+#[tokio::test]
 async fn quarantines_provider_after_quota_exhaustion() {
     let exhausted = MockServer::start().await;
     Mock::given(method("POST"))

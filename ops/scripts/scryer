@@ -142,42 +142,114 @@ cmd_deploy() {
   # Phase 70-D — one-command phase-ship deploy.
   #
   # Workflow steps:
-  #   1. cargo build --release for both bins
-  #   2. Copy bins to ~/Library/Application Support/scryer/bin/
-  #   3. Sync top-level repo plists into ~/Library/LaunchAgents/
+  #   1. cargo build --release for scry, scryer-proxy, scryer-runner.
+  #   2. Copy bins to ~/Library/Application Support/scryer/bin/.
+  #   3. Sync repo manifests (ops/sources/*.toml) into
+  #      ~/Library/Application Support/scryer/manifests/. The runner
+  #      reads from this staged dir; the repo dir is the source of
+  #      truth.
+  #   4. Sync top-level repo plists into ~/Library/LaunchAgents/
   #      (cataloged/ and retired/ subdirs are intentionally excluded —
   #      cataloged/ contains non-scryer-fetch plists that scryer's view
   #      tracks but doesn't own, and retired/ is the migration audit
   #      trail).
-  #   4. Reload KeepAlive daemons (proxy, portal-server) so they pick
+  #   5. Reload KeepAlive daemons (proxy, portal-server) so they pick
   #      up the new binary. Tape plists fire on StartInterval and
   #      re-exec the binary on every tick — they auto-pick-up without
   #      a reload.
   local bin_dir="$SUPPORT_ROOT/bin"
+  local manifest_src_dir="$REPO_ROOT/ops/sources"
+  local manifest_dest_dir="$SUPPORT_ROOT/manifests"
   local plist_src_dir="$REPO_ROOT/ops/launchd"
   local target_dir="$REPO_ROOT/target/release"
 
   echo "==> deploy: build"
-  ( cd "$REPO_ROOT" && cargo build --release -p scry-bin -p scryer-proxy-bin )
+  ( cd "$REPO_ROOT" && cargo build --release -p scry-bin -p scryer-proxy-bin -p scryer-runner-bin )
 
   echo "==> deploy: copy binaries to $bin_dir"
   mkdir -p "$bin_dir"
-  for bin in scry scryer-proxy; do
+  # scryer-runner ships alongside scry + scryer-proxy; the runner-tick
+  # plist re-execs the binary on every StartInterval tick so the new
+  # binary picks up automatically (KeepAlive reload not required for
+  # StartInterval plists).
+  for bin in scry scryer-proxy scryer-runner; do
     if [[ ! -x "$target_dir/$bin" ]]; then
       echo "  [fail] $bin not found at $target_dir/$bin (build failed?)" >&2
       exit 1
     fi
     cp "$target_dir/$bin" "$bin_dir/$bin"
+    # Strip macOS provenance/quarantine extended attributes that `cp`
+    # may copy across, then ad-hoc resign. `xattr -d` alone is not
+    # enough: a freshly-copied binary inherits a `com.apple.provenance`
+    # assertion that Gatekeeper re-evaluates on every spawn — when the
+    # check trips, the OS sends SIGKILL to the *first instruction*, so
+    # even the previous `--version` warmup itself was getting killed.
+    # `codesign --force --sign -` ad-hoc-signs in place, which replaces
+    # the provenance assertion with a stable signature Gatekeeper
+    # accepts on every subsequent spawn (this is the standard fix per
+    # the Apple developer forums for locally-built binaries).
+    xattr -cr "$bin_dir/$bin" 2>/dev/null || true
+    if ! codesign --force --sign - "$bin_dir/$bin" 2>/dev/null; then
+      printf "  [warn] %-30s codesign failed; binary may be SIGKILLed by Gatekeeper\n" "$bin"
+    fi
+    if ! "$bin_dir/$bin" --version >/dev/null 2>&1; then
+      # --version is fast and side-effect-free; failing it is not
+      # automatically fatal (some bins may not implement it), but
+      # log so the operator can investigate.
+      printf "  [warn] %-30s --version probe failed; binary may need re-sign\n" "$bin"
+    fi
     printf "  [bin]  %-30s %s\n" "$bin" "→ $bin_dir/$bin"
   done
+
+  echo "==> deploy: sync runner manifests to $manifest_dest_dir"
+  # Sync the full ops/sources/ tree, including subdirectories like
+  # data/ (manifest-referenced static files such as pool lists).
+  # rsync is preferred for the in-place atomic update + diff
+  # reporting; fall back to cp -R if rsync is missing.
+  if [[ -d "$manifest_src_dir" ]]; then
+    mkdir -p "$manifest_dest_dir"
+    if command -v rsync >/dev/null; then
+      # Note: NO --delete. We add/update files the repo owns but
+      # leave any local-only files alone. If a manifest needs to
+      # be removed, retire it from the repo and the operator can
+      # also remove it from the staged dir manually.
+      rsync -a --itemize-changes \
+        --exclude='.DS_Store' \
+        "$manifest_src_dir/" "$manifest_dest_dir/" \
+        | sed 's/^/  [rsync] /'
+    else
+      cp -R "$manifest_src_dir/." "$manifest_dest_dir/"
+      echo "  [cp -R] $manifest_src_dir/* → $manifest_dest_dir/"
+    fi
+  else
+    echo "  [skip] $manifest_src_dir does not exist"
+  fi
 
   echo "==> deploy: sync plists to $LAUNCH_AGENTS"
   mkdir -p "$LAUNCH_AGENTS"
   shopt -s nullglob
-  local synced=0 added=0
+  local synced=0 added=0 skipped_draft=0
   for plist in "$plist_src_dir"/com.adamnoonan.scryer.*.plist; do
     local label
     label=$(basename "$plist" .plist)
+    # Defense-in-depth: skip plists that explicitly mark themselves
+    # as DRAFT (fetcher pending). The convention is to move DRAFTs
+    # into retired/ until ready, but this guard catches the case
+    # where someone leaves a DRAFT at top-level.
+    if head -30 "$plist" | grep -q 'DRAFT — pending'; then
+      printf "  [skip] %-50s DRAFT plist — move to retired/ when ready\n" "$label"
+      skipped_draft=$((skipped_draft + 1))
+      continue
+    fi
+    # Skip plists declaring a system-level install target. These need
+    # root (e.g. disablesleep-watchdog calls `pmset -a`) and must be
+    # bootstrapped manually into /Library/LaunchDaemons/. Staging them
+    # as user agents creates a permanently-failing duplicate that
+    # pollutes `scry status` with a misleading exit=78.
+    if grep -q 'Install target: /Library/LaunchDaemons/' "$plist"; then
+      printf "  [skip] %-50s system LaunchDaemon — install manually under /Library/LaunchDaemons/\n" "$label"
+      continue
+    fi
     local dest="$LAUNCH_AGENTS/$label.plist"
     if [[ -e "$dest" ]] && cmp -s "$plist" "$dest"; then
       printf "  [ok]   %-50s already in sync\n" "$label"
@@ -194,7 +266,7 @@ cmd_deploy() {
       added=$((added + 1))
     fi
   done
-  if [[ $synced -eq 0 && $added -eq 0 ]]; then
+  if [[ $synced -eq 0 && $added -eq 0 && $skipped_draft -eq 0 ]]; then
     echo "  (all plists already in sync)"
   fi
 
@@ -203,6 +275,12 @@ cmd_deploy() {
   # them when the binary on disk changes. StartInterval plists fork a
   # fresh process on every tick and pick up the new binary
   # automatically — no reload needed.
+  #
+  # Use `launchctl kickstart -k` (kill + restart in one atomic op)
+  # instead of bootout+bootstrap. The bootout/bootstrap pair has a
+  # race: bootout is async and can leave the label in a "shutting
+  # down" state that rejects the immediate bootstrap with "Operation
+  # already in progress". kickstart sidesteps the race entirely.
   local keepalive_labels=(
     "com.adamnoonan.scryer.proxy"
     "com.adamnoonan.scryer.portal-server"
@@ -214,13 +292,18 @@ cmd_deploy() {
       continue
     fi
     if is_loaded "$label"; then
-      launchctl bootout "$domain/$label" 2>/dev/null || true
-      printf "  [stop] %-50s\n" "$label"
-    fi
-    if launchctl bootstrap "$domain" "$plist" 2>/dev/null; then
-      printf "  [load] %-50s reloaded with new binary\n" "$label"
+      if launchctl kickstart -k "$domain/$label" 2>/dev/null; then
+        printf "  [kick] %-50s killed + restarted with new binary\n" "$label"
+      else
+        printf "  [fail] %-50s kickstart failed\n" "$label" >&2
+      fi
     else
-      printf "  [fail] %-50s bootstrap failed\n" "$label" >&2
+      # Not currently loaded — bootstrap fresh.
+      if launchctl bootstrap "$domain" "$plist" 2>/dev/null; then
+        printf "  [up]   %-50s loaded for the first time\n" "$label"
+      else
+        printf "  [fail] %-50s bootstrap failed\n" "$label" >&2
+      fi
     fi
   done
 

@@ -32,6 +32,10 @@ mod sensor;
 pub use error::ManifestError;
 pub use sensor::Sensor;
 
+// `Criticality` and `Tier` are defined below; this re-export keeps
+// PR.5 / PR.8 / runner consumers from having to know the inner
+// module path.
+
 /// Parsed and validated source manifest.
 #[derive(Clone, Debug)]
 pub struct Manifest {
@@ -41,6 +45,13 @@ pub struct Manifest {
     pub fetch: Fetch,
     pub freshness: Freshness,
     pub budget: Budget,
+    /// Optional `[criticality]` block (PR.1). When present, the
+    /// `tier` is a closed enum (`tier-0` through `tier-3`); `owner`
+    /// and `consumer_impact` are freeform strings. Absence means
+    /// "tier not declared yet"; downstream tier-aware behavior
+    /// (PR.5/PR.8 alert routing) treats undeclared manifests as
+    /// the lowest-priority bucket until they're tagged.
+    pub criticality: Option<Criticality>,
     pub workflow: Option<Workflow>,
     pub depends_on: Vec<DependsOn>,
     /// Source path the manifest was loaded from, if any. `None` when
@@ -122,6 +133,71 @@ pub struct DependsOn {
     pub fresh_within_secs: u64,
 }
 
+/// Source criticality block (PR.1). Optional today; future
+/// tier-aware behavior (alert routing, retry budget) reads `tier`.
+#[derive(Clone, Debug)]
+pub struct Criticality {
+    pub tier: Tier,
+    /// Operator handle, freeform — e.g. `"@adam"`, `"oncall-data"`.
+    pub owner: Option<String>,
+    /// Freeform sentence describing what breaks downstream when
+    /// this manifest is stale or failing. Surfaces in alert
+    /// payloads so the responder doesn't have to look up impact.
+    pub consumer_impact: Option<String>,
+}
+
+/// Closed source-criticality tier vocabulary (PR.1).
+///
+/// - `Tier0`: foundational data others depend on (oracle tapes,
+///   block-level state). Stale = downstream blocked. Page-worthy.
+/// - `Tier1`: primary research / production data. Stale = research
+///   gap or trade-decision gap. Ticket-worthy with response SLA.
+/// - `Tier2`: derived / analytics data (rollups, summaries,
+///   audits). Stale = monitoring gap, not data gap.
+/// - `Tier3`: experimental, one-off, or staged-rollout. Failures
+///   don't page; surface in dashboards only.
+///
+/// Closed enum: adding a tier requires a methodology entry first
+/// (the closure forces a deliberate decision when a new bucket
+/// appears, same model as `Domain` in `scryer-schema`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Tier {
+    Tier0,
+    Tier1,
+    Tier2,
+    Tier3,
+}
+
+impl Tier {
+    pub const ALL: &'static [Tier] = &[Tier::Tier0, Tier::Tier1, Tier::Tier2, Tier::Tier3];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Tier::Tier0 => "tier-0",
+            Tier::Tier1 => "tier-1",
+            Tier::Tier2 => "tier-2",
+            Tier::Tier3 => "tier-3",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self, ManifestError> {
+        for t in Self::ALL {
+            if t.as_str() == s {
+                return Ok(*t);
+            }
+        }
+        Err(ManifestError::BadTier {
+            value: s.to_owned(),
+        })
+    }
+}
+
+impl std::fmt::Display for Tier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl Manifest {
     /// Parse and validate a manifest from its TOML text. When
     /// `source_path` is provided, the parser also enforces the
@@ -154,9 +230,21 @@ struct RawManifest {
     #[serde(default)]
     budget: Option<RawBudget>,
     #[serde(default)]
+    criticality: Option<RawCriticality>,
+    #[serde(default)]
     workflow: Option<RawWorkflow>,
     #[serde(default, rename = "depends_on")]
     depends_on: Vec<RawDependsOn>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCriticality {
+    tier: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    consumer_impact: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -225,6 +313,10 @@ fn validate(raw: RawManifest, source_path: Option<PathBuf>) -> Result<Manifest, 
     let fetch = validate_fetch(raw.fetch)?;
     let freshness = validate_freshness(raw.freshness)?;
     let budget = validate_budget(raw.budget.unwrap_or_default())?;
+    let criticality = match raw.criticality {
+        Some(c) => Some(validate_criticality(c)?),
+        None => None,
+    };
 
     let workflow = match raw.workflow {
         Some(w) => Some(validate_workflow(w)?),
@@ -244,6 +336,7 @@ fn validate(raw: RawManifest, source_path: Option<PathBuf>) -> Result<Manifest, 
         fetch,
         freshness,
         budget,
+        criticality,
         workflow,
         depends_on,
         source_path,
@@ -398,6 +491,32 @@ fn validate_workflow(raw: RawWorkflow) -> Result<Workflow, ManifestError> {
         sensor_raw: raw.sensor,
         sensor,
         steps,
+    })
+}
+
+fn validate_criticality(raw: RawCriticality) -> Result<Criticality, ManifestError> {
+    let tier = Tier::parse(raw.tier.trim())?;
+    // Owner / consumer_impact are freeform but must be non-empty
+    // when declared — the empty string carries no information and
+    // would just clutter alert payloads.
+    let owner = match raw.owner {
+        Some(s) if s.trim().is_empty() => return Err(ManifestError::EmptyCriticalityField {
+            field: "owner",
+        }),
+        Some(s) => Some(s.trim().to_owned()),
+        None => None,
+    };
+    let consumer_impact = match raw.consumer_impact {
+        Some(s) if s.trim().is_empty() => return Err(ManifestError::EmptyCriticalityField {
+            field: "consumer_impact",
+        }),
+        Some(s) => Some(s.trim().to_owned()),
+        None => None,
+    };
+    Ok(Criticality {
+        tier,
+        owner,
+        consumer_impact,
     })
 }
 
@@ -634,6 +753,137 @@ fresh_within_secs = 7200
         assert_eq!(m.depends_on.len(), 1);
         assert_eq!(m.depends_on[0].id, "kraken-trades");
         assert_eq!(m.depends_on[0].fresh_within_secs, 7200);
+    }
+
+    // ============================================================
+    // PR.1 — criticality block
+    // ============================================================
+
+    fn base_manifest_with_criticality(block: &str) -> String {
+        format!(
+            r#"
+id = "demo"
+description = "x"
+schema_ids = ["trade.v1"]
+[fetch]
+command = "scry"
+args = []
+[freshness]
+sla_secs = 60
+{block}
+"#
+        )
+    }
+
+    #[test]
+    fn criticality_is_optional() {
+        // Existing manifests that don't declare [criticality] still
+        // parse cleanly.
+        let toml = base_manifest_with_criticality("");
+        let m = Manifest::from_str(&toml, None).unwrap();
+        assert!(m.criticality.is_none());
+    }
+
+    #[test]
+    fn parses_criticality_with_full_block() {
+        let toml = base_manifest_with_criticality(
+            r#"
+[criticality]
+tier = "tier-0"
+owner = "@adam"
+consumer_impact = "Foundational oracle tape used by Paper-3 and LVR research."
+"#,
+        );
+        let m = Manifest::from_str(&toml, None).unwrap();
+        let c = m.criticality.expect("criticality present");
+        assert_eq!(c.tier, Tier::Tier0);
+        assert_eq!(c.owner.as_deref(), Some("@adam"));
+        assert!(c
+            .consumer_impact
+            .as_deref()
+            .unwrap()
+            .starts_with("Foundational"));
+    }
+
+    #[test]
+    fn parses_criticality_with_only_tier() {
+        let toml = base_manifest_with_criticality(
+            r#"
+[criticality]
+tier = "tier-2"
+"#,
+        );
+        let m = Manifest::from_str(&toml, None).unwrap();
+        let c = m.criticality.unwrap();
+        assert_eq!(c.tier, Tier::Tier2);
+        assert!(c.owner.is_none());
+        assert!(c.consumer_impact.is_none());
+    }
+
+    #[test]
+    fn rejects_unknown_tier_value() {
+        let toml = base_manifest_with_criticality(
+            r#"
+[criticality]
+tier = "critical"
+"#,
+        );
+        let err = Manifest::from_str(&toml, None).unwrap_err();
+        assert!(matches!(err, ManifestError::BadTier { .. }));
+    }
+
+    #[test]
+    fn rejects_empty_owner_field() {
+        let toml = base_manifest_with_criticality(
+            r#"
+[criticality]
+tier = "tier-1"
+owner = ""
+"#,
+        );
+        let err = Manifest::from_str(&toml, None).unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::EmptyCriticalityField { field: "owner" }
+        ));
+    }
+
+    #[test]
+    fn rejects_empty_consumer_impact_field() {
+        let toml = base_manifest_with_criticality(
+            r#"
+[criticality]
+tier = "tier-1"
+consumer_impact = "   "
+"#,
+        );
+        let err = Manifest::from_str(&toml, None).unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::EmptyCriticalityField {
+                field: "consumer_impact"
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_keys_in_criticality_block() {
+        let toml = base_manifest_with_criticality(
+            r#"
+[criticality]
+tier = "tier-1"
+oncall = "yes"
+"#,
+        );
+        let err = Manifest::from_str(&toml, None).unwrap_err();
+        assert!(matches!(err, ManifestError::Toml(_)));
+    }
+
+    #[test]
+    fn tier_round_trips_through_str() {
+        for t in Tier::ALL {
+            assert_eq!(Tier::parse(t.as_str()).unwrap(), *t);
+        }
     }
 
     #[test]

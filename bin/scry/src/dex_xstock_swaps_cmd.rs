@@ -49,12 +49,24 @@ pub struct DexXstockSwapsArgs {
     /// Comma-separated list of xStock symbols. Defaults to all 8.
     #[arg(long, value_delimiter = ',')]
     symbols: Vec<String>,
-    /// Window start as `YYYY-MM-DD` UTC.
-    #[arg(long)]
-    start: String,
-    /// Window end as `YYYY-MM-DD` UTC.
-    #[arg(long)]
-    end: String,
+    /// Window start as `YYYY-MM-DD` UTC. Required unless `--once` is set.
+    #[arg(long, conflicts_with = "once")]
+    start: Option<String>,
+    /// Window end as `YYYY-MM-DD` UTC. Required unless `--once` is set.
+    #[arg(long, conflicts_with = "once")]
+    end: Option<String>,
+    /// Forward-poll mode: walk the last `--lookback-secs` seconds
+    /// from now. Designed for runner-driven cadence (manifest fires
+    /// at fixed intervals; each fire scans its own lookback window).
+    /// Conflicts with `--start`/`--end`.
+    #[arg(long, conflicts_with_all = ["start", "end"])]
+    once: bool,
+    /// Lookback window length in seconds when `--once` is set.
+    /// Default 120s — pair with a 60s manifest interval for ≥2x
+    /// overlap so a missed tick still gets covered by the next one.
+    /// Dedup on `signature:ix_index` makes the overlap free.
+    #[arg(long, default_value_t = 120, requires = "once")]
+    lookback_secs: u64,
     /// `_source` stamped on every emitted row.
     #[arg(long, default_value = "helius:parseTransactions")]
     source: String,
@@ -98,10 +110,24 @@ pub async fn run_dex_xstock_swaps(args: DexXstockSwapsArgs) -> Result<()> {
         );
     }
 
-    let start_ts = parse_unix_ts(&args.start)?;
-    let end_ts = parse_unix_ts(&args.end)? + 86_400; // inclusive end-of-day
-
     let now = Utc::now();
+    let (start_ts, end_ts) = if args.once {
+        let end = now.timestamp();
+        let start = end - args.lookback_secs as i64;
+        (start, end)
+    } else {
+        let start = args
+            .start
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--start is required unless --once is set"))?;
+        let end = args
+            .end
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--end is required unless --once is set"))?;
+        let s = parse_unix_ts(start)?;
+        let e = parse_unix_ts(end)? + 86_400; // inclusive end-of-day
+        (s, e)
+    };
     let meta = Meta::new(schema::SCHEMA_VERSION, now.timestamp(), &args.source);
     let registry = default_registry();
 
@@ -115,8 +141,10 @@ pub async fn run_dex_xstock_swaps(args: DexXstockSwapsArgs) -> Result<()> {
 
     tracing::info!(
         symbols = targets.len(),
-        start = args.start,
-        end = args.end,
+        start_ts,
+        end_ts,
+        once = args.once,
+        lookback_secs = args.lookback_secs,
         "scanning cross-DEX xStock swaps"
     );
 

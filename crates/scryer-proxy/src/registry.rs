@@ -45,6 +45,17 @@ pub struct QuotaConfig {
     /// JSON-RPC error codes that mark this provider as exhausted.
     #[serde(default)]
     pub exhaustion_jsonrpc_codes: Vec<i64>,
+    /// JSON-RPC error codes that mean "this provider's plan tier
+    /// can't serve this request shape" — fan out to a sibling for
+    /// *this* call without quarantining or counting against the
+    /// failure budget. See `Disposition::CapabilityMismatch`.
+    #[serde(default)]
+    pub capability_mismatch_jsonrpc_codes: Vec<i64>,
+    /// Lowercase body substrings that imply capability mismatch
+    /// (same semantics as the JSON-RPC code list above, for
+    /// providers that signal plan-tier caps with plain-text bodies).
+    #[serde(default)]
+    pub capability_mismatch_body_patterns: Vec<String>,
 }
 
 fn default_weight() -> u16 {

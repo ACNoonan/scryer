@@ -27,6 +27,11 @@ args = [
     "--source", "scry:analytics:workflow-runs:runner",
 ]
 
+[criticality]
+tier = "tier-2"
+owner = "@adam"
+consumer_impact = "Daily rollup of runner activity. Operator dashboard input — answers 'how many fires did manifest X have yesterday?'. Stale = monitoring gap, not a data gap."
+
 [freshness]
 # 25h ceiling: a successful daily fire should land within 24h of the
 # prior fire, plus a 1h grace window for clock skew / launchd jitter.

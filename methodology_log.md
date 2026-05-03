@@ -48,6 +48,10 @@ Compact index of locked architectural decisions. It keeps operational invariants
 | Workflow runner | 2026-05-01 | Manifest-declared sensor workflows checkpoint to parquet. |
 | Source manifest format | 2026-05-02 | One `ops/sources/<id>.toml` per source-fetcher cluster, locked key set, optional workflow block. |
 | v2 dataset path layout | 2026-05-02 | v2 schemas live at `dataset/<domain>.<source>/<record_type>/v<n>/...`; `<domain>.<source>` is the venue arg to `Dataset::write`. |
+| Source criticality tiers | 2026-05-02 | Manifests carry optional `[criticality]` with closed `tier` enum (tier-0..tier-3) + freeform owner / consumer_impact. PR.5/PR.8 read this for alert routing + SLO severity. |
+| Single-stock IV schema | 2026-05-02 | Per-symbol weekend-horizon implied vol lives at `volatility.<venue>.single_stock_iv.v2`, one schema per venue. ATM is the strike nearest spot at the front-week expiry > capture-ts + 7d. Capture daily; analysis consumes Friday-close rows. |
+| Cross-process partition write lock | 2026-05-02 | `Dataset::write` holds an exclusive `flock(2)` on `<partition>.lock` across the entire read → merge_dedup → tmp-write → rename cycle, and tmp filenames are per-process unique (`<path>.<pid>.<counter>.tmp`). Multiple writers (e.g. concurrent `scryer-runner` ticks) targeting the same partition serialize at the file lock instead of corrupting parquet or silently dropping rows. |
+| Proxy capability-mismatch fanout | 2026-05-02 | Disposition vocabulary expanded from {Ok, Exhausted, Throttled, Transient, Permanent} to add `CapabilityMismatch`. Plan-tier resource caps (e.g. QuickNode discover plan capping `getMultipleAccounts` at 5 accounts via JSON-RPC code -32615) trigger immediate sibling-provider fanout for the affected call without quarantining the upstream and without consuming the per-call retry budget. Classifier inspects JSON-RPC `error.code` regardless of HTTP status. |
 
 ## Core Architecture
 
@@ -75,6 +79,7 @@ scryer pulls public market/on-chain data from RPC providers, CEX REST/WS endpoin
 - Storage is versioned, partitioned parquet.
 - `scryer-store` is the only canonical writer.
 - Writes are read-modify-write deduped, atomic, and reproducible except `_fetched_at`.
+- Concurrent writers to the same partition serialize at an exclusive `flock(2)` held on `<partition>.lock` across the full RMW cycle; tmp filenames are per-process unique so a stale tmp can never clobber an in-flight one.
 - Every row has `_schema_version`, `_fetched_at`, `_source`, `_dedup_key`.
 - Dedup belongs in schema/store, not downstream consumers.
 
@@ -89,9 +94,22 @@ scryer pulls public market/on-chain data from RPC providers, CEX REST/WS endpoin
 
 ### Proxy v0.1 Scope
 
-In scope: JSON provider registry, axum HTTP listener, request forwarding, retry-on-transient, quota quarantine, health probes, Prometheus metrics.
+In scope: JSON provider registry, axum HTTP listener, request forwarding, retry-on-transient, capability-mismatch fanout, quota quarantine, health probes, Prometheus metrics.
 
 Deferred unless relocked: WS, dashboard, OTel, doctor, replay, cloud secrets, SQLite cache, hot reload, anomaly z-score, hedging, tier weighting, and commitment routing.
+
+### Proxy Disposition Taxonomy
+
+The classifier (`scryer-proxy::quota::classify`) maps every upstream `(status, body)` to one of:
+
+- `Ok` — 2xx with no quota- or capability-error body. Forward, no retry.
+- `Exhausted` — 429 + exhaustion body pattern, OR JSON-RPC `error.code` `-32429` / configured exhaustion code. Long quarantine (default 24h cooldown), retry to next provider.
+- `Throttled` — 429 with no exhaustion pattern. Short quarantine, retry to next provider.
+- `Transient` — 5xx or transport error. Retry to next provider; counts against the per-call retry budget.
+- `CapabilityMismatch` — provider's plan tier physically cannot serve this request shape but the provider is otherwise healthy. Triggers immediate fanout to the next eligible provider for *this* call without touching health, quota state, or `consecutive_failures`. Does **not** consume `max_attempts_read`; the implicit cap is `eligible.len()` so a misclassification cannot loop. Triggered by JSON-RPC error code `-32615` (QuickNode plan-tier resource cap, e.g. "getMultipleAccounts is limited to a 5 range") or per-provider `capability_mismatch_jsonrpc_codes` / `capability_mismatch_body_patterns` in `QuotaConfig`. Surfaces in metrics as `request_failures_total{reason="capability_mismatch"}` and `retries_total{reason="capability_mismatch"}`.
+- `Permanent` — 4xx (not 429) with no recognized JSON-RPC error code or body pattern. Forward as-is; no retry.
+
+The classifier inspects JSON-RPC `error.code` regardless of HTTP status, since some providers (notably QuickNode) signal plan-tier caps with non-2xx + structured error body. This is a deliberate widening of the pre-2026-05-02 behavior, which only parsed JSON-RPC errors when status was 2xx.
 
 ### Helius `parseTransactions` Exception
 
@@ -203,6 +221,7 @@ Locked 2026-05-02. Worked example: `ops/sources/kraken-trades.toml`.
 - `[budget]` is optional and additive: `max_requests_per_run`, `max_provider_credits_per_run`, `max_usd_per_day`. All fields are independent caps; the runner trips on whichever is breached first. Absence means "no cap declared on this axis," not "infinite" — the runner logs uncapped axes so they can be filled in deliberately.
 - `[workflow]` is optional. While manifests are landing in read-only mode (M1.3) they coexist with launchd; once the runner ships (M3.x) `[workflow]` becomes the trigger declaration. Keys: `sensor` (one of `interval(<secs>s)`, `daily(<HH:MM>Z)`, `backfill_complete(...)`, `partitions_aged(...)`); optional `steps` (array; defaults to a single step that runs `[fetch]`).
 - `[[depends_on]]` (repeatable) declares an upstream manifest the runner must consider fresh before this one fires: `id` (sibling manifest id), `fresh_within_secs`.
+- `[criticality]` is optional but recommended (PR.1, locked 2026-05-02). Required `tier` ∈ closed enum `tier-0` (foundational, page-worthy) / `tier-1` (primary research/production, ticket-worthy) / `tier-2` (derived/analytics, dashboard-only) / `tier-3` (experimental, dashboard-only). Optional non-empty `owner` (operator handle) + `consumer_impact` (sentence describing what breaks downstream when this manifest is stale or failing). Tier-aware behavior (PR.5 alert routing, PR.8 SLO severity) reads this block; absence is treated as the lowest-priority bucket until tagged.
 - Sensor `backfill_complete(<schema_id>, ...)` accepts an optional `min_rows_per_day` arg; the runner only considers a partition complete when row count clears the floor.
 - `internal.scryer.workflow_run.v2` retention: keep forever until row volume proves costly.
 
@@ -222,3 +241,25 @@ Add new decisions as short dated sections below this line. Keep old detail out o
 - The dot-form venue (`<domain>.<source>`) is the `venue` argument to `scryer_store::Dataset::write` and mirrors the canonical schema id directly.
 - First instance: `internal.scryer.workflow_run.v2` writes to `dataset/internal.scryer/workflow_run/v2/...` via the `INTERNAL_SCRYER` venue constant.
 - Wave-1 v2 migrations follow the same convention; M2.2 (Rust module layout) is independent and still pending.
+
+### Source Criticality Tiers — 2026-05-02 (PR.1)
+
+- Manifests carry an optional `[criticality]` block with `tier ∈ {tier-0, tier-1, tier-2, tier-3}`, optional non-empty `owner`, optional non-empty `consumer_impact`.
+- Tier vocabulary is closed; adding a tier requires a methodology entry first (same closure model as `Domain` in `scryer-schema`).
+- Tier semantics: `tier-0` foundational (page); `tier-1` primary research/production (ticket); `tier-2` derived analytics (dashboard); `tier-3` experimental (dashboard).
+- `consumer_impact` flows into PR.5 alert payloads so the responder doesn't need to look up downstream impact.
+- Absence today is non-fatal; PR.5/PR.8 default undeclared manifests to the lowest-priority bucket until they're tagged. Future enforcement (require `[criticality]` for all manifests) is a separate methodology decision.
+- 8 in-tree manifests are tagged at this lock:
+  - `tier-0`: `redstone-tape`, `pyth-tape` (oracle foundations).
+  - `tier-1`: `kraken-trades`, `geckoterminal-trades`, `analytics-freshness-check` (primary research + the meta-monitor).
+  - `tier-2`: `analytics-workflow-runs`, `analytics-dead-letter` (derived dashboards).
+  - `tier-3`: none yet.
+
+### Single-Stock IV Schema — 2026-05-02 (item 52, MVP venue: yahoo)
+
+- Schema id: `volatility.<venue>.single_stock_iv.v2`. One schema per venue (`yahoo`, `tradier`, `optionmetrics`, `cboe`); cross-venue panels build at consume time, not at the schema. Precedent: CLMM split into `solana.whirlpool.pool_state.v2` + `solana.raydium_clmm.pool_state.v2`; per-oracle separation for pyth/redstone/chainlink.
+- ATM definition: the option strike nearest the underlier spot at the front-week expiry where `expiry > capture_ts + 7 days`. Locked at option (1) of the wishlist sketch. Linear-interpolation and forward-priced ATM are deferred — the smoothness gain is below the noise floor for the weekend-band use case, and option (1) matches what every free chain exposes natively.
+- Cadence: daily capture, Friday-close consumption. The capture cron does not gate on weekday; downstream analysis filters to the Friday 16:00 ET row. This decouples the data product from the analysis question and keeps the manifest sensor simple (`interval(86400s)`).
+- Symbols: SPY, QQQ, AAPL, GOOGL, NVDA, TSLA, MSTR, HOOD by default. GLD, TLT optional and left to the operator-side `--symbols` arg; not in the manifest default.
+- History gating: free venues (`yahoo`) are forward-only. Backfill to 2014 for the §7.1 ladder rung requires a paid venue (OptionMetrics via WRDS or a CBOE archive) and lands as a separate schema id under the same `volatility.<venue>.single_stock_iv.v2` shape — same row layout, different venue label, different `_source`.
+- Done split: shipping the yahoo fetcher closes the code half (per the Done definition); the data half stays `data-pending` until either yahoo accumulates ~20 forward weekends or a paid backfill lands.

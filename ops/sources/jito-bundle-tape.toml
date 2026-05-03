@@ -1,0 +1,46 @@
+# Wishlist 51a — `jito_bundle_tape.v1` forward poll. Methodology rows
+# "Paper-4 Phase-A capture spec" (phase 80) and "Jito bundle tape
+# amendment" (phase 81). Schema: docs/schemas.md#jito_bundle_tapev1.
+#
+# 60s cadence, --latest-slots 200. Solana finalized cadence is ~150
+# slots/min, so 200 gives 50 slots of slack against the previous tick;
+# multi-MB getBlock bodies mean partial coverage is the v1 expectation
+# per the schema's "Throughput caveat". Hole rate gets characterized
+# post-launch.
+#
+# Phase-B per-manifest plist (mirrors runner-pyth-tape) — the
+# multi-manifest runner-tick plist `--skip jito-bundle-tape`.
+
+id = "jito-bundle-tape"
+description = "Forward-poll Jito bundle landings via on-chain heuristic; one row per landed bundle, slot-keyed."
+schema_ids = ["jito_bundle_tape.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "solana", "jito-bundle-tape",
+    "--latest-slots", "200",
+    # Gentle pacing — 100ms between getBlock(full) calls. Empirically
+    # an unpaced 200-slot walk hammers proxy upstreams hard enough
+    # that all providers quarantine together (observed 2026-05-02:
+    # ~62-min outage after first unpaced fire). 100ms ceiling caps
+    # at ~10 getBlock/s with natural getBlock latency stretching it
+    # to ~3-5/s wall-clock.
+    "--inter-slot-delay-ms", "100",
+    "--source", "jito:bundle-tape:runner",
+]
+
+[freshness]
+# 10x cadence — alert if no fresh row inside 600s. Conservative because
+# bundle landings are bursty: idle minutes are normal, full silence is
+# the failure shape we care about.
+sla_secs = 600
+
+[budget]
+# Each fire: 1 getSlot + 1 getTipAccounts + up to 200 getBlock(full).
+# Cap loosely above observed; getBlock(full) bodies are multi-MB so
+# the wall-clock matters more than request count.
+max_requests_per_run = 500
+
+[workflow]
+sensor = "interval(60s)"

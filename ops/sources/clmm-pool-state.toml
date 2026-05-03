@@ -1,0 +1,39 @@
+# Wishlist 51c — `clmm_pool_state.v1` forward poll. Schema:
+# docs/schemas.md#clmm_pool_statev1.
+#
+# 60s cadence. Each fire is a single `getMultipleAccounts` (≤100
+# pubkeys) + one `getBlockTime`, ~200-500ms wall-clock total. Cheap
+# enough to ride on the multi-manifest `runner-tick` plist (no
+# dedicated Phase-B plist needed unlike jito-bundle-tape /
+# pyth-tape / dex-xstock-swaps).
+#
+# Pool list lives at `data/clmm-pools.txt` — 40 Whirlpool +
+# Raydium-CLMM pools across the 8 xStock mints (live-discovered via
+# GeckoTerminal, then dumped to file). Pool addresses are stable so
+# the file rotates monthly at most. Regenerate by running
+# `scry solana clmm-pool-state` without `--pools-file` (live GT
+# discovery), then dedup the freshly-emitted parquet partition into
+# the file.
+
+id = "clmm-pool-state"
+description = "Per-(pool, slot) tick-state snapshot for Whirlpool + Raydium-CLMM xStock pools."
+schema_ids = ["clmm_pool_state.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "solana", "clmm-pool-state",
+    "--pools-file", "/Users/adamnoonan/Library/Application Support/scryer/manifests/data/clmm-pools.txt",
+    "--source", "rpc:getMultipleAccounts:clmm-pool-state:runner",
+]
+
+[freshness]
+# 5x cadence — alert if no fresh row inside 300s.
+sla_secs = 300
+
+[budget]
+# Per fire: 1 getMultipleAccounts + 1 getBlockTime = 2 calls.
+max_requests_per_run = 10
+
+[workflow]
+sensor = "interval(60s)"

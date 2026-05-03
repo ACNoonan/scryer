@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.runner-jito-bundle-tape</string>
+
+    <!--
+        Wishlist 51a — `jito_bundle_tape.v1` forward poll. Per-manifest
+        Phase-B plist, mirroring `runner-pyth-tape`. Fires
+        `scryer-runner tick --only jito-bundle-tape` every 60s; launchd's
+        skip-if-running guard means no double-spawn even if a previous
+        fire is still running (which can happen — getBlock(full) bodies
+        are multi-MB and a 200-slot walk runs ~80-150s wall-clock).
+
+        Why per-manifest (vs. multi-manifest runner-tick): a 200-slot
+        walk that takes >60s would block the shared multi-manifest
+        tick, causing kraken/redstone/etc. to skip fires. Observed
+        2026-05-02 during the unpaced first runner fire: 33min walk
+        blocked everything. A dedicated plist makes blocking irrelevant.
+
+        The multi-manifest `runner-tick.plist` lists this manifest in
+        its `--skip` list so the two plists don't both try to fire it.
+
+        Source attribution: `jito:bundle-tape:runner` (vs. the
+        long-defunct DRAFT `com.adamnoonan.scryer.jito-bundle-tape.plist`
+        which was deleted; it referenced a `watch` subcommand that never
+        existed).
+    -->
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin/scryer-runner</string>
+        <string>tick</string>
+        <string>--only</string>
+        <string>jito-bundle-tape</string>
+        <string>--manifests</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/manifests</string>
+        <string>--dataset</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/dataset</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/runner-jito-bundle-tape.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/runner-jito-bundle-tape.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+        <!-- See com.adamnoonan.scryer.runner-tick.plist for rationale. -->
+        <key>PATH</key>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+        <key>HOSTNAME</key>
+        <string>samachi-mac</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>

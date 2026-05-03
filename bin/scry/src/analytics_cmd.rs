@@ -11,12 +11,19 @@
 //! Idempotent: dedup on `<manifest_id>:<summary_date>` collapses
 //! re-runs over the same day. Empty-input days produce zero rows.
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 
+use scryer_manifest::Manifest;
+use scryer_schema::dead_letter::v2::{DeadLetter, SCHEMA_VERSION as DEAD_LETTER_SCHEMA_VERSION};
+use scryer_schema::freshness_check::v2::{
+    FreshnessCheck, SCHEMA_VERSION as FRESHNESS_CHECK_SCHEMA_VERSION, SEVERITY_FAILING, SEVERITY_MISSING,
+    SEVERITY_OK, SEVERITY_STALE,
+};
 use scryer_schema::workflow_run::v2::{WorkflowRun, STATUS_SUCCEEDED};
 use scryer_schema::workflow_run_summary::v2::{WorkflowRunSummary, SCHEMA_VERSION};
 use scryer_schema::Meta;
@@ -33,6 +40,17 @@ pub enum AnalyticsTarget {
     /// Per-day, per-manifest rollup of the runner's
     /// `internal.scryer.workflow_run.v2` checkpoint table.
     WorkflowRuns(WorkflowRunsArgs),
+    /// MX.2 — for every manifest under `--manifests`, joins against
+    /// the most recent workflow_run.v2 row, computes staleness vs
+    /// `[freshness].sla_secs`, and emits one
+    /// `internal.scryer.freshness_check.v2` row per manifest.
+    FreshnessCheck(FreshnessCheckArgs),
+    /// MX.3 — extracts failed workflow_run.v2 rows for one UTC day
+    /// and writes one `internal.scryer.dead_letter.v2` row each,
+    /// stamped with the live manifest's `step_command` +
+    /// `step_args_json` so a replay tool only needs the dead-letter
+    /// row, not a manifest snapshot.
+    DeadLetterExtract(DeadLetterExtractArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -55,6 +73,8 @@ pub struct WorkflowRunsArgs {
 pub async fn run_analytics(cmd: AnalyticsCmd) -> Result<()> {
     match cmd.target {
         AnalyticsTarget::WorkflowRuns(args) => run_workflow_runs(args),
+        AnalyticsTarget::FreshnessCheck(args) => run_freshness_check(args),
+        AnalyticsTarget::DeadLetterExtract(args) => run_dead_letter_extract(args),
     }
 }
 
@@ -188,6 +208,289 @@ fn aggregate(
         .collect()
 }
 
+// ============================================================
+// MX.2 — freshness-check
+// ============================================================
+
+#[derive(Parser, Debug)]
+pub struct FreshnessCheckArgs {
+    /// Directory of source manifests. Each manifest's
+    /// `[freshness].sla_secs` defines its staleness threshold; this
+    /// command emits one row per manifest in this directory.
+    #[arg(long, default_value = "ops/sources")]
+    manifests: PathBuf,
+
+    /// `_source` stamped on every emitted row.
+    #[arg(long, default_value = "scry analytics freshness-check")]
+    source: String,
+
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
+    dataset: PathBuf,
+}
+
+fn run_freshness_check(args: FreshnessCheckArgs) -> Result<()> {
+    let now = Utc::now();
+    let now_unix_secs = now.timestamp();
+    let manifests = load_manifests(&args.manifests)?;
+    let dataset = Dataset::new(args.dataset.clone());
+    let runs = read_workflow_run_window(&dataset, now)?;
+
+    // Group workflow_run rows by manifest_id; within each group we
+    // care about (a) the newest row regardless of status (for
+    // `last_fire_status`) and (b) the newest row with
+    // `status = succeeded` (for staleness).
+    let mut newest_by_id: BTreeMap<&str, &WorkflowRun> = BTreeMap::new();
+    let mut newest_succeeded_by_id: BTreeMap<&str, &WorkflowRun> = BTreeMap::new();
+    for r in &runs {
+        let entry = newest_by_id.entry(r.manifest_id.as_str()).or_insert(r);
+        if r.triggered_at_unix_secs > entry.triggered_at_unix_secs {
+            *entry = r;
+        }
+        if r.status == STATUS_SUCCEEDED {
+            let s = newest_succeeded_by_id.entry(r.manifest_id.as_str()).or_insert(r);
+            if r.triggered_at_unix_secs > s.triggered_at_unix_secs {
+                *s = r;
+            }
+        }
+    }
+
+    let rows = manifests
+        .iter()
+        .map(|m| {
+            let last_succeeded = newest_succeeded_by_id.get(m.id.as_str()).copied();
+            let last_fire = newest_by_id.get(m.id.as_str()).copied();
+            let sla_secs = m.freshness.sla_secs as i64;
+            let (last_succeeded_at, staleness_secs) = match last_succeeded {
+                Some(r) => (
+                    Some(r.triggered_at_unix_secs),
+                    Some(now_unix_secs - r.triggered_at_unix_secs),
+                ),
+                None => (None, None),
+            };
+            let last_fire_status = last_fire.map(|r| r.status.clone());
+            let severity = classify_severity(
+                staleness_secs,
+                sla_secs,
+                last_fire_status.as_deref(),
+            );
+            let is_stale = severity == SEVERITY_STALE
+                || severity == SEVERITY_MISSING
+                || severity == SEVERITY_FAILING;
+            FreshnessCheck {
+                check_at_unix_secs: now_unix_secs,
+                manifest_id: m.id.clone(),
+                sla_secs,
+                last_succeeded_at_unix_secs: last_succeeded_at,
+                last_fire_status,
+                staleness_secs,
+                is_stale,
+                severity: severity.to_string(),
+                meta: Meta::new(FRESHNESS_CHECK_SCHEMA_VERSION, now_unix_secs, &args.source),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if rows.is_empty() {
+        eprintln!(
+            "scry analytics freshness-check: no manifests under {} — nothing to write",
+            args.manifests.display()
+        );
+        return Ok(());
+    }
+
+    let stats = dataset
+        .write::<FreshnessCheck>(venue::INTERNAL_SCRYER, None, &rows)
+        .with_context(|| "writing internal.scryer/freshness_check/v2".to_string())?;
+    let stale_count = rows.iter().filter(|r| r.is_stale).count();
+    eprintln!(
+        "scry analytics freshness-check: wrote {} row(s) ({} stale, {} new, {} dedup)",
+        rows.len(),
+        stale_count,
+        stats.rows_added,
+        stats.rows_deduped
+    );
+    Ok(())
+}
+
+pub(crate) fn classify_severity(
+    staleness_secs: Option<i64>,
+    sla_secs: i64,
+    last_fire_status: Option<&str>,
+) -> &'static str {
+    match (staleness_secs, last_fire_status) {
+        (None, None) => SEVERITY_MISSING,
+        // Last attempt was non-succeeded — surface the failing
+        // signal even if a previous succeeded run is recent.
+        (_, Some(s)) if s != STATUS_SUCCEEDED => SEVERITY_FAILING,
+        (None, Some(_)) => SEVERITY_MISSING,
+        (Some(age), _) if age >= sla_secs => SEVERITY_STALE,
+        (Some(_), _) => SEVERITY_OK,
+    }
+}
+
+// ============================================================
+// MX.3 — dead-letter-extract
+// ============================================================
+
+#[derive(Parser, Debug)]
+pub struct DeadLetterExtractArgs {
+    /// UTC day to extract dead-letter rows for. Same semantics as
+    /// `workflow-runs --day`.
+    #[arg(long, default_value = "today")]
+    day: String,
+
+    /// Directory of source manifests. Used to look up
+    /// `step_command` + `step_args_json` for each failed run, so
+    /// the dead-letter row carries enough to replay without a
+    /// manifest snapshot.
+    #[arg(long, default_value = "ops/sources")]
+    manifests: PathBuf,
+
+    /// `_source` stamped on every emitted row.
+    #[arg(long, default_value = "scry analytics dead-letter-extract")]
+    source: String,
+
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
+    dataset: PathBuf,
+}
+
+fn run_dead_letter_extract(args: DeadLetterExtractArgs) -> Result<()> {
+    let now = Utc::now();
+    let day_naive = parse_day(&args.day, now)?;
+    let utc_day = naive_to_utc_day(day_naive);
+    let dataset = Dataset::new(args.dataset.clone());
+    let manifests = load_manifests(&args.manifests)?;
+    let manifest_index: BTreeMap<&str, &Manifest> =
+        manifests.iter().map(|m| (m.id.as_str(), m)).collect();
+
+    let runs: Vec<WorkflowRun> = dataset
+        .read::<WorkflowRun>(venue::INTERNAL_SCRYER, None, utc_day)
+        .with_context(|| {
+            format!("reading internal.scryer/workflow_run/v2 for {}", day_naive)
+        })?;
+
+    let now_unix_secs = now.timestamp();
+    let mut rows = Vec::new();
+    for r in &runs {
+        if r.status == STATUS_SUCCEEDED {
+            continue;
+        }
+        let manifest = manifest_index.get(r.manifest_id.as_str());
+        let (step_command, step_args_json) = match manifest {
+            Some(m) => (
+                m.fetch.command.clone(),
+                serde_json::to_string(&m.fetch.args).unwrap_or_else(|_| "[]".to_string()),
+            ),
+            // Manifest was renamed or deleted since the failed run.
+            // Record the dead-letter row anyway with sentinel
+            // values; replay-by-manifest won't work but a human can
+            // still read the error.
+            None => ("unknown".to_string(), "[]".to_string()),
+        };
+        rows.push(DeadLetter {
+            run_id: r.run_id.clone(),
+            manifest_id: r.manifest_id.clone(),
+            attempt: r.attempt,
+            sensor_expression: r.sensor_expression.clone(),
+            triggered_at_unix_secs: r.triggered_at_unix_secs,
+            finished_at_unix_secs: r.finished_at_unix_secs,
+            duration_ms: r.duration_ms,
+            status: r.status.clone(),
+            exit_code: r.exit_code,
+            error_class: r.error_class.clone(),
+            error_message: r.error_message.clone(),
+            step_command,
+            step_args_json,
+            captured_at_unix_secs: now_unix_secs,
+            meta: Meta::new(DEAD_LETTER_SCHEMA_VERSION, now_unix_secs, &args.source),
+        });
+    }
+
+    if rows.is_empty() {
+        eprintln!(
+            "scry analytics dead-letter-extract: no failed runs in {} for {} — nothing to write",
+            args.dataset.display(),
+            day_naive
+        );
+        return Ok(());
+    }
+
+    let stats = dataset
+        .write::<DeadLetter>(venue::INTERNAL_SCRYER, None, &rows)
+        .with_context(|| {
+            format!("writing internal.scryer/dead_letter/v2 for {}", day_naive)
+        })?;
+    eprintln!(
+        "scry analytics dead-letter-extract: wrote {} dead-letter row(s) for {} ({} new, {} dedup)",
+        rows.len(),
+        day_naive,
+        stats.rows_added,
+        stats.rows_deduped
+    );
+    Ok(())
+}
+
+// ============================================================
+// shared helpers
+// ============================================================
+
+pub(crate) fn load_manifests(dir: &Path) -> Result<Vec<Manifest>> {
+    let read_dir = std::fs::read_dir(dir)
+        .with_context(|| format!("scanning manifests dir {}", dir.display()))?;
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in read_dir {
+        let entry =
+            entry.with_context(|| format!("reading entry under {}", dir.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
+        let m = Manifest::from_path(&path)
+            .with_context(|| format!("loading manifest {}", path.display()))?;
+        out.push(m);
+    }
+    Ok(out)
+}
+
+pub(crate) fn read_workflow_run_window(
+    dataset: &Dataset,
+    now: DateTime<Utc>,
+) -> Result<Vec<WorkflowRun>> {
+    // Read today + yesterday so daily-cadence manifests that fired
+    // late yesterday still surface as `recent` rather than `stale`.
+    let today = utc_day_for(now);
+    let yesterday = utc_day_for(now - chrono::Duration::days(1));
+    let mut all = dataset
+        .read::<WorkflowRun>(venue::INTERNAL_SCRYER, None, today)
+        .with_context(|| "reading workflow_run for today".to_string())?;
+    let yest = dataset
+        .read::<WorkflowRun>(venue::INTERNAL_SCRYER, None, yesterday)
+        .with_context(|| "reading workflow_run for yesterday".to_string())?;
+    all.extend(yest);
+    Ok(all)
+}
+
+pub(crate) fn utc_day_for(dt: DateTime<Utc>) -> UtcDay {
+    use chrono::Datelike;
+    UtcDay {
+        year: dt.year(),
+        month: dt.month(),
+        day: dt.day(),
+    }
+}
+
+fn naive_to_utc_day(d: NaiveDate) -> UtcDay {
+    UtcDay {
+        year: d.format("%Y").to_string().parse().unwrap(),
+        month: d.format("%m").to_string().parse().unwrap(),
+        day: d.format("%d").to_string().parse().unwrap(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,6 +562,37 @@ mod tests {
         let rows: Vec<&WorkflowRun> = Vec::new();
         let summaries = aggregate(&rows, 0, "test", 0);
         assert!(summaries.is_empty());
+    }
+
+    #[test]
+    fn classify_severity_covers_all_branches() {
+        // Never fired, no row at all → missing.
+        assert_eq!(classify_severity(None, 60, None), SEVERITY_MISSING);
+        // Last fire was succeeded but ancient → stale.
+        assert_eq!(
+            classify_severity(Some(120), 60, Some(STATUS_SUCCEEDED)),
+            SEVERITY_STALE
+        );
+        // Last fire succeeded recently → ok.
+        assert_eq!(
+            classify_severity(Some(30), 60, Some(STATUS_SUCCEEDED)),
+            SEVERITY_OK
+        );
+        // Last fire was non-succeeded — failing wins over staleness.
+        assert_eq!(
+            classify_severity(Some(5), 60, Some("failed")),
+            SEVERITY_FAILING
+        );
+        assert_eq!(
+            classify_severity(Some(120), 60, Some("timed_out")),
+            SEVERITY_FAILING
+        );
+        // Last fire was non-succeeded but no succeeded fire ever →
+        // still failing (the last status is meaningful).
+        assert_eq!(
+            classify_severity(None, 60, Some("failed")),
+            SEVERITY_FAILING
+        );
     }
 
     #[test]

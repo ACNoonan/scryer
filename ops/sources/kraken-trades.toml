@@ -21,6 +21,11 @@ args = [
     "--rate-limit-ms", "1000",
 ]
 
+[criticality]
+tier = "tier-1"
+owner = "@adam"
+consumer_impact = "Kraken spot SOLUSD trade tape — primary input for LVR research and CEX-vs-DEX comparator panels. Stale = research gap, not a paging event."
+
 [freshness]
 sla_secs = 7200
 

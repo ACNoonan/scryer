@@ -21,6 +21,11 @@ args = [
     "--source", "geckoterminal:trades:runner",
 ]
 
+[criticality]
+tier = "tier-1"
+owner = "@adam"
+consumer_impact = "Raydium-v4 SOL/USDC trade tape (free-tier GeckoTerminal). DEX-side input for the CEX-vs-DEX comparator. Stale = research gap."
+
 [freshness]
 # 2x cadence — alert if no fresh row inside 30 minutes.
 sla_secs = 1800

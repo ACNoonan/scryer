@@ -1,0 +1,39 @@
+# Wishlist item 52, methodology lock "Single-Stock IV Schema -
+# 2026-05-02". Daily ATM-IV snapshot for the Paper-1 universe via
+# Yahoo Finance's public options endpoint (cookie + crumb auth, no
+# API key). One row per symbol per fire.
+#
+# Cadence is daily because the consumer (Paper-1 §7.1 ladder) only
+# uses Friday-close rows; a daily cron is operationally simpler than
+# weekday-gating, and the extra Mon–Thu rows are harmless.
+#
+# Forward-only by source design — Yahoo doesn't expose historical
+# chains. Backfill to 2014 for the §7.1 head-to-head with F0_VIX
+# requires a paid venue (OptionMetrics via WRDS or a CBOE archive)
+# and lands as a separate manifest under
+# `volatility.<paid_venue>.single_stock_iv.v2` when access is
+# acquired.
+
+id = "yahoo-single-stock-iv"
+description = "Daily ATM IV snapshot per symbol from Yahoo Finance options for the Paper-1 universe. Forward-only; paid backfill is a separate manifest."
+schema_ids = ["volatility.yahoo.single_stock_iv.v2"]
+
+[fetch]
+command = "scry"
+args = [
+    "equity-options", "iv-snapshot",
+    "--source", "yahoo",
+    "--source-label", "yahoo:options:v7:runner",
+]
+
+[criticality]
+tier = "tier-2"
+owner = "@adam"
+consumer_impact = "Per-symbol weekend-horizon IV for the Paper-1 §7.1 ladder rung. Research input; staleness delays paper analysis but doesn't break production. Forward-only — gaps shorten the eventual analysis sample."
+
+[freshness]
+# 2x cadence — alert if no fresh row inside 48 hours.
+sla_secs = 172800
+
+[workflow]
+sensor = "interval(86400s)"

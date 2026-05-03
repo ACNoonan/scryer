@@ -1,0 +1,50 @@
+# Wishlist 51e — `dex_xstock_swaps.v1` forward poll. Schema:
+# docs/schemas.md#dex_xstock_swapsv1.
+#
+# 60s cadence + 120s lookback gives 2x overlap so a missed tick still
+# gets covered by the next one. Dedup on `signature:ix_index` makes
+# overlap free; rows_deduped on the second cycle is the expected
+# steady-state.
+#
+# Stage 2 routing via `--use-get-transaction`: proxy-routed
+# `getTransaction(jsonParsed)`. Slower than Helius `parseTransactions`
+# but multi-provider quota-resilient via the proxy's failover. Use when
+# Helius daily quota is exhausted; remove this flag to switch back to
+# Helius.
+#
+# Low-cadence enough to ride on the multi-manifest `runner-tick.plist`
+# (the per-symbol pagination + getTransaction batches typically finish
+# inside the 60s tick window for the bursty xStock volume).
+#
+# Range backfill of `[2025-07-14, forward-cursor)` is a separate
+# operator job (use `scry solana dex-xstock-swaps --start ... --end ...`)
+# and is not encoded here.
+
+id = "dex-xstock-swaps"
+description = "Cross-DEX xStock swap-print forward poll: Orca / Meteora / Phoenix / Raydium-CLMM."
+schema_ids = ["dex_xstock_swaps.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "solana", "dex-xstock-swaps",
+    "--once",
+    "--lookback-secs", "120",
+    "--use-get-transaction",
+    "--source", "dex_xstock:swaps:runner",
+]
+
+[freshness]
+# 5x cadence — alert if no fresh row inside 300s. xStock volume is
+# bursty so empty-poll fires are common; use staleness on the latest
+# row, not on fire cadence.
+sla_secs = 300
+
+[budget]
+# Per fire: 8 sig-pagination calls (one per xStock mint, each ~1
+# getSignaturesForAddress) + ~0-50 getTransaction calls (depends on
+# burst rate). Loose ceiling.
+max_requests_per_run = 200
+
+[workflow]
+sensor = "interval(60s)"

@@ -23,12 +23,15 @@ mod cex_funding_cmd;
 mod dataset_default;
 mod cex_stock_perp_cmd;
 mod chainlink_reports_cmd;
+mod clmm_pool_state_cmd;
 mod databento_cmd;
 mod deribit_cmd;
 mod dex_xstock_swaps_cmd;
 mod dexagg_cmd;
+mod dlmm_pool_state_cmd;
 mod drift_liquidations_cmd;
 mod equities_cmd;
+mod equity_options_cmd;
 mod evm_cmd;
 mod fred_cmd;
 mod freshness_cmd;
@@ -54,7 +57,9 @@ mod redstone_cmd;
 mod rss_cmd;
 mod sec_cmd;
 mod solana_cmd;
+mod status_cmd;
 mod v5_cmd;
+mod validator_client_cmd;
 mod xstock_holders_cmd;
 
 #[derive(Parser, Debug)]
@@ -116,6 +121,12 @@ enum Command {
     /// crypto equivalent of CBOE's VIX). Public REST, no auth.
     /// Writes to dataset/deribit/dvol/v1/underlying={X}/year=YYYY.parquet.
     Deribit(DeribitCmd),
+    /// Equity options ATM IV snapshots — wishlist 52,
+    /// `volatility.<venue>.single_stock_iv.v2`. Today: yahoo-only,
+    /// forward-only, daily cadence. Writes to
+    /// dataset/volatility.<venue>/single_stock_iv/v2/year=Y/month=M/day=D.parquet.
+    #[command(name = "equity-options")]
+    EquityOptions(EquityOptionsCmd),
     /// Multi-venue perp-futures funding-rate fetcher (OKX, Coinbase
     /// International, Hyperliquid, dYdX v4). Public REST per venue;
     /// no auth, no proxy. Writes one row per (exchange, symbol,
@@ -151,6 +162,12 @@ enum Command {
     /// the runner's `internal.scryer.workflow_run.v2` checkpoint
     /// table.
     Analytics(analytics_cmd::AnalyticsCmd),
+    /// Operator status view (PR.6). Read-only join of the runner's
+    /// freshness_check / workflow_run / workflow_run_summary tables
+    /// with the live manifest set; surfaces severity, recent failure
+    /// counts, last error, and blocked-dependency impact in one
+    /// glance. Defaults to text output; `--format json` for tooling.
+    Status(status_cmd::StatusArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -316,6 +333,22 @@ enum DeribitTarget {
     /// lookback window. Writes one
     /// `deribit_iv.v1::DvolBar` row per (currency, ts) pair.
     Dvol(deribit_cmd::DvolArgs),
+}
+
+#[derive(Parser, Debug)]
+struct EquityOptionsCmd {
+    #[command(subcommand)]
+    target: EquityOptionsTarget,
+}
+
+#[derive(Subcommand, Debug)]
+enum EquityOptionsTarget {
+    /// One ATM-IV reading per symbol at the front-week expiry > now
+    /// + 7 days. Writes one
+    /// `volatility.<venue>.single_stock_iv.v2::SingleStockIv` row
+    /// per symbol. Daily cadence; consumers filter to Friday rows.
+    #[command(name = "iv-snapshot")]
+    IvSnapshot(equity_options_cmd::IvSnapshotArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -600,6 +633,29 @@ enum SolanaTarget {
     /// backed_nav_strikes + cex_stock_perp_tape) for the paper §1.1
     /// oracle-divergence analysis.
     ChainlinkReports(chainlink_reports_cmd::ChainlinkReportsArgs),
+    /// Per-epoch Solana leader→client refresh for `validator_client.v1`.
+    /// Joins `getEpochInfo` + `getClusterNodes` + Stakewiz `/validators`
+    /// to emit one row per (current_epoch, leader_pubkey). Wishlist 51b;
+    /// methodology phase 80. Schedule hourly via the runner — the
+    /// mapping is constant within an epoch (~2 days), so over-polling
+    /// just dedups against existing rows.
+    ValidatorClient(validator_client_cmd::ValidatorClientArgs),
+    /// Single-tick CLMM pool-state poll for `clmm_pool_state.v1`.
+    /// Polls Whirlpool + Raydium-CLMM xStock pools via
+    /// `getMultipleAccounts` + `getBlockTime`, decodes each pool's
+    /// account bytes, emits one row per (pool, slot). Wishlist 51c;
+    /// methodology phase 80. Pool set discovered live via
+    /// GeckoTerminal unless `--pools-file` is provided.
+    ClmmPoolState(clmm_pool_state_cmd::ClmmPoolStateArgs),
+    /// Single-tick Meteora DLMM pool-state poll for
+    /// `dlmm_pool_state.v1`. Two-pass fetch: (1)
+    /// `getMultipleAccounts(pools)` for each pool's `LbPair` →
+    /// active_id + bin_step + parameters, (2) derive each active
+    /// bin's `BinArray` PDA and fetch reserve_x / reserve_y from
+    /// the corresponding bin slot. One row per (pool, slot).
+    /// Wishlist 51d. Pool set discovered live via GeckoTerminal
+    /// (`dex.id == "meteora"`) unless `--pools-file` is provided.
+    DlmmPoolState(dlmm_pool_state_cmd::DlmmPoolStateArgs),
 }
 
 #[tokio::main]
@@ -667,6 +723,15 @@ async fn main() -> Result<()> {
             SolanaTarget::ChainlinkReports(a) => {
                 chainlink_reports_cmd::run_chainlink_reports(a).await
             }
+            SolanaTarget::ValidatorClient(a) => {
+                validator_client_cmd::run_validator_client(a).await
+            }
+            SolanaTarget::ClmmPoolState(a) => {
+                clmm_pool_state_cmd::run_clmm_pool_state(a).await
+            }
+            SolanaTarget::DlmmPoolState(a) => {
+                dlmm_pool_state_cmd::run_dlmm_pool_state(a).await
+            }
         },
         Command::Redstone(c) => match c.target {
             RedstoneTarget::Tape(a) => redstone_cmd::run_tape(a).await,
@@ -715,6 +780,9 @@ async fn main() -> Result<()> {
         Command::Deribit(c) => match c.target {
             DeribitTarget::Dvol(a) => deribit_cmd::run_dvol(a).await,
         },
+        Command::EquityOptions(c) => match c.target {
+            EquityOptionsTarget::IvSnapshot(a) => equity_options_cmd::run_iv_snapshot(a).await,
+        },
         Command::CexStockPerp(c) => match c.target {
             CexStockPerpTarget::Tape(a) => cex_stock_perp_cmd::run_tape(a).await,
             CexStockPerpTarget::Ohlcv(a) => cex_stock_perp_cmd::run_ohlcv(a).await,
@@ -729,6 +797,7 @@ async fn main() -> Result<()> {
         Command::PythPoster(a) => pyth_poster_cmd::run_pyth_poster(a).await,
         Command::Freshness(a) => freshness_cmd::run_freshness(a).await,
         Command::Analytics(c) => analytics_cmd::run_analytics(c).await,
+        Command::Status(a) => status_cmd::run_status(a).await,
     }
 }
 

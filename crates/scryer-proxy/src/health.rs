@@ -253,6 +253,26 @@ async fn probe_one_internal(
                         metrics.record_health(name, false);
                     }
                 }
+                Disposition::CapabilityMismatch => {
+                    // The health probe should never trip a plan-tier
+                    // cap (probes are tiny single-account calls like
+                    // `getSlot`). If we land here, either the
+                    // upstream returned a misleading code or the
+                    // capability classifier has been mis-configured.
+                    // No-op the provider state — a probe carries no
+                    // information about provider health when the
+                    // upstream physically rejects this shape — and
+                    // log loudly so the operator can investigate.
+                    metrics
+                        .request_failures_total
+                        .with_label_values(&[name, "capability_mismatch"])
+                        .inc();
+                    tracing::warn!(
+                        provider = name,
+                        status = r.status,
+                        "health probe classified as CapabilityMismatch — likely misconfiguration"
+                    );
+                }
             }
         }
         Err(e) => {

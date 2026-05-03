@@ -1,0 +1,35 @@
+# MX.2 — Per-source freshness SLA enforcement.
+#
+# Reads every manifest under `--manifests`, joins against the most
+# recent workflow_run.v2 row, computes staleness vs the manifest's
+# own `[freshness].sla_secs`, and emits one
+# `internal.scryer.freshness_check.v2` row per manifest. Operators
+# query the resulting table for `severity != 'ok'` to see active
+# freshness alerts.
+#
+# Cadence: every 300s (5 min). Sub-300s alerting fidelity isn't
+# useful — the freshness SLAs themselves are minutes-to-hours.
+
+id = "analytics-freshness-check"
+description = "Per-manifest freshness audit. Reads workflow_run.v2 + manifests, writes freshness_check.v2 with severity {ok,stale,missing,failing}."
+schema_ids = ["internal.scryer.freshness_check.v2"]
+
+[fetch]
+command = "scry"
+args = [
+    "analytics", "freshness-check",
+    "--manifests", "/Users/adamnoonan/Library/Application Support/scryer/manifests",
+    "--source", "scry:analytics:freshness-check:runner",
+]
+
+[criticality]
+tier = "tier-1"
+owner = "@adam"
+consumer_impact = "Per-manifest freshness audit (MX.2). Other manifests' alerts read freshness_check rows; if THIS goes stale, the freshness signal for everything else goes silent."
+
+[freshness]
+# 2x cadence — alert if no fresh check inside 600s.
+sla_secs = 600
+
+[workflow]
+sensor = "interval(300s)"

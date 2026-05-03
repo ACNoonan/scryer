@@ -22,14 +22,14 @@
 use arrow_array::RecordBatch;
 use arrow_schema::ArrowError;
 use scryer_schema::{
-    backed, backed_nav_strikes, cboe_indices, cex_perp_funding_multi, cex_stock_perp_ohlcv, cex_stock_perp_tape, chainlink_data_streams, cme_intraday_1m, deribit_iv, dex_xstock_swaps, drift_liquidation, earnings, edgar_8k, evm_liquidation, fluid_vault_config, fred_macro, fred_macro_extended, geckoterminal, geckoterminal_ohlcv,
+    backed, backed_nav_strikes, cboe_indices, cex_perp_funding_multi, cex_stock_perp_ohlcv, cex_stock_perp_tape, chainlink_data_streams, clmm_pool_state, cme_intraday_1m, dead_letter, deribit_iv, dex_xstock_swaps, dlmm_pool_state, drift_liquidation, earnings, edgar_8k, evm_liquidation, fluid_vault_config, freshness_check, fred_macro, fred_macro_extended, geckoterminal, geckoterminal_ohlcv,
     jito_bundle_tape, jito_bundles, jito_tip_floor, jupiter_lend_liquidation,
     kamino_liquidation, kamino_obligation,
     kamino_obligation_position, kamino_reserve, kamino_scope, kraken_funding, loopscale_loan,
     loopscale_loan_collateral, mango_v4_liquidation, mango_v4_oracle_config, marginfi_reserve,
     nasdaq_halts,
     oracle_context, pool_snapshot, pyth, pyth_poster_post, pyth_poster_tx, pyth_publisher,
-    raydium_pool_metadata, redstone, solana_priority_fees, swap, trade, v5_tape, workflow_run, workflow_run_summary, xstock_holders, yahoo, yahoo_corp_actions, FromArrowError,
+    raydium_pool_metadata, redstone, single_stock_iv, solana_priority_fees, swap, trade, v5_tape, validator_client, workflow_run, workflow_run_summary, xstock_holders, yahoo, yahoo_corp_actions, FromArrowError,
 };
 
 /// Time granularity of a dataset's partitioning. Each schema picks
@@ -406,6 +406,71 @@ impl DatasetSchema for jito_bundle_tape::v1::BundleLanding {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         jito_bundle_tape::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for clmm_pool_state::v1::PoolState {
+    const DATA_TYPE: &'static str = "clmm_pool_state";
+    /// Partition by `dex_program` per the schema doc — Whirlpool and
+    /// Raydium-CLMM accounts decode through different decoders and
+    /// run as separate fetcher daemons; keying the partition by DEX
+    /// keeps the file boundary at the natural per-daemon boundary.
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("dex");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.block_time
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        clmm_pool_state::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        clmm_pool_state::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for dlmm_pool_state::v1::PoolState {
+    const DATA_TYPE: &'static str = "dlmm_pool_state";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.block_time
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        dlmm_pool_state::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        dlmm_pool_state::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for validator_client::v1::ClientLabel {
+    const DATA_TYPE: &'static str = "client_label";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Yearly;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        // Per-epoch metadata snapshot — partition by `_fetched_at`
+        // (the snapshot timestamp). ~180 epochs × ~1500 leaders =
+        // ~270K rows/year (per schema doc), well-suited to yearly
+        // partitions.
+        self.meta.fetched_at
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        validator_client::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        validator_client::v1::from_record_batch(batch)
     }
 }
 
@@ -1098,6 +1163,57 @@ impl DatasetSchema for pyth_poster_tx::v1::TxRecord {
     }
 }
 
+impl DatasetSchema for freshness_check::v2::FreshnessCheck {
+    /// `dataset/internal.scryer/freshness_check/v2/year=Y/month=M/day=D.parquet`.
+    /// Daily-granular: each row's `check_at_unix_secs` buckets into
+    /// the day the check ran on, so today's snapshot lands in
+    /// today's partition and operators query "the freshest check
+    /// for each manifest" by max(check_at_unix_secs) within the
+    /// current partition.
+    const DATA_TYPE: &'static str = "freshness_check";
+    const SCHEMA_MAJOR: u32 = 2;
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.check_at_unix_secs
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        freshness_check::v2::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        freshness_check::v2::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for dead_letter::v2::DeadLetter {
+    /// `dataset/internal.scryer/dead_letter/v2/year=Y/month=M/day=D.parquet`.
+    /// Partition by `triggered_at_unix_secs` so the failed run lands
+    /// in the same UTC day partition as the corresponding
+    /// workflow_run row — joining the two by run_id stays
+    /// partition-aligned.
+    const DATA_TYPE: &'static str = "dead_letter";
+    const SCHEMA_MAJOR: u32 = 2;
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.triggered_at_unix_secs
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        dead_letter::v2::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        dead_letter::v2::from_record_batch(batch)
+    }
+}
+
 impl DatasetSchema for workflow_run_summary::v2::WorkflowRunSummary {
     /// `dataset/internal.scryer/workflow_run_summary/v2/year=Y/month=M/day=D.parquet`.
     /// Daily-granular: each row's `summary_date_unix_secs` is the
@@ -1119,6 +1235,31 @@ impl DatasetSchema for workflow_run_summary::v2::WorkflowRunSummary {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         workflow_run_summary::v2::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for single_stock_iv::v2::SingleStockIv {
+    /// `dataset/volatility.<venue>/single_stock_iv/v2/year=Y/month=M/day=D.parquet`.
+    /// Per-venue domain.source goes into the `venue` arg passed to
+    /// `Dataset::write` (e.g. `"volatility.yahoo"`); this trait impl
+    /// is venue-agnostic since the row carries the schema id in
+    /// `_schema_version`.
+    const DATA_TYPE: &'static str = "single_stock_iv";
+    const SCHEMA_MAJOR: u32 = 2;
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.ts
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        single_stock_iv::v2::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        single_stock_iv::v2::from_record_batch(batch)
     }
 }
 

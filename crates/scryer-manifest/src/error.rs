@@ -45,6 +45,14 @@ pub enum ManifestError {
     )]
     BadBudgetField { field: &'static str },
 
+    #[error(
+        "[criticality].tier value `{value}` is not in the closed enum (tier-0..tier-3)"
+    )]
+    BadTier { value: String },
+
+    #[error("[criticality].{field} declared but empty; omit the key instead")]
+    EmptyCriticalityField { field: &'static str },
+
     #[error("[[depends_on]] entry must declare both `id` and `fresh_within_secs`")]
     BadDependsOn,
 

@@ -1,0 +1,43 @@
+# Wishlist 51d — `dlmm_pool_state.v1` forward poll. Schema:
+# docs/schemas.md#dlmm_pool_statev1.
+#
+# 60s cadence. Each fire is a TWO-pass `getMultipleAccounts` (LbPair
+# pass + BinArray pass) plus one `getBlockTime` — ~3 RPC calls per
+# fire, each ≤100 pubkeys, ~300-700ms wall-clock. Cheap enough to
+# ride on the multi-manifest `runner-tick` plist alongside
+# `clmm-pool-state` (no dedicated Phase-B plist needed unlike
+# jito-bundle-tape / pyth-tape / dex-xstock-swaps).
+#
+# Pool list lives at `data/dlmm-pools.txt` — Meteora DLMM pools
+# across the 8 xStock mints. Pool addresses are stable so the file
+# rotates monthly at most. Regenerate by running
+# `scry solana dlmm-pool-state` without `--pools-file` (live GT
+# discovery), then copying the discovered pubkeys into the file.
+
+id = "dlmm-pool-state"
+description = "Per-(pool, slot) active-bin reserves snapshot for Meteora DLMM xStock pools."
+schema_ids = ["dlmm_pool_state.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "solana", "dlmm-pool-state",
+    "--pools-file", "/Users/adamnoonan/Library/Application Support/scryer/manifests/data/dlmm-pools.txt",
+    "--source", "rpc:getMultipleAccounts:dlmm-pool-state:runner",
+]
+
+[freshness]
+# 5x cadence — alert if no fresh row inside 300s.
+sla_secs = 300
+
+[budget]
+# Per fire: 1 LbPair gMA + 1 BinArray gMA + 1 getBlockTime = 3 calls.
+max_requests_per_run = 10
+
+[workflow]
+sensor = "interval(60s)"
+
+[criticality]
+tier = "tier-1"
+owner = "@adam"
+consumer_impact = "Active-bin reserves panel for Meteora DLMM xStock pools (Paper-4 Phase-A LVR-truth ladder, sibling of clmm-pool-state). Stale = research gap, not a paging event."

@@ -17,13 +17,16 @@
 //! (`scryer-store`) handles partition layout + dedup at write time.
 
 pub mod chainlink;
+pub mod clmm_pool_state;
 pub mod dex_xstock_swaps;
+pub mod dlmm_pool_state;
 pub mod drift_liquidations;
 pub mod error;
 pub mod fluid_vault_configs;
 pub mod kamino_reserves;
 pub mod get_transactions;
 pub mod jito_bundle_tape;
+pub mod pool_discovery;
 pub mod jupiter_lend_liquidations;
 pub mod kamino_liquidations;
 pub mod kamino_obligations;
@@ -40,6 +43,7 @@ pub mod priority_fees;
 pub mod sig_paginate;
 pub mod swaps_helius_enhanced;
 pub mod types;
+pub mod validator_client;
 pub mod xstock_holders;
 
 pub use chainlink::{

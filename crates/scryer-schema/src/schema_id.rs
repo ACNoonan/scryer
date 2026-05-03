@@ -229,6 +229,9 @@ fn validate_segment(kind: &'static str, segment: &str) -> Result<(), SchemaIdErr
 pub const KNOWN_V2_SCHEMAS: &[SchemaId] = &[
     SchemaId::new_static(Domain::Internal, "scryer", "workflow_run", 2),
     SchemaId::new_static(Domain::Internal, "scryer", "workflow_run_summary", 2),
+    SchemaId::new_static(Domain::Internal, "scryer", "freshness_check", 2),
+    SchemaId::new_static(Domain::Internal, "scryer", "dead_letter", 2),
+    SchemaId::new_static(Domain::Volatility, "yahoo", "single_stock_iv", 2),
 ];
 
 #[cfg(test)]

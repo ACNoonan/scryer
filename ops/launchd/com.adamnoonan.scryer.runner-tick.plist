@@ -11,6 +11,10 @@
         when to actually fire. Multi-manifest by design: future
         soak waves (M3.5+) onboard manifests to ops/sources/ rather
         than adding new launchd plists.
+        Loads every *.toml in the staged manifests directory argument
+        below (incl. yahoo-single-stock-iv wishlist 52: daily ATM IV snapshot,
+        sensor interval 86400s — not skipped; sourced from ops/sources via
+        scryer deploy).
     -->
 
     <key>ProgramArguments</key>
@@ -28,6 +32,27 @@
         -->
         <string>--skip</string>
         <string>pyth-tape</string>
+        <!--
+            jito-bundle-tape (wishlist 51a) — 60s sensor, ~80-150s
+            wall-clock per fire. Per-manifest plist
+            `com.adamnoonan.scryer.runner-jito-bundle-tape` owns it;
+            skipping here so the multi-manifest tick isn't blocked by
+            the multi-MB getBlock walks.
+        -->
+        <string>--skip</string>
+        <string>jito-bundle-tape</string>
+        <!-- 51e dex-xstock-swaps gets its own dedicated plist for the
+             same bursty-volume reason. -->
+        <string>--skip</string>
+        <string>dex-xstock-swaps</string>
+        <!--
+            Phase-A (remain on this plist): manifests not listed above
+            are evaluated each tick — including yahoo-single-stock-iv
+            (wishlist 52, daily IV via interval 86400s). Ensure scryer
+            deploy synced ops/sources/yahoo-single-stock-iv.toml into
+            ~/Library/Application Support/scryer/manifests so forward
+            accumulation runs.
+        -->
         <string>--manifests</string>
         <string>/Users/adamnoonan/Library/Application Support/scryer/manifests</string>
         <string>--dataset</string>
@@ -43,8 +68,9 @@
     <!--
         60-second tick. Sensor evaluation is cheap (no I/O for
         interval/daily). For interval(3600s) manifests this means at
-        most one fire per hour with ~60s scheduling jitter. For daily
-        sensors (none yet) it bounds the worst-case lateness to 60s.
+        most one fire per hour with ~60s scheduling jitter. Daily and
+        long-interval sensors (analytics daily(), yahoo-single-stock-iv
+        86400s, etc.) are evaluated each tick too; scheduling jitter ≤60s.
     -->
     <key>StartInterval</key>
     <integer>60</integer>
