@@ -15,6 +15,33 @@ use scryer_proxy::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Pre-tokio arg sniff. `scryer deploy` runs `--version` post-copy
+    // as a Gatekeeper / codesign warmup probe; without this short-
+    // circuit the daemon would fall through to bind 127.0.0.1:8899
+    // and exit 1 ("Address already in use") whenever the live proxy
+    // is up — emitting a misleading `--version probe failed` warning
+    // in deploy logs (phase 114). Same shape for `--help`.
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--version" | "-V" => {
+                println!("scryer-proxy {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "--help" | "-h" => {
+                println!(
+                    "scryer-proxy {} — JSON-RPC fanout daemon",
+                    env!("CARGO_PKG_VERSION")
+                );
+                println!(
+                    "Configuration is env-only. See methodology_log.md \"Proxy v0.1 Scope\"."
+                );
+                println!("Flags: --version | --help");
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     // Load .env from CWD or any ancestor before tracing init so that
     // tracing-env-filter sees the right values too. Silently ignored
     // if no .env is present (production deployments wire env vars via

@@ -2,18 +2,22 @@
 
 //! Tauri shell for the scryer portal.
 //!
-//! On startup, spawns the `scryer-portal-server` sidecar bound to
-//! 127.0.0.1:<SCRYER_PORTAL_PORT> (default 47777). The webview loads the
-//! Vite-built UI from `ui/dist` (or the dev URL in development) and the UI
-//! talks to the sidecar via plain HTTP.
+//! Pure webview. The `scryer-portal-server` daemon is owned by launchd
+//! (`ops/launchd/com.adamnoonan.scryer.portal-server.plist`, always-on,
+//! 127.0.0.1:47777); this process only renders the UI and talks to that
+//! daemon over plain HTTP. On startup we probe `/api/health` and refuse to
+//! open the window if the daemon isn't up — that surfaces a missing/failed
+//! launchd job immediately instead of letting the UI render against a dead
+//! backend.
 
-use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::time::Duration;
 
-use tauri::Manager;
 use tracing_subscriber::EnvFilter;
 
-struct SidecarHandle(Mutex<Option<Child>>);
+const HEALTH_URL: &str = "http://127.0.0.1:47777/api/health";
+const HEALTH_ATTEMPTS: u32 = 3;
+const HEALTH_RETRY_DELAY: Duration = Duration::from_secs(1);
+const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn main() {
     tracing_subscriber::fmt()
@@ -25,52 +29,49 @@ fn main() {
         .try_init()
         .ok();
 
+    if let Err(err) = wait_for_backend() {
+        let body = format!(
+            "Could not reach scryer-portal-server at http://127.0.0.1:47777.\n\n\
+             Last error: {err}\n\n\
+             Start it with:\n\n  \
+             launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.adamnoonan.scryer.portal-server.plist\n\n\
+             Then relaunch Scryer Portal."
+        );
+        rfd::MessageDialog::new()
+            .set_title("Scryer Portal — backend not reachable")
+            .set_description(&body)
+            .set_level(rfd::MessageLevel::Error)
+            .show();
+        std::process::exit(1);
+    }
+
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_opener::init())
-        .manage(SidecarHandle(Mutex::new(None)))
-        .setup(|app| {
-            spawn_sidecar(app)?;
-            Ok(())
-        })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
-                if let Some(state) = window.try_state::<SidecarHandle>() {
-                    if let Ok(mut guard) = state.0.lock() {
-                        if let Some(mut child) = guard.take() {
-                            let _ = child.kill();
-                        }
-                    }
-                }
-            }
-        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
-fn spawn_sidecar(app: &tauri::App) -> anyhow::Result<()> {
-    // In dev mode the user runs `cargo run -p scryer-portal` themselves; the
-    // shell just renders the UI. Spawning is bundle-only.
-    if cfg!(debug_assertions) {
-        tracing::info!("debug build: not spawning sidecar (start scryer-portal-server manually)");
-        return Ok(());
-    }
-    let resolver = app.path();
-    let bin = resolver
-        .resource_dir()
-        .ok()
-        .map(|d| d.join("scryer-portal-server"))
-        .filter(|p| p.exists())
-        .ok_or_else(|| anyhow::anyhow!("scryer-portal-server binary not found in resources"))?;
-    let child = Command::new(&bin)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()?;
-    if let Some(state) = app.try_state::<SidecarHandle>() {
-        if let Ok(mut guard) = state.0.lock() {
-            *guard = Some(child);
+fn wait_for_backend() -> Result<(), String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(HEALTH_REQUEST_TIMEOUT)
+        .build();
+
+    let mut last_err: Option<String> = None;
+    for attempt in 1..=HEALTH_ATTEMPTS {
+        match agent.get(HEALTH_URL).call() {
+            Ok(resp) if resp.status() < 500 => {
+                tracing::info!(attempt, status = resp.status(), "portal-server reachable");
+                return Ok(());
+            }
+            Ok(resp) => {
+                last_err = Some(format!("HTTP {}", resp.status()));
+            }
+            Err(e) => {
+                last_err = Some(e.to_string());
+            }
+        }
+        if attempt < HEALTH_ATTEMPTS {
+            std::thread::sleep(HEALTH_RETRY_DELAY);
         }
     }
-    tracing::info!(?bin, "spawned scryer-portal-server sidecar");
-    Ok(())
+    Err(last_err.unwrap_or_else(|| "unknown error".into()))
 }

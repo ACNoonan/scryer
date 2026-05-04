@@ -229,6 +229,12 @@ cmd_deploy() {
   mkdir -p "$LAUNCH_AGENTS"
   shopt -s nullglob
   local synced=0 added=0 skipped_draft=0
+  # Phase 114: track which labels had their plist content updated
+  # (`[sync]`) so a later stage can bootout+bootstrap them. Without
+  # this, launchctl keeps the cached argument list from the previous
+  # bootstrap and runs a stale process — the runner-tick `--skip`
+  # list collision that prompted this fix.
+  local synced_labels=()
   for plist in "$plist_src_dir"/com.adamnoonan.scryer.*.plist; do
     local label
     label=$(basename "$plist" .plist)
@@ -261,6 +267,7 @@ cmd_deploy() {
     if [[ $was_present -eq 1 ]]; then
       printf "  [sync] %-50s plist updated\n" "$label"
       synced=$((synced + 1))
+      synced_labels+=("$label")
     else
       printf "  [add]  %-50s new plist installed\n" "$label"
       added=$((added + 1))
@@ -268,6 +275,43 @@ cmd_deploy() {
   done
   if [[ $synced -eq 0 && $added -eq 0 && $skipped_draft -eq 0 ]]; then
     echo "  (all plists already in sync)"
+  fi
+
+  # ---- phase 114: reload sync'd plists ----
+  #
+  # An updated plist sitting in $LAUNCH_AGENTS does NOT replace
+  # launchd's in-memory copy. launchctl re-reads the plist on
+  # bootstrap; until then the running job uses the cached
+  # `arguments`/`EnvironmentVariables`/etc. from the last bootstrap.
+  # `kickstart -k` only restarts the *process* (with the cached
+  # plist), so a sync'd-but-not-reloaded plist will keep running
+  # the previous version's args indefinitely.
+  #
+  # bootout is async — the label can sit in "shutting down" briefly
+  # and the immediate bootstrap rejects with "Operation already in
+  # progress". Poll for full unload before bootstrapping.
+  if [[ ${#synced_labels[@]} -gt 0 ]]; then
+    echo "==> deploy: reload sync'd plists (bootout + bootstrap, plist content changed)"
+    for label in "${synced_labels[@]}"; do
+      local plist="$LAUNCH_AGENTS/$label.plist"
+      if ! is_loaded "$label"; then
+        # Not currently loaded — the "load any newly-added" stage
+        # below will bootstrap it. Nothing to do here.
+        continue
+      fi
+      launchctl bootout "$domain/$label" 2>/dev/null || true
+      # Poll up to ~3s for the unload to settle.
+      local i=0
+      while is_loaded "$label" && [[ $i -lt 15 ]]; do
+        sleep 0.2
+        i=$((i + 1))
+      done
+      if launchctl bootstrap "$domain" "$plist" 2>/dev/null; then
+        printf "  [reload] %-48s plist re-read by launchd\n" "$label"
+      else
+        printf "  [fail]   %-48s bootstrap failed after bootout\n" "$label" >&2
+      fi
+    done
   fi
 
   echo "==> deploy: reload KeepAlive daemons"
@@ -280,7 +324,9 @@ cmd_deploy() {
   # instead of bootout+bootstrap. The bootout/bootstrap pair has a
   # race: bootout is async and can leave the label in a "shutting
   # down" state that rejects the immediate bootstrap with "Operation
-  # already in progress". kickstart sidesteps the race entirely.
+  # already in progress". kickstart sidesteps the race entirely —
+  # but kickstart only restarts the process; if the *plist* changed
+  # we already handled that above via the synced_labels reload stage.
   local keepalive_labels=(
     "com.adamnoonan.scryer.proxy"
     "com.adamnoonan.scryer.portal-server"
@@ -289,6 +335,23 @@ cmd_deploy() {
     local plist="$LAUNCH_AGENTS/$label.plist"
     if [[ ! -e "$plist" ]]; then
       printf "  [skip] %-50s plist not installed\n" "$label"
+      continue
+    fi
+    # If we just bootout+bootstrap'd this label above, the process
+    # already restarted with the new binary AND the new plist.
+    # Skip the redundant kickstart. The `${arr[@]+...}` form is the
+    # set -u safe idiom for "iterate over array, but no-op when
+    # array is empty" — bare `${synced_labels[@]}` would trigger
+    # `unbound variable` under `set -u` when nothing was sync'd.
+    local already_reloaded=0
+    for slabel in ${synced_labels[@]+"${synced_labels[@]}"}; do
+      if [[ "$slabel" == "$label" ]]; then
+        already_reloaded=1
+        break
+      fi
+    done
+    if [[ $already_reloaded -eq 1 ]]; then
+      printf "  [ok]   %-50s already reloaded above (plist + binary)\n" "$label"
       continue
     fi
     if is_loaded "$label"; then
