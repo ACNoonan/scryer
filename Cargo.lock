@@ -6680,11 +6680,8 @@ name = "scryer-portal-shell"
 version = "0.1.0"
 dependencies = [
  "rfd",
- "serde",
- "serde_json",
  "tauri",
  "tauri-build",
- "tokio",
  "tracing",
  "tracing-subscriber",
  "ureq",

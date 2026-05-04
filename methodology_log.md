@@ -55,6 +55,7 @@ Compact index of locked architectural decisions. It keeps operational invariants
 | Soothsayer Lending-track band tape | 2026-05-03 | `oracle.soothsayer_v6.band_tape.v2` mirrors on-chain `PriceUpdate` PDAs via `soothsayer-consumer` path-dep; one schema across profiles, partition key `profile=lending|amm`, dedup `(symbol, publish_slot)`. |
 | Anchor event decode from logs | 2026-05-03 | Anchor `emit!` events flow through `ParsedTx.logs` from `meta.logMessages`; decoded by base64 + 8-byte disc match + Borsh. Proxy-routed `getTransaction(jsonParsed)` is the canonical source. First used in `marginfi_liquidation.v1`. |
 | Runner retry policy | 2026-05-03 | Optional `[retry]` block on each manifest with closed `retry_on` vocabulary `{transient, timeout, nonzero_exit}`. Default is no retry. One workflow_run row per attempt. `last_fire` records the trigger time, not the final attempt time. |
+| Portal shell distribution | 2026-05-03 | Tauri shell is pure webview, no embedded sidecar. Connects via HTTP to launchd-managed `scryer-portal-server` at `127.0.0.1:47777`. Startup probes `/api/health` (3× 1s); on failure shows native `rfd` dialog with `launchctl bootstrap` instructions and exits. Bundled as `Scryer Portal.app` (adhoc-signed, `bundle.targets = ["app"]`, no DMG); installed to `/Applications/`. Refines the 2026-04-28 `Portal` entry. |
 
 ## Core Architecture
 

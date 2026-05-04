@@ -14,9 +14,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tokio = { workspace = true }
 ureq = "2"
 rfd = "0.15"
 tracing = { workspace = true }
