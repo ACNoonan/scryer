@@ -761,6 +761,160 @@ pub fn read_kamino_reserve_symbol_map(
     Ok(out)
 }
 
+/// Per-bank snapshot row read from `marginfi_reserve.v1` parquet —
+/// the subset that the `marginfi-liquidations` CLI needs to enrich
+/// each row with `asset_symbol`, `asset_decimals`, the primary oracle
+/// pubkey, and the `insurance_vault_authority` PDA bump (for native-
+/// unit `insurance_fund_fee_paid` derivation downstream).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarginfiBankEntry {
+    pub bank: String,
+    pub asset_mint: String,
+    pub asset_symbol: String,
+    pub asset_decimals: u8,
+    /// First non-empty entry from the `oracle_keys` comma-joined
+    /// column (per `marginfi_reserve.v1`'s on-disk encoding).
+    /// Empty string when the bank has no populated oracle keys.
+    pub primary_oracle: String,
+    /// `Bank.insurance_vault_authority_bump` byte at body offset 179
+    /// (= raw_account byte 8+179). Caller derives the authority PDA
+    /// via `Pubkey::create_program_address(&[b"insurance_vault_auth",
+    /// bank.as_ref(), &[bump]], &MARGINFI_PROGRAM_ID)`.
+    /// `None` when the row's `raw_account_b64` is missing or
+    /// truncated.
+    pub insurance_vault_authority_bump: Option<u8>,
+    /// `Bank.liquidity_vault_authority_bump` byte at body offset 145
+    /// (= raw_account byte 8+145). Same derivation, seed
+    /// `b"liquidity_vault_auth"`. Captured even though v1
+    /// `marginfi_liquidation` doesn't yet use it — keeps the
+    /// follow-on path open with a single read.
+    pub liquidity_vault_authority_bump: Option<u8>,
+}
+
+/// Read the latest `MarginfiBankEntry` per bank from a
+/// `marginfi_reserve.v1` parquet file or directory tree. When the
+/// same `bank` appears in multiple snapshots, the row with the
+/// largest `_fetched_at` wins. Used by the `marginfi-liquidations`
+/// CLI to build its `BankRegistry` for per-row symbol/oracle
+/// enrichment.
+pub fn read_marginfi_bank_registry(
+    path: &Path,
+) -> Result<Vec<MarginfiBankEntry>, StoreError> {
+    use arrow_array::{Int64Array, LargeStringArray, UInt8Array};
+    use std::collections::HashMap;
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    if path.is_dir() {
+        collect_parquet_files(path, &mut files)?;
+    } else if path.exists() {
+        files.push(path.to_path_buf());
+    } else {
+        return Err(StoreError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "path does not exist"),
+        });
+    }
+
+    // Body offsets are post-Anchor-disc; raw_account_b64 includes
+    // the 8-byte disc, so absolute byte indices are 8 + body offset.
+    const RAW_LIQUIDITY_VAULT_AUTHORITY_BUMP: usize = 8 + 145;
+    const RAW_INSURANCE_VAULT_AUTHORITY_BUMP: usize = 8 + 179;
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+
+    let mut latest: HashMap<String, (i64, MarginfiBankEntry)> = HashMap::new();
+    for file in &files {
+        let Some(reader) = open_parquet_reader(file)? else {
+            continue;
+        };
+        for batch in reader {
+            let batch = batch.map_err(parquet::errors::ParquetError::from)?;
+            let schema = batch.schema();
+            let (Some(i_bank), Some(i_mint), Some(i_sym), Some(i_dec), Some(i_oracle), Some(i_fa)) = (
+                schema.index_of("bank").ok(),
+                schema.index_of("asset_mint").ok(),
+                schema.index_of("asset_symbol").ok(),
+                schema.index_of("asset_decimals").ok(),
+                schema.index_of("oracle_keys").ok(),
+                schema.index_of("_fetched_at").ok(),
+            ) else {
+                continue;
+            };
+            let bank = batch
+                .column(i_bank)
+                .as_any()
+                .downcast_ref::<LargeStringArray>();
+            let mint = batch
+                .column(i_mint)
+                .as_any()
+                .downcast_ref::<LargeStringArray>();
+            let sym = batch
+                .column(i_sym)
+                .as_any()
+                .downcast_ref::<LargeStringArray>();
+            let dec = batch.column(i_dec).as_any().downcast_ref::<UInt8Array>();
+            let okeys = batch
+                .column(i_oracle)
+                .as_any()
+                .downcast_ref::<LargeStringArray>();
+            let fa = batch.column(i_fa).as_any().downcast_ref::<Int64Array>();
+            let (Some(bank), Some(mint), Some(sym), Some(dec), Some(okeys), Some(fa)) =
+                (bank, mint, sym, dec, okeys, fa)
+            else {
+                continue;
+            };
+            // raw_account_b64 is optional — older partitions may lack it.
+            let raw = schema
+                .index_of("raw_account_b64")
+                .ok()
+                .and_then(|idx| batch.column(idx).as_any().downcast_ref::<LargeStringArray>());
+            for i in 0..batch.num_rows() {
+                let bank_pda = bank.value(i).to_string();
+                let primary_oracle = okeys
+                    .value(i)
+                    .split(',')
+                    .find(|s| !s.is_empty())
+                    .unwrap_or("")
+                    .to_string();
+                let (lv_bump, iv_bump) = match raw {
+                    Some(arr) => {
+                        let s = arr.value(i);
+                        if s.is_empty() {
+                            (None, None)
+                        } else {
+                            match B64.decode(s) {
+                                Ok(bytes) => (
+                                    bytes.get(RAW_LIQUIDITY_VAULT_AUTHORITY_BUMP).copied(),
+                                    bytes.get(RAW_INSURANCE_VAULT_AUTHORITY_BUMP).copied(),
+                                ),
+                                Err(_) => (None, None),
+                            }
+                        }
+                    }
+                    None => (None, None),
+                };
+                let entry = MarginfiBankEntry {
+                    bank: bank_pda.clone(),
+                    asset_mint: mint.value(i).to_string(),
+                    asset_symbol: sym.value(i).to_string(),
+                    asset_decimals: dec.value(i),
+                    primary_oracle,
+                    insurance_vault_authority_bump: iv_bump,
+                    liquidity_vault_authority_bump: lv_bump,
+                };
+                let fetched = fa.value(i);
+                match latest.get(&bank_pda) {
+                    Some((seen, _)) if *seen >= fetched => {}
+                    _ => {
+                        latest.insert(bank_pda, (fetched, entry));
+                    }
+                }
+            }
+        }
+    }
+    Ok(latest.into_values().map(|(_, e)| e).collect())
+}
+
 fn collect_parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), StoreError> {
     let entries = std::fs::read_dir(dir).map_err(|e| StoreError::Io {
         path: dir.to_path_buf(),

@@ -6732,6 +6732,7 @@ version = "0.1.0"
 dependencies = [
  "arrow-array 55.2.0",
  "arrow-schema 55.2.0",
+ "base64 0.22.1",
  "chrono",
  "fs4",
  "parquet",

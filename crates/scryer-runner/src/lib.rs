@@ -37,8 +37,9 @@ mod runtime;
 mod state;
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use scryer_manifest::Manifest;
+use scryer_manifest::{Manifest, Retry, RetryFamily};
 use scryer_schema::workflow_run::v2::{
     is_canonical_publish_status, is_canonical_status, WorkflowRun, SCHEMA_VERSION,
     STATUS_SUCCEEDED,
@@ -364,91 +365,169 @@ impl Engine {
         runner: &C,
         sink: &W,
     ) -> TickResult {
-        let counter = self.state.next_run_counter();
-        let run_id = format_run_id(counter);
-
-        // Choose the sensor expression string for the row. Manifests
-        // without a [workflow] block fall back to a placeholder so
-        // the column stays NOT NULL even for forced one-shots.
+        // Sensor expression: manifests without a [workflow] block
+        // (forced one-shots) get a placeholder so the column stays
+        // NOT NULL.
         let sensor_expression = manifest
             .workflow
             .as_ref()
             .map(|w| w.sensor_raw.clone())
             .unwrap_or_else(|| "force".to_string());
 
-        // Spawn the configured command.
-        let outcome = runner.run(&manifest.fetch.command, &manifest.fetch.args);
-        debug_assert!(
-            is_canonical_status(&outcome.status),
-            "CommandRunner returned non-canonical status `{}`",
-            outcome.status,
-        );
-
-        // Build the terminal workflow_run row.
-        let duration_ms =
-            (outcome.finished_at_unix_secs - outcome.started_at_unix_secs).saturating_mul(1_000);
-        let publish_status = if outcome.status == STATUS_SUCCEEDED {
-            // Validation gates (PR.4) flip this to `validation_failed`
-            // / `dead_letter` once they exist. For now `succeeded`
-            // also implies the spawned scry already wrote canonical
-            // partitions, so report `published`.
-            Some("published".to_string())
-        } else {
-            None
-        };
-        debug_assert!(publish_status
-            .as_deref()
-            .map(is_canonical_publish_status)
-            .unwrap_or(true));
-
-        let row = WorkflowRun {
-            run_id: run_id.clone(),
-            manifest_id: manifest.id.clone(),
-            step_index: 0,
-            manifest_revision: None,
-            sensor_expression,
-            attempt: 1,
-            retry_of_run_id: None,
-            triggered_at_unix_secs,
-            started_at_unix_secs: Some(outcome.started_at_unix_secs),
-            finished_at_unix_secs: Some(outcome.finished_at_unix_secs),
-            duration_ms: Some(duration_ms),
-            status: outcome.status.clone(),
-            exit_code: outcome.exit_code,
-            error_class: outcome.error_class.clone(),
-            error_message: outcome.error_message.clone(),
-            requests_made: None,
-            provider_credits: None,
-            usd_spent: None,
-            rows_written: None,
-            partitions_written: None,
-            publish_status,
-            runner_version: self.runner_version.clone(),
-            runner_host: self.runner_host.clone(),
-            meta: Meta::new(SCHEMA_VERSION, outcome.finished_at_unix_secs, "scryer-runner"),
-        };
-
-        let error_writing_row = sink.write_row(&row).err();
-
-        // Record the fire regardless of sink outcome: the spawn
-        // happened; rerunning would cause double-fetches. The
-        // workflow_run row is the audit log; the per-manifest state
-        // file is the suppression gate.
+        // PR.2: record the trigger BEFORE any attempt. A concurrent
+        // tick (multi-manifest plist + per-manifest plist sharing
+        // state) must not double-fire while attempt N is still in
+        // flight, even when retries push the total wall-clock past
+        // the cadence. The workflow_run row is the per-attempt audit
+        // log; the per-manifest state file is the suppression gate
+        // and only the trigger time matters there.
         let error_writing_state = self
             .state
             .write_last_fire(&manifest.id, 0, triggered_at_unix_secs)
             .err()
             .map(|e| e.to_string());
 
+        let retry = manifest.retry;
+        let timeout = retry.timeout_secs.map(Duration::from_secs);
+
+        let mut prev_run_id: Option<String> = None;
+        let mut last_run_id: Option<String> = None;
+        let mut last_outcome: Option<CommandOutcome> = None;
+        let mut error_writing_row: Option<String> = None;
+
+        for attempt_idx in 0..retry.max_attempts {
+            let attempt = (attempt_idx + 1) as i32;
+            let counter = self.state.next_run_counter();
+            let run_id = format_run_id(counter);
+
+            let outcome =
+                runner.run_with_timeout(&manifest.fetch.command, &manifest.fetch.args, timeout);
+            debug_assert!(
+                is_canonical_status(&outcome.status),
+                "CommandRunner returned non-canonical status `{}`",
+                outcome.status,
+            );
+
+            let duration_ms = (outcome.finished_at_unix_secs - outcome.started_at_unix_secs)
+                .saturating_mul(1_000);
+            let publish_status = if outcome.status == STATUS_SUCCEEDED {
+                Some("published".to_string())
+            } else {
+                None
+            };
+            debug_assert!(publish_status
+                .as_deref()
+                .map(is_canonical_publish_status)
+                .unwrap_or(true));
+
+            let row = WorkflowRun {
+                run_id: run_id.clone(),
+                manifest_id: manifest.id.clone(),
+                step_index: 0,
+                manifest_revision: None,
+                sensor_expression: sensor_expression.clone(),
+                attempt,
+                retry_of_run_id: prev_run_id.clone(),
+                triggered_at_unix_secs,
+                started_at_unix_secs: Some(outcome.started_at_unix_secs),
+                finished_at_unix_secs: Some(outcome.finished_at_unix_secs),
+                duration_ms: Some(duration_ms),
+                status: outcome.status.clone(),
+                exit_code: outcome.exit_code,
+                error_class: outcome.error_class.clone(),
+                error_message: outcome.error_message.clone(),
+                requests_made: None,
+                provider_credits: None,
+                usd_spent: None,
+                rows_written: None,
+                partitions_written: None,
+                publish_status,
+                runner_version: self.runner_version.clone(),
+                runner_host: self.runner_host.clone(),
+                meta: Meta::new(SCHEMA_VERSION, outcome.finished_at_unix_secs, "scryer-runner"),
+            };
+
+            if let Err(e) = sink.write_row(&row) {
+                if error_writing_row.is_none() {
+                    error_writing_row = Some(e);
+                }
+            }
+
+            let outcome_for_decision = outcome.clone();
+            last_outcome = Some(outcome);
+            last_run_id = Some(run_id.clone());
+
+            let is_last_attempt = attempt_idx + 1 >= retry.max_attempts;
+            if is_last_attempt || !should_retry(&retry, &outcome_for_decision) {
+                break;
+            }
+
+            let delay = compute_backoff(retry, attempt_idx + 1);
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
+            prev_run_id = Some(run_id);
+        }
+
         TickResult {
             manifest_id: manifest.id.clone(),
             decision,
-            run_id: Some(run_id),
-            command_outcome: Some(outcome),
+            run_id: last_run_id,
+            command_outcome: last_outcome,
             error_writing_row,
             error_writing_state,
         }
     }
+}
+
+/// Map a `CommandOutcome` to a `RetryFamily`. Returns `None` for
+/// successful or unclassified outcomes — the loop never retries
+/// those. The mapping is locked in `methodology_log.md` "Runner
+/// Retry Policy" (2026-05-03).
+fn outcome_retry_family(outcome: &CommandOutcome) -> Option<RetryFamily> {
+    if outcome.status == STATUS_SUCCEEDED {
+        return None;
+    }
+    match outcome.error_class.as_deref()? {
+        "timeout" => Some(RetryFamily::Timeout),
+        "spawn.failed" | "exit.signal" | "exit.unknown" | "wait.failed" => {
+            Some(RetryFamily::Transient)
+        }
+        s if s.starts_with("exit.") => Some(RetryFamily::NonzeroExit),
+        _ => None,
+    }
+}
+
+fn should_retry(retry: &Retry, outcome: &CommandOutcome) -> bool {
+    if !retry.retries_enabled() {
+        return false;
+    }
+    match outcome_retry_family(outcome) {
+        Some(family) => retry.retry_on.contains(family),
+        None => false,
+    }
+}
+
+fn compute_backoff(retry: Retry, attempt_just_finished: u32) -> Duration {
+    let exp = attempt_just_finished.saturating_sub(1).min(63);
+    let factor: u64 = 1u64 << exp;
+    let raw_secs = retry.backoff_initial_secs.saturating_mul(factor);
+    let capped_secs = raw_secs.min(retry.backoff_max_secs);
+    let jitter = jitter_factor(unix_nanos_now(), retry.jitter_ratio);
+    let scaled_secs = (capped_secs as f64 * (1.0 + jitter)).max(0.0);
+    Duration::from_millis((scaled_secs * 1000.0) as u64)
+}
+
+/// Symmetric jitter in `[-ratio, +ratio]` derived from the wall-clock
+/// nanos. Not cryptographic — purpose is thundering-herd spreading,
+/// not unpredictability — so a deterministic mix of the seed bits is
+/// fine and avoids pulling in `rand`.
+fn jitter_factor(seed: u128, ratio: f64) -> f64 {
+    let lo = seed as u64;
+    let hi = (seed >> 64) as u64;
+    let mix = (lo ^ hi).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let frac = ((mix >> 11) as f64) / ((1u64 << 53) as f64);
+    (frac * 2.0 - 1.0) * ratio
 }
 
 /// Plan that the binary's `dry-run` subcommand prints.
@@ -520,6 +599,38 @@ mod tests {
                 .borrow_mut()
                 .push((command.to_owned(), args.to_vec()));
             self.outcome.clone()
+        }
+    }
+
+    /// Returns a different outcome per call, in declared order.
+    /// After the script is exhausted, returns the last outcome
+    /// repeatedly so the runner can never index out of bounds even
+    /// if the test miscounts attempts.
+    struct SequencedRunner {
+        outcomes: Vec<CommandOutcome>,
+        invocations: RefCell<Vec<(String, Vec<String>)>>,
+    }
+
+    impl SequencedRunner {
+        fn new(outcomes: Vec<CommandOutcome>) -> Self {
+            assert!(!outcomes.is_empty());
+            Self {
+                outcomes,
+                invocations: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CommandRunner for SequencedRunner {
+        fn run(&self, command: &str, args: &[String]) -> CommandOutcome {
+            let idx = self.invocations.borrow().len();
+            self.invocations
+                .borrow_mut()
+                .push((command.to_owned(), args.to_vec()));
+            self.outcomes
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| self.outcomes.last().unwrap().clone())
         }
     }
 
@@ -907,6 +1018,355 @@ sensor = "interval({secs}s)"
             engine.state().last_fire("kraken-trades", 0),
             Some(1_777_400_000),
         );
+    }
+
+    // ============================================================
+    // PR.2 — runner retry policy
+    // ============================================================
+
+    fn fail_outcome(error_class: &str, exit_code: Option<i32>) -> CommandOutcome {
+        CommandOutcome {
+            exit_code,
+            status: "failed".to_string(),
+            error_class: Some(error_class.to_string()),
+            error_message: Some("synthetic test failure".to_string()),
+            started_at_unix_secs: 1_777_400_010,
+            finished_at_unix_secs: 1_777_400_011,
+        }
+    }
+
+    fn timeout_outcome() -> CommandOutcome {
+        CommandOutcome {
+            exit_code: None,
+            status: "timed_out".to_string(),
+            error_class: Some("timeout".to_string()),
+            error_message: Some("killed after 1s timeout".to_string()),
+            started_at_unix_secs: 1_777_400_020,
+            finished_at_unix_secs: 1_777_400_021,
+        }
+    }
+
+    fn manifest_with_retry(id: &str, secs: u64, retry_block: &str) -> String {
+        format!(
+            r#"
+id = "{id}"
+description = "test fixture"
+schema_ids = ["trade.v1"]
+[fetch]
+command = "scry"
+args = ["kraken", "trades", "--pair", "SOLUSD"]
+[freshness]
+sla_secs = 60
+[workflow]
+sensor = "interval({secs}s)"
+{retry_block}
+"#
+        )
+    }
+
+    #[test]
+    fn no_retry_block_runs_one_attempt_even_on_transient_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        write_manifest(&manifests, "kraken-trades.toml", &interval_manifest("kraken-trades", 60));
+        let mut engine = Engine::load(make_opts(dir.path(), &manifests)).unwrap();
+        let runner = ScriptedRunner::new(fail_outcome("spawn.failed", None));
+        let oracle = StubOracle::empty();
+        let sink = CapturingSink::new();
+
+        engine
+            .tick(1_777_400_000, TickFilter::default(), &runner, &oracle, &sink)
+            .unwrap();
+        assert_eq!(runner.invocations.borrow().len(), 1);
+        let rows = sink.rows.borrow();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].attempt, 1);
+        assert!(rows[0].retry_of_run_id.is_none());
+    }
+
+    #[test]
+    fn retries_transient_then_succeeds_writes_one_row_per_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        let body = manifest_with_retry(
+            "kraken-trades",
+            60,
+            r#"
+[retry]
+max_attempts = 3
+backoff_initial_secs = 0
+backoff_max_secs = 0
+"#,
+        );
+        write_manifest(&manifests, "kraken-trades.toml", &body);
+        let mut engine = Engine::load(make_opts(dir.path(), &manifests)).unwrap();
+        let runner = SequencedRunner::new(vec![
+            fail_outcome("spawn.failed", None),
+            fail_outcome("exit.signal", None),
+            ok_outcome(),
+        ]);
+        let oracle = StubOracle::empty();
+        let sink = CapturingSink::new();
+
+        let results = engine
+            .tick(1_777_400_000, TickFilter::default(), &runner, &oracle, &sink)
+            .unwrap();
+        assert_eq!(runner.invocations.borrow().len(), 3);
+        let rows = sink.rows.borrow();
+        assert_eq!(rows.len(), 3);
+        // Attempt + retry chain
+        assert_eq!(rows[0].attempt, 1);
+        assert!(rows[0].retry_of_run_id.is_none());
+        assert_eq!(rows[1].attempt, 2);
+        assert_eq!(rows[1].retry_of_run_id.as_deref(), Some(rows[0].run_id.as_str()));
+        assert_eq!(rows[2].attempt, 3);
+        assert_eq!(rows[2].retry_of_run_id.as_deref(), Some(rows[1].run_id.as_str()));
+        // Trigger time identical across attempts.
+        assert!(rows.iter().all(|r| r.triggered_at_unix_secs == 1_777_400_000));
+        // Last attempt succeeded; only it has publish_status=published.
+        assert_eq!(rows[0].status, "failed");
+        assert_eq!(rows[0].publish_status, None);
+        assert_eq!(rows[2].status, "succeeded");
+        assert_eq!(rows[2].publish_status.as_deref(), Some("published"));
+        // TickResult mirrors the LAST attempt.
+        assert_eq!(results[0].run_id.as_deref(), Some(rows[2].run_id.as_str()));
+        assert_eq!(
+            results[0].command_outcome.as_ref().unwrap().status,
+            "succeeded"
+        );
+    }
+
+    #[test]
+    fn retries_exhaust_writes_all_attempts_and_state_records_trigger() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        let body = manifest_with_retry(
+            "kraken-trades",
+            60,
+            r#"
+[retry]
+max_attempts = 3
+backoff_initial_secs = 0
+backoff_max_secs = 0
+"#,
+        );
+        write_manifest(&manifests, "kraken-trades.toml", &body);
+        let mut engine = Engine::load(make_opts(dir.path(), &manifests)).unwrap();
+        let runner = ScriptedRunner::new(fail_outcome("spawn.failed", None));
+        let oracle = StubOracle::empty();
+        let sink = CapturingSink::new();
+
+        engine
+            .tick(1_777_400_000, TickFilter::default(), &runner, &oracle, &sink)
+            .unwrap();
+        assert_eq!(runner.invocations.borrow().len(), 3);
+        assert_eq!(sink.rows.borrow().len(), 3);
+        assert!(sink.rows.borrow().iter().all(|r| r.status == "failed"));
+        // last_fire == triggered_at_unix_secs (NOT the last attempt's
+        // finished_at). Concurrent ticks must suppress against the
+        // trigger time.
+        assert_eq!(
+            engine.state().last_fire("kraken-trades", 0),
+            Some(1_777_400_000),
+        );
+    }
+
+    #[test]
+    fn nonzero_exit_not_in_retry_on_does_not_retry() {
+        // Default retry_on is ["transient", "timeout"]. exit.2 maps
+        // to NonzeroExit, which the manifest didn't opt into.
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        let body = manifest_with_retry(
+            "kraken-trades",
+            60,
+            r#"
+[retry]
+max_attempts = 5
+backoff_initial_secs = 0
+backoff_max_secs = 0
+"#,
+        );
+        write_manifest(&manifests, "kraken-trades.toml", &body);
+        let mut engine = Engine::load(make_opts(dir.path(), &manifests)).unwrap();
+        let runner = ScriptedRunner::new(fail_outcome("exit.2", Some(2)));
+        let oracle = StubOracle::empty();
+        let sink = CapturingSink::new();
+
+        engine
+            .tick(1_777_400_000, TickFilter::default(), &runner, &oracle, &sink)
+            .unwrap();
+        assert_eq!(runner.invocations.borrow().len(), 1);
+        assert_eq!(sink.rows.borrow().len(), 1);
+    }
+
+    #[test]
+    fn nonzero_exit_with_explicit_opt_in_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        let body = manifest_with_retry(
+            "kraken-trades",
+            60,
+            r#"
+[retry]
+max_attempts = 2
+backoff_initial_secs = 0
+backoff_max_secs = 0
+retry_on = ["nonzero_exit"]
+"#,
+        );
+        write_manifest(&manifests, "kraken-trades.toml", &body);
+        let mut engine = Engine::load(make_opts(dir.path(), &manifests)).unwrap();
+        let runner = ScriptedRunner::new(fail_outcome("exit.2", Some(2)));
+        let oracle = StubOracle::empty();
+        let sink = CapturingSink::new();
+
+        engine
+            .tick(1_777_400_000, TickFilter::default(), &runner, &oracle, &sink)
+            .unwrap();
+        assert_eq!(runner.invocations.borrow().len(), 2);
+        assert_eq!(sink.rows.borrow().len(), 2);
+    }
+
+    #[test]
+    fn timeout_outcome_retries_when_in_default_retry_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        let body = manifest_with_retry(
+            "kraken-trades",
+            60,
+            r#"
+[retry]
+max_attempts = 3
+timeout_secs = 1
+backoff_initial_secs = 0
+backoff_max_secs = 0
+"#,
+        );
+        write_manifest(&manifests, "kraken-trades.toml", &body);
+        let mut engine = Engine::load(make_opts(dir.path(), &manifests)).unwrap();
+        let runner = SequencedRunner::new(vec![
+            timeout_outcome(),
+            timeout_outcome(),
+            ok_outcome(),
+        ]);
+        let oracle = StubOracle::empty();
+        let sink = CapturingSink::new();
+
+        engine
+            .tick(1_777_400_000, TickFilter::default(), &runner, &oracle, &sink)
+            .unwrap();
+        assert_eq!(runner.invocations.borrow().len(), 3);
+        let rows = sink.rows.borrow();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].status, "timed_out");
+        assert_eq!(rows[1].status, "timed_out");
+        assert_eq!(rows[2].status, "succeeded");
+    }
+
+    #[test]
+    fn empty_retry_on_disables_retry_even_with_high_max_attempts() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        let body = manifest_with_retry(
+            "kraken-trades",
+            60,
+            r#"
+[retry]
+max_attempts = 5
+backoff_initial_secs = 0
+backoff_max_secs = 0
+retry_on = []
+"#,
+        );
+        write_manifest(&manifests, "kraken-trades.toml", &body);
+        let mut engine = Engine::load(make_opts(dir.path(), &manifests)).unwrap();
+        let runner = ScriptedRunner::new(fail_outcome("spawn.failed", None));
+        let oracle = StubOracle::empty();
+        let sink = CapturingSink::new();
+
+        engine
+            .tick(1_777_400_000, TickFilter::default(), &runner, &oracle, &sink)
+            .unwrap();
+        assert_eq!(runner.invocations.borrow().len(), 1);
+        assert_eq!(sink.rows.borrow().len(), 1);
+    }
+
+    #[test]
+    fn outcome_retry_family_classifier_is_locked() {
+        // Sanity: the methodology lock pins this mapping. If any
+        // arm changes, the wishlist row + methodology entry must
+        // be amended first.
+        assert_eq!(
+            outcome_retry_family(&fail_outcome("timeout", None)),
+            Some(RetryFamily::Timeout),
+        );
+        assert_eq!(
+            outcome_retry_family(&fail_outcome("spawn.failed", None)),
+            Some(RetryFamily::Transient),
+        );
+        assert_eq!(
+            outcome_retry_family(&fail_outcome("exit.signal", None)),
+            Some(RetryFamily::Transient),
+        );
+        assert_eq!(
+            outcome_retry_family(&fail_outcome("exit.unknown", None)),
+            Some(RetryFamily::Transient),
+        );
+        assert_eq!(
+            outcome_retry_family(&fail_outcome("wait.failed", None)),
+            Some(RetryFamily::Transient),
+        );
+        assert_eq!(
+            outcome_retry_family(&fail_outcome("exit.2", Some(2))),
+            Some(RetryFamily::NonzeroExit),
+        );
+        assert_eq!(outcome_retry_family(&ok_outcome()), None);
+    }
+
+    #[test]
+    fn compute_backoff_respects_initial_cap_and_growth() {
+        let r = scryer_manifest::Retry {
+            max_attempts: 5,
+            timeout_secs: None,
+            backoff_initial_secs: 10,
+            backoff_max_secs: 60,
+            jitter_ratio: 0.0,
+            retry_on: scryer_manifest::RetryOnSet::DEFAULT,
+        };
+        // attempt_just_finished=1 → exp 0 → 10
+        assert_eq!(compute_backoff(r, 1).as_secs(), 10);
+        // attempt 2 → 20
+        assert_eq!(compute_backoff(r, 2).as_secs(), 20);
+        // attempt 3 → 40
+        assert_eq!(compute_backoff(r, 3).as_secs(), 40);
+        // attempt 4 → 80, capped to 60
+        assert_eq!(compute_backoff(r, 4).as_secs(), 60);
+        // attempt 99 → still capped at 60 (no overflow)
+        assert_eq!(compute_backoff(r, 99).as_secs(), 60);
+    }
+
+    #[test]
+    fn compute_backoff_jitter_lives_within_bounds() {
+        let r = scryer_manifest::Retry {
+            max_attempts: 3,
+            timeout_secs: None,
+            backoff_initial_secs: 100,
+            backoff_max_secs: 100,
+            jitter_ratio: 0.5,
+            retry_on: scryer_manifest::RetryOnSet::DEFAULT,
+        };
+        for _ in 0..32 {
+            let secs = compute_backoff(r, 1).as_secs_f64();
+            assert!(secs >= 50.0 && secs <= 150.0, "got {secs}");
+        }
     }
 
     #[test]

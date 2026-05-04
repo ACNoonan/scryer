@@ -1,0 +1,32 @@
+# M3.6 Phase B. Backed Finance per-xStock indicative quote tape, 60s
+# cadence — exercises per-manifest tick mode (`scryer-runner tick
+# --only backed-nav-strikes`) under a dedicated launchd plist.
+#
+# Soak attribution: legacy plist
+# `com.adamnoonan.scryer.backed-nav-strikes` still loaded with
+# `_source = xstocks_api_v2:launchd`; this manifest emits
+# `xstocks_api_v2:runner`. Operator unloads the legacy plist after
+# parallel-soak per `docs/m3_4_soak_protocol.md`.
+
+id = "backed-nav-strikes"
+description = "Backed Finance xStock indicative-quote NAV-strike tape, every 60s. Phase-B per-manifest tick mode."
+schema_ids = ["backed_nav_strikes.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "backed", "nav-strikes",
+    "--source", "xstocks_api_v2:runner",
+]
+
+[criticality]
+tier = "tier-1"
+owner = "@adam"
+consumer_impact = "Backed-side indicative NAV strikes per xStock symbol — DEX-side comparator reference for Soothsayer's xStock pricing research. Stale = research gap on the xStock NAV reference panel."
+
+[freshness]
+# 2x cadence — alert if no fresh row inside 120s.
+sla_secs = 120
+
+[workflow]
+sensor = "interval(60s)"

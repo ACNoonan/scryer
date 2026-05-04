@@ -75,4 +75,15 @@ pub enum ManifestError {
 
     #[error("[workflow].steps[{index}].args may not contain `--dataset`")]
     StepArgsContainDataset { index: usize },
+
+    #[error(
+        "[retry].retry_on entry `{value}` is not in the closed enum (transient, timeout, nonzero_exit)"
+    )]
+    BadRetryOn { value: String },
+
+    #[error("[retry].{field}: {reason}")]
+    BadRetryField {
+        field: &'static str,
+        reason: &'static str,
+    },
 }

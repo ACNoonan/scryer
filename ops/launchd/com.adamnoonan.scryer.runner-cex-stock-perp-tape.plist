@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.runner-cex-stock-perp-tape</string>
+
+    <!--
+        M3.6 Phase B per-manifest plist. Fires `scryer-runner tick
+        --only cex-stock-perp-tape` every 60s.
+
+        Wall-clock per fire is dominated by the slowest CEX venue
+        out of the ~10 venue panel; launchd's skip-if-running
+        protects the next tick if any one venue stalls.
+
+        Legacy `com.adamnoonan.scryer.cex-stock-perp-tape.plist`
+        remains loaded for parallel-soak.
+    -->
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin/scryer-runner</string>
+        <string>tick</string>
+        <string>--only</string>
+        <string>cex-stock-perp-tape</string>
+        <string>--manifests</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/manifests</string>
+        <string>--dataset</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/dataset</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/runner-cex-stock-perp-tape.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/runner-cex-stock-perp-tape.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+        <key>PATH</key>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+        <key>HOSTNAME</key>
+        <string>samachi-mac</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>

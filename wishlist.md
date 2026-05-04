@@ -133,7 +133,6 @@ Use `docs/phase_log.md` for details. Keep this list short and remove entries onc
 
 ## Methodology Entries Needed
 
-- Source manifest format for v0.2 platform work.
 - Kamino Scope >=90d historical backfill source/method.
 - RedStone permaweb >=90d historical backfill source/method.
 - Any new v2 schema migration that changes vocabulary or row semantics.

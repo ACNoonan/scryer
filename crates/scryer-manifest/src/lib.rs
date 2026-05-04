@@ -52,6 +52,10 @@ pub struct Manifest {
     /// (PR.5/PR.8 alert routing) treats undeclared manifests as
     /// the lowest-priority bucket until they're tagged.
     pub criticality: Option<Criticality>,
+    /// `[retry]` block (PR.2). Always populated; absence in the
+    /// TOML resolves to `Retry::no_retry()` so the runner has a
+    /// uniform shape regardless of whether the manifest opted in.
+    pub retry: Retry,
     pub workflow: Option<Workflow>,
     pub depends_on: Vec<DependsOn>,
     /// Source path the manifest was loaded from, if any. `None` when
@@ -146,6 +150,131 @@ pub struct Criticality {
     pub consumer_impact: Option<String>,
 }
 
+/// `[retry]` block (PR.2). All fields are validated against the
+/// methodology lock dated 2026-05-03 ("Runner Retry Policy"). The
+/// runner consumes this struct directly — there is no separate
+/// runtime mirror.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Retry {
+    /// Total attempts including the first. `1` = no retry.
+    pub max_attempts: u32,
+    /// Per-attempt timeout. `None` = no timeout.
+    pub timeout_secs: Option<u64>,
+    pub backoff_initial_secs: u64,
+    pub backoff_max_secs: u64,
+    pub jitter_ratio: f64,
+    /// Closed vocabulary; bitset-style sized array indexed by
+    /// `RetryFamily`. Empty = retry nothing regardless of attempt count.
+    pub retry_on: RetryOnSet,
+}
+
+impl Retry {
+    pub const MAX_ATTEMPTS_HARD_CAP: u32 = 10;
+
+    /// Default block: single attempt, no timeout. Matches pre-PR.2
+    /// runner behavior so undeclared manifests do not change shape.
+    pub const fn no_retry() -> Self {
+        Self {
+            max_attempts: 1,
+            timeout_secs: None,
+            backoff_initial_secs: 30,
+            backoff_max_secs: 300,
+            jitter_ratio: 0.2,
+            retry_on: RetryOnSet::DEFAULT,
+        }
+    }
+
+    pub fn retries_enabled(&self) -> bool {
+        self.max_attempts > 1 && !self.retry_on.is_empty()
+    }
+}
+
+impl Default for Retry {
+    fn default() -> Self {
+        Self::no_retry()
+    }
+}
+
+/// Closed `retry_on` family vocabulary.
+///
+/// - `Transient` — recoverable upstream failure (spawn errors,
+///   signals, unknown exit). Mirrors the proxy's `Transient`
+///   disposition.
+/// - `Timeout` — per-attempt timeout breached. Only meaningful when
+///   `timeout_secs > 0`.
+/// - `NonzeroExit` — any nonzero exit code. Broadest opt-in;
+///   reserved for fetchers where every nonzero is recoverable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RetryFamily {
+    Transient,
+    Timeout,
+    NonzeroExit,
+}
+
+impl RetryFamily {
+    pub const ALL: &'static [RetryFamily] = &[
+        RetryFamily::Transient,
+        RetryFamily::Timeout,
+        RetryFamily::NonzeroExit,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RetryFamily::Transient => "transient",
+            RetryFamily::Timeout => "timeout",
+            RetryFamily::NonzeroExit => "nonzero_exit",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self, ManifestError> {
+        for f in Self::ALL {
+            if f.as_str() == s {
+                return Ok(*f);
+            }
+        }
+        Err(ManifestError::BadRetryOn {
+            value: s.to_owned(),
+        })
+    }
+}
+
+/// Set of `RetryFamily` values, encoded as a small bitset for cheap
+/// equality and copying. Order is irrelevant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetryOnSet(u8);
+
+impl RetryOnSet {
+    /// Methodology default: retry on `transient` and `timeout`. The
+    /// runner only consults this when `max_attempts > 1`, so the
+    /// default is harmless under the no-retry default.
+    pub const DEFAULT: Self = Self((1 << 0) | (1 << 1));
+
+    pub const EMPTY: Self = Self(0);
+
+    pub fn from_iter<I: IntoIterator<Item = RetryFamily>>(iter: I) -> Self {
+        let mut bits: u8 = 0;
+        for f in iter {
+            bits |= 1 << (f as u8);
+        }
+        Self(bits)
+    }
+
+    pub fn contains(self, f: RetryFamily) -> bool {
+        (self.0 >> (f as u8)) & 1 == 1
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = RetryFamily> {
+        RetryFamily::ALL
+            .iter()
+            .copied()
+            .filter(move |f| self.contains(*f))
+    }
+}
+
 /// Closed source-criticality tier vocabulary (PR.1).
 ///
 /// - `Tier0`: foundational data others depend on (oracle tapes,
@@ -232,9 +361,28 @@ struct RawManifest {
     #[serde(default)]
     criticality: Option<RawCriticality>,
     #[serde(default)]
+    retry: Option<RawRetry>,
+    #[serde(default)]
     workflow: Option<RawWorkflow>,
     #[serde(default, rename = "depends_on")]
     depends_on: Vec<RawDependsOn>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawRetry {
+    #[serde(default)]
+    max_attempts: Option<u32>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    backoff_initial_secs: Option<u64>,
+    #[serde(default)]
+    backoff_max_secs: Option<u64>,
+    #[serde(default)]
+    jitter_ratio: Option<f64>,
+    #[serde(default)]
+    retry_on: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -318,6 +466,11 @@ fn validate(raw: RawManifest, source_path: Option<PathBuf>) -> Result<Manifest, 
         None => None,
     };
 
+    let retry = match raw.retry {
+        Some(r) => validate_retry(r)?,
+        None => Retry::no_retry(),
+    };
+
     let workflow = match raw.workflow {
         Some(w) => Some(validate_workflow(w)?),
         None => None,
@@ -337,9 +490,66 @@ fn validate(raw: RawManifest, source_path: Option<PathBuf>) -> Result<Manifest, 
         freshness,
         budget,
         criticality,
+        retry,
         workflow,
         depends_on,
         source_path,
+    })
+}
+
+fn validate_retry(raw: RawRetry) -> Result<Retry, ManifestError> {
+    let defaults = Retry::no_retry();
+    let max_attempts = raw.max_attempts.unwrap_or(defaults.max_attempts);
+    if max_attempts == 0 {
+        return Err(ManifestError::BadRetryField {
+            field: "max_attempts",
+            reason: "must be >= 1; omit the [retry] block to disable retries",
+        });
+    }
+    if max_attempts > Retry::MAX_ATTEMPTS_HARD_CAP {
+        return Err(ManifestError::BadRetryField {
+            field: "max_attempts",
+            reason: "exceeds hard cap of 10; raise the cap in scryer-manifest if intentional",
+        });
+    }
+    let timeout_secs = match raw.timeout_secs {
+        Some(0) | None => None,
+        Some(v) => Some(v),
+    };
+    let backoff_initial_secs = raw
+        .backoff_initial_secs
+        .unwrap_or(defaults.backoff_initial_secs);
+    let backoff_max_secs = raw.backoff_max_secs.unwrap_or(defaults.backoff_max_secs);
+    if backoff_max_secs < backoff_initial_secs {
+        return Err(ManifestError::BadRetryField {
+            field: "backoff_max_secs",
+            reason: "must be >= backoff_initial_secs",
+        });
+    }
+    let jitter_ratio = raw.jitter_ratio.unwrap_or(defaults.jitter_ratio);
+    if !(0.0..=1.0).contains(&jitter_ratio) || !jitter_ratio.is_finite() {
+        return Err(ManifestError::BadRetryField {
+            field: "jitter_ratio",
+            reason: "must be in [0.0, 1.0] and finite",
+        });
+    }
+    let retry_on = match raw.retry_on {
+        None => defaults.retry_on,
+        Some(list) => {
+            let mut families = Vec::with_capacity(list.len());
+            for entry in list {
+                families.push(RetryFamily::parse(entry.trim())?);
+            }
+            RetryOnSet::from_iter(families)
+        }
+    };
+    Ok(Retry {
+        max_attempts,
+        timeout_secs,
+        backoff_initial_secs,
+        backoff_max_secs,
+        jitter_ratio,
+        retry_on,
     })
 }
 
@@ -545,6 +755,31 @@ mod tests {
         p.push("ops/sources");
         p.push(name);
         p
+    }
+
+    #[test]
+    fn every_in_tree_source_manifest_parses() {
+        // Treat ops/sources/*.toml as a fixture set: any manifest
+        // checked into the repo must parse cleanly. Catches typos,
+        // missing required keys, and unknown schema_ids the moment
+        // a manifest is added or edited. `.toml.paused` /
+        // `.toml.deferred` files are intentionally skipped — same
+        // exclusion rule as `scryer-runner`'s discovery glob.
+        let mut sources_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        sources_dir.pop();
+        sources_dir.pop();
+        sources_dir.push("ops/sources");
+        let mut count = 0;
+        for entry in std::fs::read_dir(&sources_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|s| s.to_str()) != Some("toml") {
+                continue;
+            }
+            Manifest::from_path(&path)
+                .unwrap_or_else(|e| panic!("{} failed to parse: {e}", path.display()));
+            count += 1;
+        }
+        assert!(count > 0, "no manifests found under {}", sources_dir.display());
     }
 
     #[test]
@@ -883,6 +1118,209 @@ oncall = "yes"
     fn tier_round_trips_through_str() {
         for t in Tier::ALL {
             assert_eq!(Tier::parse(t.as_str()).unwrap(), *t);
+        }
+    }
+
+    // ============================================================
+    // PR.2 — retry block
+    // ============================================================
+
+    fn base_manifest_with_retry(block: &str) -> String {
+        format!(
+            r#"
+id = "demo"
+description = "x"
+schema_ids = ["trade.v1"]
+[fetch]
+command = "scry"
+args = []
+[freshness]
+sla_secs = 60
+{block}
+"#
+        )
+    }
+
+    #[test]
+    fn retry_defaults_to_no_retry_when_block_absent() {
+        let toml = base_manifest_with_retry("");
+        let m = Manifest::from_str(&toml, None).unwrap();
+        assert_eq!(m.retry, Retry::no_retry());
+        assert!(!m.retry.retries_enabled());
+    }
+
+    #[test]
+    fn parses_retry_full_block() {
+        let toml = base_manifest_with_retry(
+            r#"
+[retry]
+max_attempts = 3
+timeout_secs = 120
+backoff_initial_secs = 10
+backoff_max_secs = 60
+jitter_ratio = 0.3
+retry_on = ["transient", "timeout", "nonzero_exit"]
+"#,
+        );
+        let m = Manifest::from_str(&toml, None).unwrap();
+        let r = m.retry;
+        assert_eq!(r.max_attempts, 3);
+        assert_eq!(r.timeout_secs, Some(120));
+        assert_eq!(r.backoff_initial_secs, 10);
+        assert_eq!(r.backoff_max_secs, 60);
+        assert!((r.jitter_ratio - 0.3).abs() < 1e-9);
+        for f in RetryFamily::ALL {
+            assert!(r.retry_on.contains(*f));
+        }
+        assert!(r.retries_enabled());
+    }
+
+    #[test]
+    fn retry_partial_block_inherits_defaults() {
+        let toml = base_manifest_with_retry(
+            r#"
+[retry]
+max_attempts = 2
+"#,
+        );
+        let m = Manifest::from_str(&toml, None).unwrap();
+        assert_eq!(m.retry.max_attempts, 2);
+        assert_eq!(m.retry.timeout_secs, None);
+        assert_eq!(m.retry.backoff_initial_secs, 30);
+        assert_eq!(m.retry.backoff_max_secs, 300);
+        assert_eq!(m.retry.retry_on, RetryOnSet::DEFAULT);
+        assert!(m.retry.retries_enabled());
+    }
+
+    #[test]
+    fn retry_zero_timeout_is_treated_as_unset() {
+        let toml = base_manifest_with_retry(
+            r#"
+[retry]
+timeout_secs = 0
+"#,
+        );
+        let m = Manifest::from_str(&toml, None).unwrap();
+        assert_eq!(m.retry.timeout_secs, None);
+    }
+
+    #[test]
+    fn retry_rejects_zero_max_attempts() {
+        let toml = base_manifest_with_retry(
+            r#"
+[retry]
+max_attempts = 0
+"#,
+        );
+        let err = Manifest::from_str(&toml, None).unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::BadRetryField {
+                field: "max_attempts",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn retry_rejects_max_attempts_above_cap() {
+        let toml = base_manifest_with_retry(
+            r#"
+[retry]
+max_attempts = 99
+"#,
+        );
+        let err = Manifest::from_str(&toml, None).unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::BadRetryField {
+                field: "max_attempts",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn retry_rejects_max_below_initial_backoff() {
+        let toml = base_manifest_with_retry(
+            r#"
+[retry]
+backoff_initial_secs = 60
+backoff_max_secs = 10
+"#,
+        );
+        let err = Manifest::from_str(&toml, None).unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::BadRetryField {
+                field: "backoff_max_secs",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn retry_rejects_jitter_above_one() {
+        let toml = base_manifest_with_retry(
+            r#"
+[retry]
+jitter_ratio = 1.5
+"#,
+        );
+        let err = Manifest::from_str(&toml, None).unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::BadRetryField {
+                field: "jitter_ratio",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn retry_rejects_unknown_family() {
+        let toml = base_manifest_with_retry(
+            r#"
+[retry]
+retry_on = ["transient", "auth_failed"]
+"#,
+        );
+        let err = Manifest::from_str(&toml, None).unwrap_err();
+        assert!(matches!(err, ManifestError::BadRetryOn { .. }));
+    }
+
+    #[test]
+    fn retry_empty_retry_on_disables_retries() {
+        let toml = base_manifest_with_retry(
+            r#"
+[retry]
+max_attempts = 5
+retry_on = []
+"#,
+        );
+        let m = Manifest::from_str(&toml, None).unwrap();
+        assert_eq!(m.retry.max_attempts, 5);
+        assert!(m.retry.retry_on.is_empty());
+        assert!(!m.retry.retries_enabled());
+    }
+
+    #[test]
+    fn retry_rejects_unknown_keys() {
+        let toml = base_manifest_with_retry(
+            r#"
+[retry]
+max_attempts = 2
+hammer = true
+"#,
+        );
+        let err = Manifest::from_str(&toml, None).unwrap_err();
+        assert!(matches!(err, ManifestError::Toml(_)));
+    }
+
+    #[test]
+    fn retry_family_round_trips() {
+        for f in RetryFamily::ALL {
+            assert_eq!(RetryFamily::parse(f.as_str()).unwrap(), *f);
         }
     }
 

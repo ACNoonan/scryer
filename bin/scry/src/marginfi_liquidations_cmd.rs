@@ -20,12 +20,13 @@ use chrono::{NaiveDate, TimeZone, Utc};
 use clap::Parser;
 use scryer_fetch_solana::get_transactions::{get_transactions_via_proxy, GetTxConfig};
 use scryer_fetch_solana::marginfi_liquidations::{
-    extract_liquidations, BankInfo, BankRegistry, MARGINFI_PROGRAM_ID,
+    derive_vault_authority, extract_liquidations, BankInfo, BankRegistry,
+    INSURANCE_VAULT_AUTH_SEED, MARGINFI_PROGRAM_ID,
 };
 use scryer_fetch_solana::sig_paginate::{get_signatures_in_window, SigPaginateConfig};
 use scryer_schema::marginfi_liquidation::v1 as schema;
 use scryer_schema::Meta;
-use scryer_store::{venue, Dataset};
+use scryer_store::{read_marginfi_bank_registry, venue, Dataset};
 use serde::Deserialize;
 
 #[derive(Parser, Debug)]
@@ -42,12 +43,20 @@ pub struct MarginfiLiquidationsArgs {
     end: String,
     /// Optional JSON file mapping bank PDAs to `BankInfo`. Shape:
     /// `[{"bank":"...", "mint":"...", "mint_decimals":8, "mint_symbol":"SPYx", "oracle":"..."}, ...]`.
-    /// When omitted the registry is empty and rows ship with
-    /// `asset_symbol="?"` / `asset_oracle=""` (and the same for
-    /// liab); a follow-on phase wires up parquet auto-load from
-    /// `marginfi_reserve.v1`.
-    #[arg(long)]
+    /// Conflicts with `--bank-registry-from-parquet`. Useful for
+    /// hand-curated overrides; for the canonical case prefer the
+    /// parquet path.
+    #[arg(long, conflicts_with = "bank_registry_from_parquet")]
     bank_registry_json: Option<PathBuf>,
+    /// Optional path to a `marginfi_reserve.v1` parquet file or
+    /// directory tree. The latest snapshot per bank is read and used
+    /// to enrich each liquidation row's `asset_symbol` / `asset_decimals`
+    /// / `asset_oracle` (same for liab). When neither this flag nor
+    /// `--bank-registry-json` is set, the CLI auto-discovers the
+    /// canonical partition at `<dataset>/<venue>/reserves/v1/` and
+    /// uses it when present (with a one-line warn if missing).
+    #[arg(long)]
+    bank_registry_from_parquet: Option<PathBuf>,
     /// `_source` stamped on every emitted row.
     #[arg(long, default_value = "rpc:getTransaction:marginfi-liquidations")]
     source: String,
@@ -71,9 +80,11 @@ struct BankRegistryEntry {
     mint_symbol: String,
     #[serde(default)]
     oracle: String,
+    #[serde(default)]
+    insurance_vault_authority: String,
 }
 
-fn load_bank_registry(path: &PathBuf) -> Result<BankRegistry> {
+fn load_bank_registry_from_json(path: &PathBuf) -> Result<BankRegistry> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading bank registry JSON {}", path.display()))?;
     let entries: Vec<BankRegistryEntry> =
@@ -87,9 +98,44 @@ fn load_bank_registry(path: &PathBuf) -> Result<BankRegistry> {
                 mint_decimals: e.mint_decimals,
                 mint_symbol: e.mint_symbol,
                 oracle: e.oracle,
+                insurance_vault_authority: e.insurance_vault_authority,
             },
         );
     }
+    Ok(reg)
+}
+
+fn load_bank_registry_from_parquet(path: &PathBuf) -> Result<BankRegistry> {
+    let entries = read_marginfi_bank_registry(path)
+        .with_context(|| format!("reading marginfi_reserve.v1 parquet at {}", path.display()))?;
+    let mut reg = BankRegistry::new();
+    let mut authorities_derived = 0usize;
+    for e in &entries {
+        let insurance_vault_authority = match e.insurance_vault_authority_bump {
+            Some(bump) => derive_vault_authority(&e.bank, INSURANCE_VAULT_AUTH_SEED, bump)
+                .unwrap_or_default(),
+            None => String::new(),
+        };
+        if !insurance_vault_authority.is_empty() {
+            authorities_derived += 1;
+        }
+        reg.insert(
+            e.bank.clone(),
+            BankInfo {
+                mint: e.asset_mint.clone(),
+                mint_decimals: e.asset_decimals,
+                mint_symbol: e.asset_symbol.clone(),
+                oracle: e.primary_oracle.clone(),
+                insurance_vault_authority,
+            },
+        );
+    }
+    tracing::info!(
+        path = %path.display(),
+        banks_loaded = entries.len(),
+        insurance_vault_authorities_derived = authorities_derived,
+        "loaded bank registry from marginfi_reserve.v1 parquet"
+    );
     Ok(reg)
 }
 
@@ -103,9 +149,22 @@ pub async fn run_marginfi_liquidations(args: MarginfiLiquidationsArgs) -> Result
         anyhow::bail!("--end ({end_ts}) must be > --start ({start_ts})");
     }
 
-    let bank_registry = match &args.bank_registry_json {
-        Some(p) => load_bank_registry(p)?,
-        None => BankRegistry::new(),
+    let bank_registry = if let Some(p) = &args.bank_registry_json {
+        load_bank_registry_from_json(p)?
+    } else if let Some(p) = &args.bank_registry_from_parquet {
+        load_bank_registry_from_parquet(p)?
+    } else {
+        let auto = args.dataset.join(&args.venue).join("reserves").join("v1");
+        if auto.exists() {
+            load_bank_registry_from_parquet(&auto)?
+        } else {
+            tracing::warn!(
+                expected = %auto.display(),
+                "no bank registry source given and canonical partition is absent — \
+                 rows will ship with asset_symbol=\"?\" / asset_oracle=\"\""
+            );
+            BankRegistry::new()
+        }
     };
 
     let client = reqwest::Client::builder()

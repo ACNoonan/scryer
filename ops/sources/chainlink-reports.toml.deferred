@@ -1,0 +1,48 @@
+# M3.6 Phase B — DEFERRED. Chainlink Data Streams Verifier-program
+# reports tape, 60s cadence + 120s lookback. Mirror of the deferred
+# legacy plist `ops/launchd/deferred/com.adamnoonan.scryer.chainlink-reports.plist`
+# and gated on the same operator decision (Alchemy / QuickNode RPC
+# sponsorship — the 24/7 cadence consumes alternate-provider quota
+# via the proxy when Helius is throttled).
+#
+# The `.toml.deferred` extension excludes this file from `*.toml`
+# glob discovery in `scryer-runner` and `scryer deploy`, mirroring
+# the `.toml.paused` convention used by `soothsayer-band-tape`.
+#
+# To resume:
+#   1. git mv ops/sources/chainlink-reports.toml.deferred \
+#            ops/sources/chainlink-reports.toml
+#   2. git mv ops/launchd/deferred/com.adamnoonan.scryer.chainlink-reports.plist \
+#            ops/launchd/com.adamnoonan.scryer.chainlink-reports.plist
+#      (or stand up a per-manifest runner plist
+#      `com.adamnoonan.scryer.runner-chainlink-reports.plist` and
+#      retire the legacy `--once`-style plist instead).
+#   3. Add `--skip chainlink-reports` to the multi-manifest
+#      `runner-tick.plist` if going via per-manifest tick mode.
+#   4. scryer deploy
+
+id = "chainlink-reports"
+description = "Chainlink Data Streams Verifier-program reports tape, every 60s with 120s lookback. Phase-B per-manifest tick mode (deferred — gated on RPC sponsorship)."
+schema_ids = ["chainlink_data_streams.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "solana", "chainlink-reports",
+    "--once",
+    "--lookback-secs", "120",
+    "--use-get-transaction",
+    "--source", "chainlink:data-streams:runner",
+]
+
+[criticality]
+tier = "tier-1"
+owner = "@adam"
+consumer_impact = "Chainlink Data Streams oracle tape for cross-source oracle comparator. Stale = Chainlink slice missing from the comparator panel."
+
+[freshness]
+# 2x cadence — alert if no fresh row inside 120s.
+sla_secs = 120
+
+[workflow]
+sensor = "interval(60s)"

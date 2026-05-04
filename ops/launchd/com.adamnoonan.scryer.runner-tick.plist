@@ -46,6 +46,21 @@
         <string>--skip</string>
         <string>dex-xstock-swaps</string>
         <!--
+            M3.6 Phase B (2026-05-03): backed-nav-strikes,
+            cex-stock-perp-tape, kamino-scope-tape, v5-tape each got
+            their own dedicated `runner-<id>.plist`. Skip them here
+            so the multi-manifest tick doesn't race the per-manifest
+            tick on shared per-manifest state.
+        -->
+        <string>--skip</string>
+        <string>backed-nav-strikes</string>
+        <string>--skip</string>
+        <string>cex-stock-perp-tape</string>
+        <string>--skip</string>
+        <string>kamino-scope-tape</string>
+        <string>--skip</string>
+        <string>v5-tape</string>
+        <!--
             Phase-A (remain on this plist): manifests not listed above
             are evaluated each tick — including yahoo-single-stock-iv
             (wishlist 52, daily IV via interval 86400s). Ensure scryer

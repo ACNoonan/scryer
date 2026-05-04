@@ -13,6 +13,7 @@ arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 parquet = { version = "55", default-features = false, features = ["arrow", "snap"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+base64 = "0.22"
 # Cross-platform `flock(2)` / `LockFileEx` for the per-partition write
 # lock; see `Cross-process partition write lock` in methodology_log.md.
 fs4 = { version = "0.13", default-features = false, features = ["sync"] }

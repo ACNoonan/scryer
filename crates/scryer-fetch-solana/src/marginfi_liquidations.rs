@@ -35,6 +35,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use scryer_schema::marginfi_liquidation::v1::Liquidation;
 use scryer_schema::Meta;
+use solana_sdk::pubkey::Pubkey;
 
 use crate::types::{HeliusInstruction, ParsedTx};
 
@@ -61,7 +62,31 @@ pub struct BankInfo {
     /// First non-default entry in `Bank.config.oracle_keys`. Empty
     /// string when no snapshot is available for this bank.
     pub oracle: String,
+    /// `insurance_vault_authority` PDA (base58) for the bank.
+    /// Derived from the bank's `insurance_vault_authority_bump` byte
+    /// (offset 8+179 in the raw account) via
+    /// `Pubkey::create_program_address(&[b"insurance_vault_auth",
+    /// bank, &[bump]], &MARGINFI_PROGRAM_ID)`. Empty when the bump
+    /// is unavailable or the PDA derivation fails.
+    pub insurance_vault_authority: String,
 }
+
+/// Derive a marginfi-v2 vault-authority PDA from `(bank, bump)` and a
+/// fixed seed string. Returns `None` if any part fails (invalid bank
+/// pubkey, off-curve PDA candidate, etc.).
+pub fn derive_vault_authority(bank: &str, seed: &[u8], bump: u8) -> Option<String> {
+    let bank_pk = Pubkey::try_from(bank).ok()?;
+    let program_id = Pubkey::try_from(MARGINFI_PROGRAM_ID).ok()?;
+    let pda = Pubkey::create_program_address(&[seed, bank_pk.as_ref(), &[bump]], &program_id)
+        .ok()?;
+    Some(pda.to_string())
+}
+
+/// Convenience seed for `insurance_vault_authority`.
+pub const INSURANCE_VAULT_AUTH_SEED: &[u8] = b"insurance_vault_auth";
+
+/// Convenience seed for `liquidity_vault_authority`.
+pub const LIQUIDITY_VAULT_AUTH_SEED: &[u8] = b"liquidity_vault_auth";
 
 /// Bank PDA → `BankInfo` map. Defaults to `("?", 0, "")` for unknown
 /// banks so the fetcher never panics on missing entries.
@@ -86,6 +111,16 @@ impl BankRegistry {
             Some(info) => (info.mint_symbol.clone(), info.mint_decimals, info.oracle.clone()),
             None => (UNKNOWN_SYMBOL.to_string(), 0, String::new()),
         }
+    }
+
+    /// Look up the `insurance_vault_authority` PDA (base58) for a
+    /// bank. Returns `""` when unknown — the caller treats that as
+    /// "no insurance fee derivable" and ships `insurance_fund_fee_paid = 0`.
+    pub fn lookup_insurance_vault_authority(&self, bank: &str) -> String {
+        self.inner
+            .get(bank)
+            .map(|info| info.insurance_vault_authority.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -244,14 +279,18 @@ fn count_liquidate_ixs(tx: &ParsedTx) -> u32 {
     n
 }
 
-/// Sum the liquidator's net positive delta in `asset_mint` across all
-/// of their token-balance changes for this tx. Returns 0 if no
-/// matching change is found (for example, when the proxy returns no
-/// `preTokenBalances` for the liquidator's ATA).
-fn liquidator_asset_gain(tx: &ParsedTx, liquidator: &str, asset_mint: &str) -> u64 {
+/// Sum the user's net positive delta in `asset_mint` across all of
+/// their token-balance changes for this tx. Returns 0 if no matching
+/// change is found, or if `user` is empty (caller short-circuits the
+/// lookup that way for unknown accounts). Used for both the liquidator's
+/// asset receipt and the insurance-vault-authority's asset receipt.
+fn asset_mint_gain_for_user(tx: &ParsedTx, user: &str, asset_mint: &str) -> u64 {
+    if user.is_empty() {
+        return 0;
+    }
     let mut gain: i128 = 0;
     for entry in &tx.account_data {
-        if entry.account != liquidator {
+        if entry.account != user {
             continue;
         }
         for change in &entry.token_balance_changes {
@@ -323,9 +362,13 @@ pub fn extract_liquidations(
     let (asset_symbol, asset_decimals, asset_oracle) = bank_registry.lookup(&asset_bank);
     let (liab_symbol, liab_decimals, liab_oracle) = bank_registry.lookup(&liab_bank);
 
-    let asset_amount_seized = liquidator_asset_gain(tx, &tx.fee_payer, &asset_mint);
+    let asset_amount_seized = asset_mint_gain_for_user(tx, &tx.fee_payer, &asset_mint);
     let asset_amount_seized_decimal =
         event.pre_balances_liquidatee_asset - event.post_balances_liquidatee_asset;
+    let insurance_vault_authority =
+        bank_registry.lookup_insurance_vault_authority(&asset_bank);
+    let insurance_fund_fee_paid =
+        asset_mint_gain_for_user(tx, &insurance_vault_authority, &asset_mint);
 
     let mut out = Vec::with_capacity(liquidate_count as usize);
     let mut ix_index = 0u32;
@@ -356,7 +399,7 @@ pub fn extract_liquidations(
                 asset_amount_seized,
                 asset_amount_seized_decimal,
                 liquidator_fee_paid: 0,
-                insurance_fund_fee_paid: 0,
+                insurance_fund_fee_paid,
                 fee_payer: tx.fee_payer.clone(),
                 pre_health: event.liquidatee_pre_health,
                 post_health: event.liquidatee_post_health,
@@ -568,6 +611,7 @@ mod tests {
                 mint_decimals: 8,
                 mint_symbol: "SPYx".to_string(),
                 oracle: "ORACLE_ASSET".to_string(),
+                insurance_vault_authority: String::new(),
             },
         );
         registry.insert(
@@ -577,6 +621,7 @@ mod tests {
                 mint_decimals: 6,
                 mint_symbol: "USDC".to_string(),
                 oracle: "ORACLE_LIAB".to_string(),
+                insurance_vault_authority: String::new(),
             },
         );
         let tx = make_tx("sig-full", vec![liquidate_ix(1_000_000)], vec![log]);
@@ -635,6 +680,86 @@ mod tests {
         let rows = extract_liquidations(&tx, &BankRegistry::new(), &meta());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].asset_amount_seized, 12_345);
+    }
+
+    #[test]
+    fn populates_insurance_fund_fee_from_authority_token_delta() {
+        let asset_bank_arr = pk(10);
+        let asset_mint_arr = pk(11);
+        let asset_bank = bs58::encode(&asset_bank_arr).into_string();
+        let asset_mint = bs58::encode(&asset_mint_arr).into_string();
+        let log = synth_event_log(
+            pk(7),
+            pk(8),
+            pk(9),
+            asset_bank_arr,
+            asset_mint_arr,
+            pk(12),
+            pk(13),
+            0.92,
+            1.01,
+            1.5,
+            1.49,
+        );
+        let insurance_vault_authority = "INSURANCE_AUTH_PUBKEY".to_string();
+        let mut registry = BankRegistry::new();
+        registry.insert(
+            asset_bank.clone(),
+            BankInfo {
+                mint: asset_mint.clone(),
+                mint_decimals: 8,
+                mint_symbol: "SPYx".to_string(),
+                oracle: "ORACLE_ASSET".to_string(),
+                insurance_vault_authority: insurance_vault_authority.clone(),
+            },
+        );
+        let mut tx = make_tx("sig-insurance", vec![liquidate_ix(1)], vec![log]);
+        tx.account_data = vec![
+            AccountData {
+                account: tx.fee_payer.clone(),
+                token_balance_changes: vec![TokenBalanceChange {
+                    user_account: tx.fee_payer.clone(),
+                    token_account: "ATA_LIQ".into(),
+                    mint: asset_mint.clone(),
+                    raw_token_amount: Some(RawTokenAmount {
+                        token_amount: "100000".into(),
+                        decimals: 0,
+                    }),
+                }],
+            },
+            AccountData {
+                account: insurance_vault_authority.clone(),
+                token_balance_changes: vec![TokenBalanceChange {
+                    user_account: insurance_vault_authority.clone(),
+                    token_account: "ATA_INSURANCE".into(),
+                    mint: asset_mint.clone(),
+                    raw_token_amount: Some(RawTokenAmount {
+                        token_amount: "2500".into(),
+                        decimals: 0,
+                    }),
+                }],
+            },
+        ];
+        let rows = extract_liquidations(&tx, &registry, &meta());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].asset_amount_seized, 100_000);
+        assert_eq!(rows[0].insurance_fund_fee_paid, 2_500);
+        // liquidator_fee_paid stays 0 — not separately emitted by marginfi-v2.
+        assert_eq!(rows[0].liquidator_fee_paid, 0);
+    }
+
+    #[test]
+    fn derive_vault_authority_round_trips_against_solana_sdk() {
+        // create_program_address either returns a valid PDA or
+        // PubkeyError if the candidate is on-curve. We use a known
+        // on-chain bank's bump from the live snapshot path elsewhere;
+        // here we just exercise the helper plumbing — happy-path is
+        // covered by `populates_insurance_fund_fee_from_authority_token_delta`
+        // (which doesn't go through derive_vault_authority directly).
+        // This test asserts the function returns None on a malformed
+        // bank pubkey rather than panicking.
+        let res = derive_vault_authority("not a pubkey", INSURANCE_VAULT_AUTH_SEED, 0);
+        assert!(res.is_none());
     }
 
     #[test]

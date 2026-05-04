@@ -7,11 +7,14 @@
 //! are wired up by the binary.
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::SystemTime;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant, SystemTime};
 
-use scryer_schema::workflow_run::v2::WorkflowRun;
+use scryer_schema::workflow_run::v2::{
+    is_canonical_status, WorkflowRun, STATUS_FAILED, STATUS_SUCCEEDED, STATUS_TIMED_OUT,
+};
 use scryer_sensors::DatasetState;
 use scryer_store::{venue, Dataset};
 
@@ -32,8 +35,24 @@ pub struct CommandOutcome {
 }
 
 /// Process execution seam.
+///
+/// Implementations provide `run`; the default `run_with_timeout`
+/// delegates to `run` and drops the timeout. The real runner
+/// overrides `run_with_timeout` to enforce per-attempt wall-clock
+/// limits (PR.2). Test doubles can stay on `run` only — the engine
+/// exercises retry/timeout via the real runner.
 pub trait CommandRunner {
     fn run(&self, command: &str, args: &[String]) -> CommandOutcome;
+
+    fn run_with_timeout(
+        &self,
+        command: &str,
+        args: &[String],
+        timeout: Option<Duration>,
+    ) -> CommandOutcome {
+        let _ = timeout;
+        self.run(command, args)
+    }
 }
 
 /// Real `std::process::Command`-backed runner. Sets the
@@ -59,50 +78,133 @@ impl RealCommandRunner {
 
 impl CommandRunner for RealCommandRunner {
     fn run(&self, command: &str, args: &[String]) -> CommandOutcome {
+        self.run_with_timeout(command, args, None)
+    }
+
+    /// Spawn `command` with `args`, drain stdout/stderr in background
+    /// threads (so a child producing more than the OS pipe buffer
+    /// can't deadlock on write), and poll `try_wait` until either the
+    /// child exits or `timeout` elapses. On timeout: `kill` + `wait`,
+    /// then emit `status="timed_out"` / `error_class="timeout"`.
+    /// `timeout=None` runs the original wait-forever path through the
+    /// same machinery.
+    fn run_with_timeout(
+        &self,
+        command: &str,
+        args: &[String],
+        timeout: Option<Duration>,
+    ) -> CommandOutcome {
         let started = unix_secs_now();
         let mut cmd = Command::new(command);
         cmd.args(args)
-            .env("SCRYER_DATASET", &self.dataset_root);
-        match cmd.output() {
-            Ok(out) => {
-                let finished = unix_secs_now();
-                let exit_code = out.status.code();
-                let success = out.status.success();
-                let stderr_tail = if success {
-                    None
-                } else {
-                    Some(tail_bytes(&out.stderr, self.stderr_retain_bytes))
-                };
-                CommandOutcome {
-                    exit_code,
-                    status: if success {
-                        "succeeded".to_string()
-                    } else {
-                        "failed".to_string()
-                    },
-                    error_class: if success {
-                        None
-                    } else {
-                        Some(classify_exit(exit_code))
-                    },
-                    error_message: stderr_tail,
-                    started_at_unix_secs: started,
-                    finished_at_unix_secs: finished,
-                }
-            }
+            .env("SCRYER_DATASET", &self.dataset_root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
             Err(err) => {
                 let finished = unix_secs_now();
-                CommandOutcome {
+                return CommandOutcome {
                     exit_code: None,
-                    status: "failed".to_string(),
+                    status: STATUS_FAILED.to_string(),
                     error_class: Some("spawn.failed".to_string()),
                     error_message: Some(format!("spawn `{command}` failed: {err}")),
                     started_at_unix_secs: started,
                     finished_at_unix_secs: finished,
+                };
+            }
+        };
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let stdout_handle =
+            stdout.map(|mut s| std::thread::spawn(move || drain_pipe(&mut s)));
+        let stderr_handle =
+            stderr.map(|mut s| std::thread::spawn(move || drain_pipe(&mut s)));
+
+        let deadline = timeout.map(|t| Instant::now() + t);
+        let mut timed_out = false;
+        let exit_status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) => {
+                    if let Some(d) = deadline {
+                        if Instant::now() >= d {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            timed_out = true;
+                            break None;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(err) => {
+                    let finished = unix_secs_now();
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return CommandOutcome {
+                        exit_code: None,
+                        status: STATUS_FAILED.to_string(),
+                        error_class: Some("wait.failed".to_string()),
+                        error_message: Some(format!("wait `{command}`: {err}")),
+                        started_at_unix_secs: started,
+                        finished_at_unix_secs: finished,
+                    };
                 }
             }
+        };
+
+        let _ = stdout_handle.and_then(|h| h.join().ok());
+        let stderr_buf = stderr_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+        let finished = unix_secs_now();
+
+        if timed_out {
+            let secs = timeout.map(|t| t.as_secs()).unwrap_or(0);
+            let outcome = CommandOutcome {
+                exit_code: None,
+                status: STATUS_TIMED_OUT.to_string(),
+                error_class: Some("timeout".to_string()),
+                error_message: Some(format!(
+                    "killed after {secs}s timeout; stderr tail: {}",
+                    tail_bytes(&stderr_buf, 512)
+                )),
+                started_at_unix_secs: started,
+                finished_at_unix_secs: finished,
+            };
+            debug_assert!(is_canonical_status(&outcome.status));
+            return outcome;
+        }
+
+        let exit_code = exit_status.as_ref().and_then(|s| s.code());
+        let success = exit_status.as_ref().map(|s| s.success()).unwrap_or(false);
+        let stderr_tail = if success {
+            None
+        } else {
+            Some(tail_bytes(&stderr_buf, self.stderr_retain_bytes))
+        };
+        CommandOutcome {
+            exit_code,
+            status: if success {
+                STATUS_SUCCEEDED.to_string()
+            } else {
+                STATUS_FAILED.to_string()
+            },
+            error_class: if success {
+                None
+            } else {
+                Some(classify_exit(exit_code))
+            },
+            error_message: stderr_tail,
+            started_at_unix_secs: started,
+            finished_at_unix_secs: finished,
         }
     }
+}
+
+fn drain_pipe<R: Read>(reader: &mut R) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let _ = reader.read_to_end(&mut buf);
+    buf
 }
 
 fn classify_exit(exit_code: Option<i32>) -> String {
@@ -279,5 +381,33 @@ mod tests {
         assert_eq!(classify_exit(Some(0)), "ok");
         assert_eq!(classify_exit(Some(2)), "exit.2");
         assert_eq!(classify_exit(None), "exit.unknown");
+    }
+
+    // ---- PR.2: timeout enforcement on the real runner. These shell
+    // out, so they're guarded behind unix-only paths. ----
+
+    #[cfg(unix)]
+    #[test]
+    fn real_runner_with_no_timeout_succeeds_quickly() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = RealCommandRunner::new(dir.path().to_path_buf());
+        let outcome = runner.run_with_timeout("/bin/echo", &["hi".into()], None);
+        assert_eq!(outcome.status, STATUS_SUCCEEDED);
+        assert_eq!(outcome.exit_code, Some(0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_runner_kills_overlong_child_and_emits_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = RealCommandRunner::new(dir.path().to_path_buf());
+        let outcome = runner.run_with_timeout(
+            "/bin/sleep",
+            &["5".into()],
+            Some(Duration::from_millis(500)),
+        );
+        assert_eq!(outcome.status, STATUS_TIMED_OUT);
+        assert_eq!(outcome.error_class.as_deref(), Some("timeout"));
+        assert!(outcome.error_message.as_deref().unwrap().contains("timeout"));
     }
 }

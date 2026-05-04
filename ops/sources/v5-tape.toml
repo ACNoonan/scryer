@@ -1,0 +1,45 @@
+# M3.6 Phase B. Soothsayer V5 joined Chainlink + Jupiter observation
+# tape across the 8 xStocks, 60s cadence — exercises per-manifest
+# tick mode (`scryer-runner tick --only v5-tape`) under a dedicated
+# launchd plist.
+#
+# Routing: stage-2 uses proxy-routed `getTransaction`
+# (`--use-get-transaction`) across the healthy non-Helius providers
+# (Alchemy / QuickNode / RPCFast / Solana Foundation). Slower than
+# the Helius `parseTransactions` path but quota-resilient; pair with
+# the smaller `--lookback-secs 120` so the fire fits inside the 60s
+# cadence.
+#
+# When Helius's daily quota is healthy, drop both flags from
+# `[fetch].args` to swap back to the faster parseTransactions path
+# and re-run `scryer deploy`.
+#
+# Soak attribution: legacy plist `com.adamnoonan.scryer.v5-tape` still
+# loaded with `_source = soothsayer_v5:joined:launchd`; this manifest
+# emits `soothsayer_v5:joined:runner`. Operator unloads the legacy
+# plist after parallel-soak.
+
+id = "v5-tape"
+description = "Soothsayer V5 joined Chainlink + Jupiter observation tape across 8 xStocks, every 60s. Phase-B per-manifest tick mode."
+schema_ids = ["v5_tape.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "v5tape", "tape",
+    "--source", "soothsayer_v5:joined:runner",
+    "--use-get-transaction",
+    "--lookback-secs", "120",
+]
+
+[criticality]
+tier = "tier-1"
+owner = "@adam"
+consumer_impact = "Joined Chainlink + Jupiter on-chain observation tape for Soothsayer V5 cross-source comparator research. Stale = V5 comparator panel gap."
+
+[freshness]
+# 2x cadence — alert if no fresh row inside 120s.
+sla_secs = 120
+
+[workflow]
+sensor = "interval(60s)"

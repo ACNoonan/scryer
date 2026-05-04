@@ -1,0 +1,37 @@
+# M3.6 Phase B. CEX stock-perp bid/ask tape across the configured
+# xStock underlier set, 60s cadence — exercises per-manifest tick mode
+# (`scryer-runner tick --only cex-stock-perp-tape`) under a dedicated
+# launchd plist.
+#
+# The fetcher hits ~10 CEX venues (Kraken Futures, Gate, OKX,
+# Coinbase Intl, Bitget, HTX, BingX, MEXC, KuCoin Futures, Crypto.com)
+# in parallel; per-call rate-limit-ms keeps each venue under its own
+# cap. Wall-clock per fire is dominated by the slowest venue.
+#
+# Soak attribution: legacy plist
+# `com.adamnoonan.scryer.cex-stock-perp-tape` still loaded; both write
+# `cex_stock_perp_tape.v1` rows. The legacy plist's CLI doesn't pass
+# `--source`, so its rows carry the upstream's per-venue `_source`
+# unchanged. After cutover, only the runner-driven plist remains.
+
+id = "cex-stock-perp-tape"
+description = "CEX stock-perp bid/ask tape across the canonical xStock underliers, every 60s. Phase-B per-manifest tick mode."
+schema_ids = ["cex_stock_perp_tape.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "cex-stock-perp", "tape",
+]
+
+[criticality]
+tier = "tier-1"
+owner = "@adam"
+consumer_impact = "Multi-venue CEX perp bid/ask snapshot for xStock underliers. CEX-side input for the CEX-vs-DEX comparator panel and per-venue liquidity tracking. Stale = CEX-side research gap."
+
+[freshness]
+# 2x cadence — alert if no fresh row inside 120s.
+sla_secs = 120
+
+[workflow]
+sensor = "interval(60s)"

@@ -1,0 +1,37 @@
+# M3.6 Phase B. Kamino-Scope on-chain oracle benchmark tape, 60s
+# cadence — exercises per-manifest tick mode (`scryer-runner tick
+# --only kamino-scope-tape`) under a dedicated launchd plist.
+#
+# Single proxy-routed `getAccountInfo` per fire (fetches the
+# Kamino-shared xStock OraclePrices PDA, slices 8 xStock symbols
+# locally). Cheap; the per-manifest plist exists to give launchd's
+# natural skip-if-running pacing rather than to handle bursty volume.
+#
+# Soak attribution: legacy plist
+# `com.adamnoonan.scryer.kamino-scope-tape` still loaded with
+# `_source = kamino:scope-tape:launchd`; this manifest emits
+# `kamino:scope-tape:runner`. Operator unloads the legacy plist after
+# parallel-soak.
+
+id = "kamino-scope-tape"
+description = "Kamino-Scope OraclePrices xStock tape (single getAccountInfo, 8 symbols), every 60s. Phase-B per-manifest tick mode."
+schema_ids = ["kamino_scope.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "solana", "kamino-scope-tape",
+    "--source", "kamino:scope-tape:runner",
+]
+
+[criticality]
+tier = "tier-1"
+owner = "@adam"
+consumer_impact = "Kamino-side xStock oracle prices for the cross-source oracle comparator panel. Stale = oracle-coverage gap in the xStock comparator (Kamino slice missing)."
+
+[freshness]
+# 2x cadence — alert if no fresh row inside 120s.
+sla_secs = 120
+
+[workflow]
+sensor = "interval(60s)"

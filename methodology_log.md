@@ -54,6 +54,7 @@ Compact index of locked architectural decisions. It keeps operational invariants
 | Proxy capability-mismatch fanout | 2026-05-02 | Disposition vocabulary expanded from {Ok, Exhausted, Throttled, Transient, Permanent} to add `CapabilityMismatch`. Plan-tier resource caps (e.g. QuickNode discover plan capping `getMultipleAccounts` at 5 accounts via JSON-RPC code -32615) trigger immediate sibling-provider fanout for the affected call without quarantining the upstream and without consuming the per-call retry budget. Classifier inspects JSON-RPC `error.code` regardless of HTTP status. |
 | Soothsayer Lending-track band tape | 2026-05-03 | `oracle.soothsayer_v6.band_tape.v2` mirrors on-chain `PriceUpdate` PDAs via `soothsayer-consumer` path-dep; one schema across profiles, partition key `profile=lending|amm`, dedup `(symbol, publish_slot)`. |
 | Anchor event decode from logs | 2026-05-03 | Anchor `emit!` events flow through `ParsedTx.logs` from `meta.logMessages`; decoded by base64 + 8-byte disc match + Borsh. Proxy-routed `getTransaction(jsonParsed)` is the canonical source. First used in `marginfi_liquidation.v1`. |
+| Runner retry policy | 2026-05-03 | Optional `[retry]` block on each manifest with closed `retry_on` vocabulary `{transient, timeout, nonzero_exit}`. Default is no retry. One workflow_run row per attempt. `last_fire` records the trigger time, not the final attempt time. |
 
 ## Core Architecture
 
@@ -166,8 +167,8 @@ Anchor `emit!()` events are written to a transaction's `meta.logMessages` as `Pr
 - `marginfi_liquidation.v1` row content, post-2026-05-03 amendment after IDL pre-flight:
   - From the Anchor `LendingAccountLiquidateEvent` (decoded from `meta.logMessages`): liquidatee account/authority/banks/mints, `liquidatee_pre_health` / `liquidatee_post_health` (f64), and the four pre/post f64 balances in `LiquidationBalances`.
   - From the outer tx: `signature`, `slot`, `block_time`, `fee_payer` (Jito-bundle OEV join key), top-level signer (= `liquidator`).
-  - From outer-tx token-balance changes (`meta.{pre,post}TokenBalances` synthesized into `ParsedTx::account_data`): `asset_amount_seized` (native u64) is the liquidator's net positive delta in `asset_mint` for that tx.
-  - Reserved at `0` in v1: `liquidator_fee_paid` and `insurance_fund_fee_paid` (native u64). These require resolving the bank's `liquidity_vault_authority` and `insurance_vault_authority` PDAs to look up vault token-account deltas, and `marginfi_reserve.v1` does not currently capture those authority pubkeys (it captures `liquidity_vault` and `insurance_vault` token accounts only). A follow-on phase extends `marginfi_reserve.v1` (or the fetcher's bank registry) with the authority pubkeys; until then, these two columns ship as fixed `0` and the schema docstring marks them as such.
+  - From outer-tx token-balance changes (`meta.{pre,post}TokenBalances` synthesized into `ParsedTx::account_data`): `asset_amount_seized` (native u64) is the liquidator's net positive delta in `asset_mint` for that tx; `insurance_fund_fee_paid` (native u64) is the matching positive delta on the bank's `insurance_vault_authority` PDA, looked up from the `BankRegistry` built off `marginfi_reserve.v1` snapshots (PDA derived in-process from the `insurance_vault_authority_bump` byte at body offset 179 via `Pubkey::create_program_address(&[b"insurance_vault_auth", bank, &[bump]], &MARGINFI_PROGRAM_ID)`; ~52% derivation success rate on the live 422-bank canonical snapshot — the unmapped half ships `insurance_fund_fee_paid = 0` and is the load-bearing follow-on item).
+  - `liquidator_fee_paid` is reserved at `0` permanently. MarginFi-v2's `lending_account_liquidate` does not emit a separate "liquidator fee" SPL transfer — the liquidator's incentive is implicit in the asset/liability ratio mismatch (they receive more asset than they pay liability) and there is no token-balance change attributable to a fee paid to the liquidator. Consumers compute `effective_liquidator_bonus = asset_amount_seized × asset_oracle_price − liab_seized × liab_oracle_price` post-hoc.
   - Oracle prices are *not* in-row. Per the `kamino_liquidation.v1` precedent, oracle context flows through `oracle_context.v1` cross-source joins. The row carries `asset_oracle` and `liab_oracle` pubkeys (resolved from the most recent `marginfi_reserve.v1::Bank.config.oracle_keys[0]` snapshot for each bank) as join keys.
 - IDL facts pinned 2026-05-03 from `idl/marginfi/marginfi-v2.json`:
   - IX `lending_account_liquidate` disc `[214,169,151,213,251,167,86,219]`; args `asset_amount: u64`, `liquidatee_accounts: u8`, `liquidator_accounts: u8` (the two u8s are remaining-accounts count hints, not seized amounts).
@@ -295,3 +296,29 @@ Add new decisions as short dated sections below this line. Keep old detail out o
 - Cadence: 60s `interval` on the multi-manifest `runner-tick` plist. Per fire = 1 `getMultipleAccounts` (10 PDAs ≤ 100 GMA cap) + 1 `getBlockTime`. Cheap; no dedicated Phase-B plist needed. Freshness `sla_secs = 86_700` (24h + 5×60s slack) so weekly publish cadence does not page operators.
 - Gating: scryer-side ships first as `code-shipped, data-pending` per Hard Rule 9. Promotion to Done waits on a soothsayer-side publisher daemon publish landing under `dataset/oracle.soothsayer_v6/band_tape/v2/profile=lending/...`. Mainnet promotion is downstream of soothsayer M6_REFACTOR.md Phase A8.
 - AMM-track carry-forward: Phase B (`profile_code = 2`) reuses the same fetcher unchanged; the partition key naturally splits AMM rows into `profile=amm/`. No second venue, no second schema id, no second manifest unless freshness SLAs diverge.
+
+### Runner Retry Policy — 2026-05-03 (PR.2)
+
+- Manifests carry an optional `[retry]` block. Absence is "no retry": a manifest behaves exactly as it did before this lock (single attempt, surface failure to `internal.scryer.workflow_run.v2`). Opt-in only.
+- Block fields, all optional with defaults:
+  - `max_attempts: u32` — total attempts including the first. `1` = no retry. Default `1`. Hard cap `10`.
+  - `timeout_secs: u64` — per-attempt timeout. `0` or omit = no timeout (existing `Command::output()` behavior). Default omitted.
+  - `backoff_initial_secs: u64` — base for exponential backoff. Default `30`. Used only when `max_attempts > 1`.
+  - `backoff_max_secs: u64` — cap for exponential backoff. Default `300`. Must be `>= backoff_initial_secs`.
+  - `jitter_ratio: f64` — symmetric jitter as a fraction of computed delay. Range `[0.0, 1.0]`. Default `0.2`.
+  - `retry_on: [string]` — closed vocabulary. Default `["transient", "timeout"]`. Empty array = no retry regardless of `max_attempts`.
+- Closed `retry_on` vocabulary:
+  - `transient` — recoverable upstream failure. Maps from `error_class ∈ {spawn.failed, exit.signal, exit.unknown}`. Mirrors the proxy's `Transient` disposition.
+  - `timeout` — per-attempt timeout breached. Maps from new `error_class = "timeout"`. Only meaningful when `timeout_secs > 0`.
+  - `nonzero_exit` — any nonzero exit. Maps from `error_class = "exit.{N}"` for N != 0. Broadest opt-in; treats every fetcher failure as recoverable. Reserved for fetchers where the upstream is the dominant failure mode.
+- Backoff schedule: `delay = min(backoff_max, backoff_initial * 2^(attempt-1)) * (1 + uniform(-jitter_ratio, +jitter_ratio))`. `attempt` here is 1-indexed for the *next* attempt (so the wait between attempts 1 and 2 uses `2^0 = 1`). Jitter source is `unix_nanos_now()`-derived, not `rand` — no new dependency.
+- Persistence:
+  - One `internal.scryer.workflow_run.v2` row per attempt, written immediately after each attempt completes. The schema's `attempt: i32` and `retry_of_run_id: Option<String>` columns are already in place. First attempt: `attempt=1`, `retry_of_run_id=None`. Subsequent attempts: `attempt=N`, `retry_of_run_id=<previous_run_id>`.
+  - `RunnerState::write_last_fire` is recorded once at trigger time, before the retry loop runs. Rationale: a concurrent tick (multi-manifest plist + per-manifest plist sharing state) must not double-fire while attempt N is still in flight. The sensor's question is "did we already trigger this manifest at this wall-clock," not "did the work succeed."
+  - `triggered_at_unix_secs` is identical across all rows for one trigger; `started_at_unix_secs` and `finished_at_unix_secs` differ per attempt.
+- Timeout implementation: piped `Child` + reader threads draining `stdout`/`stderr` + `try_wait` poll loop. On deadline expiry: `Child::kill()`, `wait()` to reap, join reader threads, emit `error_class="timeout"`, `status="timed_out"` (already in the workflow_run status vocabulary). No `wait-timeout`/`tokio` dependency added.
+- Anti-rules:
+  - Whole-workflow retries only. Per-step retries (within a multi-step `[workflow.steps]` block) are out of scope until step-level workflows ship.
+  - Retries do NOT update `last_fire` — only the trigger does. A retry exhausting `max_attempts` records the same `triggered_at_unix_secs` across all rows; the next sensor evaluation suppresses against that trigger time.
+  - Backoff sleep is synchronous in the runner thread. With launchd `StartInterval=60s`, a manifest whose total wall-clock (sum of attempts + backoffs) exceeds the cadence will skip the next launchd tick (launchd's natural skip-if-running behavior). This is the intended cadence-degradation path; do not add concurrency to "rescue" cadence — fix the upstream.
+  - `retry_on` is a closed enum at the `error_class → family` mapping layer. Adding a new family (`auth_failed`, `quota_exhausted`, etc.) requires extending this methodology entry first.
