@@ -33,14 +33,36 @@ pub struct IntradayArgs {
     #[arg(long, value_delimiter = ',')]
     symbols: Vec<String>,
     /// Window start as `YYYY-MM-DD` UTC. Inclusive — bars at
-    /// 00:00 of `start` are emitted.
-    #[arg(long)]
+    /// 00:00 of `start` are emitted. When unset, derives from
+    /// `--lookback-days` before the effective end (UTC).
+    #[arg(long, default_value = "")]
     start: String,
     /// Window end as `YYYY-MM-DD` UTC. Exclusive at the day
     /// boundary (Databento convention) — bars on `end` are NOT
-    /// emitted. To include `end`'s data pass the next day.
-    #[arg(long)]
+    /// emitted. To include `end`'s data pass the next day. When
+    /// unset, defaults to `now - --end-safety-margin-secs` so a
+    /// runner-driven fire captures today's bars up through the
+    /// fire moment WITHOUT overshooting Databento's published-data
+    /// horizon (the GLBX.MDP3 batch lags real time by a few
+    /// minutes; querying past the horizon returns 422).
+    #[arg(long, default_value = "")]
     end: String,
+    /// Rolling-window lookback in days when `--start`/`--end` are
+    /// omitted. Used by the daily forward-poll manifest so the
+    /// fetch keeps pulling the most recent N days of bars without
+    /// having to re-stamp dates per fire. Databento's range API
+    /// returns the full window; the store dedups on `(symbol, ts)`
+    /// so re-pulls are idempotent. Default 2 lets a daily fire
+    /// re-cover yesterday in case the prior fire missed.
+    #[arg(long, default_value_t = 2)]
+    lookback_days: i64,
+    /// Safety margin (seconds) subtracted from `now` when computing
+    /// the default `end`. Databento's GLBX.MDP3 historical batch
+    /// publishes with a small lag (~5 min observed); querying past
+    /// the published horizon returns 422 Unprocessable Entity.
+    /// Default 600s = 10 min keeps a comfortable margin.
+    #[arg(long, default_value_t = 600)]
+    end_safety_margin_secs: i64,
     /// Databento API key. Defaults to `DATABENTO_API_KEY` env var
     /// (loaded from `./.env` via dotenvy).
     #[arg(long, env = "DATABENTO_API_KEY")]
@@ -61,6 +83,9 @@ pub async fn run_intraday(args: IntradayArgs) -> Result<()> {
             "Databento API key required; pass --api-key or set DATABENTO_API_KEY env var"
         );
     }
+    if args.lookback_days <= 0 {
+        anyhow::bail!("--lookback-days must be positive; got {}", args.lookback_days);
+    }
     let cfg = PollConfig {
         source_label: args.source.clone(),
         request_timeout: Duration::from_secs(args.request_timeout_secs),
@@ -74,13 +99,35 @@ pub async fn run_intraday(args: IntradayArgs) -> Result<()> {
         args.symbols.clone()
     };
 
-    let start_dt = parse_ymd_to_offset(&args.start)?;
-    let end_dt = parse_ymd_to_offset(&args.end)?;
+    // End: when supplied as YYYY-MM-DD, treat as 00:00 UTC of that
+    // day (exclusive day boundary, Databento convention). When
+    // unset, use `now - safety_margin` directly as a sub-day
+    // instant so we don't overshoot the published-data horizon.
+    let (end_dt, end_label) = if args.end.is_empty() {
+        let end_chrono = now - chrono::Duration::seconds(args.end_safety_margin_secs);
+        let dt = OffsetDateTime::from_unix_timestamp(end_chrono.timestamp())
+            .context("converting end to OffsetDateTime")?;
+        (dt, end_chrono.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+    } else {
+        (parse_ymd_to_offset(&args.end)?, args.end.clone())
+    };
+    // Start: when supplied as YYYY-MM-DD, treat as 00:00 UTC of
+    // that day. When unset, derive `end - lookback_days`.
+    let (start_dt, start_label) = if args.start.is_empty() {
+        let start_chrono =
+            now - chrono::Duration::seconds(args.end_safety_margin_secs)
+                - chrono::Duration::days(args.lookback_days);
+        let dt = OffsetDateTime::from_unix_timestamp(start_chrono.timestamp())
+            .context("converting start to OffsetDateTime")?;
+        (dt, start_chrono.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+    } else {
+        (parse_ymd_to_offset(&args.start)?, args.start.clone())
+    };
 
     tracing::info!(
         symbols = symbols.len(),
-        start = args.start,
-        end = args.end,
+        start = start_label,
+        end = end_label,
         "Databento ohlcv-1m batch"
     );
 

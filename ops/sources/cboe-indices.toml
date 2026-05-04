@@ -1,0 +1,61 @@
+# Daily forward-poll for `cboe_indices.v1` over the public VIX-
+# family + SKEW set served by `cdn.cboe.com/api/global/us_indices/
+# daily_prices/`. Closes the ^VIX gap from M6 G1.b — Stooq's free
+# tier returned `No data` for `^VIX` so this CBOE manifest is the
+# canonical scryer-side source for VIX-family daily bars going
+# forward. ^GVZ and ^MOVE are NOT in the CBOE free-CSV set (only
+# VIX-family + SKEW); soothsayer panel.py already falls back to
+# `^VIX` for those two consumer-side per the M6 hand-off brief
+# §5 watch-out #1.
+#
+# Cadence: `daily(22:30Z)` — fires 30 minutes after US-equity close
+# (20:00 UTC EDT / 21:00 UTC EST) so today's VIX close (16:15 ET
+# settlement) is reflected in CBOE's overnight-republished history
+# CSV by fire time. Soothsayer's Tuesday-morning forward-tape cron
+# reads Monday's close reliably from the partition.
+#
+# Each fire pulls the FULL public history (1990→ for VIX, narrower
+# spans for siblings) — ~45k rows × 6 indices. CSV download is ~1MB
+# per index, public CDN, no auth. The store dedups idempotently on
+# `cboe_indices:{index}:{date}`, so re-fetches add only the few new
+# rows since the last fire.
+#
+# Read path for soothsayer M6 forward-tape harness: VIX rows live
+# at `dataset/cboe/indices/v1/index=VIX/year={YYYY}.parquet`, NOT
+# at `dataset/yahoo/equities_daily/v1/symbol=^VIX/...` where the
+# legacy yfinance import landed historical data. The two sources
+# write to different schemas (column shape differs: cboe_indices.v1
+# has `index/date/open/high/low/close`, yahoo.v1 has
+# `symbol/ts/open/high/low/close/adj_close/volume`); soothsayer's
+# `panel.py` should switch the VIX read to the CBOE path (or join
+# across both for the pre-CBOE-manifest history). Index identifier
+# on disk is `VIX` without the leading `^` — drop the prefix on
+# the lookup.
+
+id = "cboe-indices"
+description = "Daily CBOE VIX-family + SKEW historical CSV forward-poll. Closes the ^VIX gap from M6 G1.b after Stooq's free tier failed to serve volatility indices."
+schema_ids = ["cboe_indices.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "cboe", "indices",
+    "--source", "cboe:csv:runner",
+]
+
+[criticality]
+tier = "tier-2"
+owner = "@adam"
+consumer_impact = "Daily VIX-family + SKEW levels for Soothsayer Paper-1/Paper-3 regime context (M6 LWC forward-tape vol-index lining). Stale = post-freeze weekend regime classification falls back to last-known close instead of fresh value."
+
+[freshness]
+# 25h ceiling: matches `equities-daily` shape (24h cadence + 1h grace).
+sla_secs = 90000
+
+[budget]
+# 6 indices × 1 CSV download each × 250ms gap = ~3s wall-clock per
+# fire. Loose cap.
+max_requests_per_run = 30
+
+[workflow]
+sensor = "daily(22:30Z)"

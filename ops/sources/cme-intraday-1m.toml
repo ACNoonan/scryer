@@ -1,0 +1,72 @@
+# Daily forward-poll for `cme_intraday_1m.v1` over the four CME
+# factor-futures continuous contracts (ES=F, NQ=F, GC=F, ZN=F).
+# Backfill 2018-2026 already shipped (phase 63); this manifest
+# stands up the missing forward-cadence so the surface stays current
+# instead of decaying after the backfill cursor.
+#
+# Cadence: `daily(06:00Z)` — fires 02:00 ET. Operator's Databento
+# subscription is the delayed-access tier (no realtime GLBX.MDP3
+# license); historical data becomes accessible ~8h after the wire
+# moment. Firing at 06:00 UTC the morning AFTER the trading day
+# means the prior day's full overnight + RTH session (which closed
+# at the prior 21:00 UTC = 17:00 ET) is fully past the 8h-delayed
+# horizon by the time we ask. A 22:30 UTC fire (post-equity-close)
+# would cover only the prior 8h-old portion and miss the same-day
+# RTH close by 9 hours.
+#
+# `--end-safety-margin-secs 36000` (10h) keeps `end` comfortably
+# past the published-data horizon under the operator's current
+# tier. If the subscription upgrades to realtime later, drop this
+# to ~600s. If the tier is t+24h instead of t+8h, raise to ~93600s.
+#
+# `--lookback-days 2` re-covers yesterday on every fire so a missed
+# fire (e.g. operator-side launchd outage) self-heals on the next
+# tick. Databento's range API is idempotent; the store dedups on
+# `(symbol, ts)` per the schema.
+#
+# Symbol mapping: `XX=F` → Databento's volume-rolled continuous
+# contract `XX.v.0` (see `scryer-fetch-databento::symbol_to_databento_continuous`).
+#
+# Used by: Soothsayer's M6 §6.6 path-fitted conformal runner
+# (`scripts/run_v1b_path_fitted_conformal.py`) reading minute bars
+# from `dataset/cme/intraday_1m/v1/`. Optional in the M6 forward-
+# tape battery; if §6.6 is dropped this manifest can be paused
+# without affecting the core LWC validation.
+#
+# Provider env: requires `DATABENTO_API_KEY` in the deployed
+# `~/Library/Application Support/scryer/.env`. If unset the fetcher
+# bails immediately with a clear error.
+#
+# Cost note: per phase 63's backfill audit, daily incremental
+# Databento spend across the 4 symbols is well under $0.01/day
+# against the standard signup credit; budget cap below is loose.
+
+id = "cme-intraday-1m"
+description = "Daily Databento GLBX.MDP3 forward-poll for the 4 CME factor-futures continuous contracts (ES=F, NQ=F, GC=F, ZN=F). 2-day rolling lookback for dedup-safe re-pulls."
+schema_ids = ["cme_intraday_1m.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "databento", "intraday1m",
+    "--symbols", "ES=F,NQ=F,GC=F,ZN=F",
+    "--lookback-days", "2",
+    "--end-safety-margin-secs", "36000",
+    "--source", "databento:glbx-mdp3:runner",
+]
+
+[criticality]
+tier = "tier-1"
+owner = "@adam"
+consumer_impact = "Minute-resolution CME factor-futures bars feeding Soothsayer's M6 §6.6 path-fitted conformal runner (Fri 16:00 ET → Mon 09:30 ET path extrema). Stale = §6.6 row of M6 forward-tape battery cannot score post-freeze weekends."
+
+[freshness]
+# 25h ceiling: matches `equities-daily` shape (24h cadence + 1h grace).
+sla_secs = 90000
+
+[budget]
+# 4 symbols × 1 Databento range call each. Loose cap.
+max_requests_per_run = 20
+
+[workflow]
+sensor = "daily(06:00Z)"

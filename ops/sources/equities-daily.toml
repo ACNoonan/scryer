@@ -14,20 +14,38 @@
 # only ever capture the prior trading day's bar, leaving Monday's
 # bar absent until Tuesday. 22:00 UTC captures the same-day close.
 #
-# Symbol set: the 10-symbol Soothsayer universe used by W5/W6
-# coverage analyses (Paper-1 §6 plus Paper-3 add-ons HOOD/MSTR
-# /GLD/TLT). Operator can extend the list freely; the manifest is
-# the source-of-truth.
+# Symbol set: the 10-symbol Soothsayer xStock/RWA universe (SPY,
+# QQQ, AAPL, GOOGL, NVDA, TSLA, HOOD, GLD, TLT, MSTR) plus
+# `BTC-USD` (load-bearing for MSTR's post-2020-08 BTC factor pivot).
+#
+# Symbols intentionally NOT in the set despite the M6 brief asking
+# for them, because Stooq's free-tier CSV endpoint does not serve
+# them (verified 2026-05-04 — Stooq returns either `No data` or
+# zero rows on the auth'd request):
+#   - `ES=F`, `NQ=F`, `GC=F`, `ZN=F` (CME factor-futures daily
+#     bars). Note: `cme/intraday_1m/v1` IS shipped and forward-
+#     polled for the same 4 symbols at 1m resolution, so consumers
+#     can resample to daily without needing a daily venue here.
+#   - `^VIX`, `^GVZ`, `^MOVE` (CBOE / ICE volatility indices). VIX
+#     daily is in the wishlist as a future fetcher (cboe_indices.v1
+#     historical work landed phase 47); a forward-poll manifest is
+#     not yet shipped.
+# The legacy yfinance import (mtime 2026-04-29) populated the
+# historical surfaces for these 5 symbols on disk, so partitions
+# exist but stay frozen until a sibling fetcher is added. Soothsayer
+# panel.py reads these consumer-side; document upstream as data-
+# pending in `wishlist.md` ("M6 G1.b — futures/^VIX daily forward
+# poll") so the gap is tracked rather than silent.
 
 id = "equities-daily"
-description = "Daily Stooq EOD OHLCV poll for the Soothsayer 10-symbol universe (SPY,QQQ,AAPL,GOOGL,NVDA,TSLA,HOOD,GLD,TLT,MSTR). Forward-only; lookback=7d for cheap dedup-safe re-pulls."
+description = "Daily Stooq EOD OHLCV poll for the Soothsayer 10-symbol universe + BTC-USD (11 total). Forward-only; lookback=7d for cheap dedup-safe re-pulls. Futures + ^VIX intentionally excluded — Stooq does not serve them; tracked separately in wishlist."
 schema_ids = ["yahoo.v1"]
 
 [fetch]
 command = "scry"
 args = [
     "equities", "bars",
-    "--symbols", "SPY,QQQ,AAPL,GOOGL,NVDA,TSLA,HOOD,GLD,TLT,MSTR",
+    "--symbols", "SPY,QQQ,AAPL,GOOGL,NVDA,TSLA,HOOD,GLD,TLT,MSTR,BTC-USD",
     "--lookback-days", "7",
     "--source", "stooq:csv:runner",
 ]
@@ -35,7 +53,7 @@ args = [
 [criticality]
 tier = "tier-1"
 owner = "@adam"
-consumer_impact = "Daily underlier OHLCV for the Soothsayer Paper-1/Paper-3 analyses (W5 forward-tape coverage and W6 halt-window coarse fallback). Stale = research blocked: Tuesday-morning forward-coverage cron cannot read Monday's open."
+consumer_impact = "Daily underlier OHLCV for the Soothsayer Paper-1/Paper-3 analyses + BTC-USD for MSTR's post-2020-08 factor pivot. Stale = research blocked: Tuesday-morning forward-coverage cron cannot read Monday's open."
 
 [freshness]
 # 25h ceiling: a successful daily fire should land within 24h of the
@@ -44,7 +62,7 @@ consumer_impact = "Daily underlier OHLCV for the Soothsayer Paper-1/Paper-3 anal
 sla_secs = 90000
 
 [budget]
-# 10 symbols × 1 Stooq request each × ~500ms rate-limit gap = ~6s
+# 11 symbols × 1 Stooq request each × ~500ms rate-limit gap = ~7s
 # wall-clock per fire; cap loosely above observed.
 max_requests_per_run = 30
 

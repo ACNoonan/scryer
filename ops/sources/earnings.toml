@@ -1,0 +1,55 @@
+# Daily forward-poll for `earnings.v1` over the six Soothsayer
+# single-name issuers (AAPL, GOOGL, HOOD, MSTR, NVDA, TSLA). SPY
+# and QQQ are ETFs and have no earnings; futures, ^VIX/^GVZ/^MOVE,
+# and BTC-USD are not single-name companies. GLD/TLT are commodity
+# / treasury ETFs — same ETF carve-out applies.
+#
+# Cadence: `daily(23:00Z)` — fires 1h after `equities-daily` to
+# stagger Stooq vs Finnhub API load. Finnhub free tier caps at 60
+# calls/min; six symbols at one call per symbol is well under quota.
+# We do not pass `--from`/`--to` — the EarningsArgs defaults give a
+# rolling -30d/+90d window which is exactly the shape a
+# forward-only forecast harness needs (lookback for revisions, and
+# enough forward horizon for the next 1–3 calendar quarters of
+# announcements).
+#
+# Used by: Soothsayer's `earnings_next_week` regime flag in
+# `panel.py`. Stale earnings will silently misclassify post-freeze
+# weekends (no announcement seen → flag stays False), so this is not
+# pure "optional regime context" — it's load-bearing for regime
+# classification. Tier-2: research-blocking but not page-worthy.
+#
+# Provider env: requires `FINNHUB_API_KEY` in the deployed
+# `~/Library/Application Support/scryer/.env` (loaded via dotenvy
+# by the runner-spawned `scry` subprocess). If unset the fetcher
+# bails immediately with a clear error.
+
+id = "earnings"
+description = "Daily Finnhub earnings-calendar forward-poll over the 6-symbol Soothsayer single-name set (AAPL, GOOGL, HOOD, MSTR, NVDA, TSLA). Rolling -30d/+90d window per fire."
+schema_ids = ["earnings.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "equities", "earnings",
+    "--symbols", "AAPL,GOOGL,HOOD,MSTR,NVDA,TSLA",
+    "--source", "finnhub:earnings:runner",
+]
+
+[criticality]
+tier = "tier-2"
+owner = "@adam"
+consumer_impact = "Earnings calendar feeding Soothsayer's `earnings_next_week` regime flag (Paper-1/Paper-3 panel.py). Stale = post-freeze weekends silently misclassified as non-earnings; M6 LWC forward-tape regime mix drifts."
+
+[freshness]
+# 25h ceiling: matches `equities-daily` shape (24h cadence + 1h
+# grace).
+sla_secs = 90000
+
+[budget]
+# 6 symbols × 1 Finnhub request each × 1100ms gap = ~7s wall-clock
+# per fire. Loose cap above observed.
+max_requests_per_run = 30
+
+[workflow]
+sensor = "daily(23:00Z)"
