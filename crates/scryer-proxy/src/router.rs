@@ -2,6 +2,7 @@
 //! with retry, classify response.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -18,18 +19,31 @@ use crate::ProxyState;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RetryConfig {
-    /// Maximum attempts for read-only requests (1 means no retry).
-    /// Mutating requests are rejected before the retry path.
+    /// Hard cap on attempts for a single inbound read request. The
+    /// router actually walks `min(max_attempts_read, eligible.len())`
+    /// providers, so a smaller eligible set caps the budget to avoid
+    /// retrying against the same dead siblings repeatedly. Mutating
+    /// requests are rejected before the retry path.
     pub max_attempts_read: u32,
     /// Cooldown to apply when an upstream returns Disposition::Exhausted.
     pub quota_exhausted_cooldown_secs: u64,
+    /// How long to wait for a per-provider bulkhead permit before
+    /// treating the provider as backpressured-by-self and walking to
+    /// the next eligible. 0 = `try_acquire` only (no wait).
+    pub bulkhead_acquire_timeout: Duration,
 }
 
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
-            max_attempts_read: 2,
+            // Bumped from 2 (v0.1) to 5 in PR.7. With the default
+            // 5-provider Solana config, an inbound request that hits
+            // a quarantine-flicker dead provider will now walk to a
+            // healthy sibling instead of giving up. Bounded to prevent
+            // a misconfigured 100-provider list from amplifying load.
+            max_attempts_read: 5,
             quota_exhausted_cooldown_secs: 60 * 60 * 24,
+            bulkhead_acquire_timeout: Duration::from_secs(2),
         }
     }
 }
@@ -54,22 +68,76 @@ pub async fn handle_jsonrpc(
         return Err(ProxyError::NoHealthyProviders);
     }
 
-    let max_attempts = state.retry.max_attempts_read.max(1) as usize;
+    // Adaptive cap: with a small eligible set we'd burn the budget on
+    // the same dead siblings repeatedly; with a large set we never
+    // need more than `eligible.len()` attempts anyway. The PR.7
+    // default of 5 is the documented hard cap.
+    let max_attempts =
+        (state.retry.max_attempts_read.max(1) as usize).min(eligible.len());
     let mut last_error: Option<String> = None;
     // Attempts that count against the budget: Transient / Throttled /
-    // Exhausted / transport. CapabilityMismatch does NOT consume a
-    // slot — the upstream is healthy, it just can't serve *this*
-    // request shape, so we should walk the entire eligible list
-    // looking for a provider that can. The loop's hard ceiling is
-    // `eligible.len()`, which prevents a misclassification loop.
+    // Exhausted / transport. CapabilityMismatch and self-backpressure
+    // (bulkhead-full / rate-limit denied) do NOT consume a slot — the
+    // upstream is healthy, the proxy just can't / won't dispatch right
+    // now, so we should walk the entire eligible list looking for a
+    // provider that can. The loop's hard ceiling is `eligible.len()`,
+    // which prevents a misclassification or backpressure loop.
     let mut budgeted_attempts: usize = 0;
 
     for provider in eligible.iter() {
         if budgeted_attempts >= max_attempts {
             break;
         }
-        let res = forward(&state.client, provider, &payload).await;
         let provider_name = provider.name().to_string();
+
+        // Per-provider rate limit (token bucket). When `max_rps` is
+        // unset this is a no-op. When set, a denial means "we'd
+        // rather pace than fail" — try the next eligible provider
+        // without bumping the provider's failure counters.
+        if !provider.try_acquire_rate_token() {
+            state
+                .metrics
+                .request_failures_total
+                .with_label_values(&[&provider_name, "rate_limit_self"])
+                .inc();
+            state
+                .metrics
+                .retries_total
+                .with_label_values(&["rate_limit_self"])
+                .inc();
+            last_error = Some(format!(
+                "provider `{provider_name}` rate-limited by proxy (max_rps)"
+            ));
+            continue;
+        }
+
+        // Per-provider in-flight bulkhead. Wait up to the configured
+        // timeout for a permit; if the bulkhead stays full, treat as
+        // self-backpressure (same routing as rate-limit denial).
+        let _permit = match provider
+            .acquire_in_flight(state.retry.bulkhead_acquire_timeout)
+            .await
+        {
+            Some(p) => p,
+            None => {
+                state
+                    .metrics
+                    .request_failures_total
+                    .with_label_values(&[&provider_name, "bulkhead_full"])
+                    .inc();
+                state
+                    .metrics
+                    .retries_total
+                    .with_label_values(&["bulkhead_full"])
+                    .inc();
+                last_error = Some(format!(
+                    "provider `{provider_name}` bulkhead full (max_in_flight)"
+                ));
+                continue;
+            }
+        };
+
+        let res = forward(&state.client, provider, &payload).await;
 
         match res {
             Ok(r) => {
@@ -234,6 +302,12 @@ pub async fn handle_jsonrpc(
         }
     }
 
+    // Falling through here means we walked the full eligible list (or
+    // exhausted the budget) without a successful upstream response.
+    // PR.7 retry-exhaustion canary: bump exactly once per inbound
+    // request that ended up here, regardless of which provider state
+    // each attempt landed on.
+    state.metrics.request_retry_exhausted_total.inc();
     Err(ProxyError::Upstream(
         last_error.unwrap_or_else(|| "all providers failed".to_string()),
     ))

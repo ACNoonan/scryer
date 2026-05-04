@@ -46,6 +46,15 @@ pub struct Metrics {
     /// `quarantine_cleared_total{reason="success_probe"}` to see how
     /// often early-recovery attempts pay off.
     pub recovery_probes_total: IntCounterVec,
+
+    /// Inbound requests that walked the full eligible-provider list
+    /// (or exhausted the per-request retry budget) without producing
+    /// a successful upstream response. PR.7 canary: distinct from
+    /// `request_failures_total` (per-attempt) — this counts whole
+    /// requests that 503'd to the client. Stays low under healthy
+    /// fanout; spikes when the recovery-probe leak / capacity
+    /// shortfall conditions return.
+    pub request_retry_exhausted_total: IntCounter,
 }
 
 impl Metrics {
@@ -150,6 +159,10 @@ impl Metrics {
             ),
             &["provider"],
         )?;
+        let request_retry_exhausted_total = IntCounter::with_opts(Opts::new(
+            "scryer_proxy_request_retry_exhausted_total",
+            "Inbound requests that walked the full eligible list without a successful upstream response.",
+        ))?;
 
         registry.register(Box::new(requests_total.clone()))?;
         registry.register(Box::new(request_failures_total.clone()))?;
@@ -165,6 +178,7 @@ impl Metrics {
         registry.register(Box::new(probe_duration_seconds.clone()))?;
         registry.register(Box::new(quarantine_cleared_total.clone()))?;
         registry.register(Box::new(recovery_probes_total.clone()))?;
+        registry.register(Box::new(request_retry_exhausted_total.clone()))?;
 
         Ok(Self {
             registry,
@@ -182,6 +196,7 @@ impl Metrics {
             probe_duration_seconds,
             quarantine_cleared_total,
             recovery_probes_total,
+            request_retry_exhausted_total,
         })
     }
 

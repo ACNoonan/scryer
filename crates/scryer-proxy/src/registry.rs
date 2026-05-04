@@ -6,12 +6,19 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
-use std::sync::Mutex;
-use std::time::SystemTime;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::Deserialize;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::error::InitError;
+
+/// Default per-provider concurrent in-flight cap when `max_in_flight`
+/// is not set in `providers.json`. Sized to comfortably saturate
+/// reqwest's default per-host pool (10 idle connections × ~3 in-flight
+/// per connection) without overflowing memory.
+pub const DEFAULT_MAX_IN_FLIGHT: u32 = 32;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ProviderConfig {
@@ -28,6 +35,20 @@ pub struct ProviderConfig {
     pub ws_url: Option<String>,
     #[serde(default)]
     pub quota: Option<QuotaConfig>,
+    /// Per-provider in-flight request cap (bulkhead). Defaults to
+    /// `DEFAULT_MAX_IN_FLIGHT` when unset. The router waits up to
+    /// `RetryConfig::bulkhead_acquire_timeout` for a permit before
+    /// treating the provider as throttled-by-self and trying the next
+    /// eligible sibling.
+    #[serde(default)]
+    pub max_in_flight: Option<u32>,
+    /// Per-provider sustained request rate (per second). When set, a
+    /// token bucket with refill `max_rps` and burst `max_rps` paces
+    /// outbound calls. `None` = unlimited (the v0.1 default). When
+    /// `try_acquire` denies, the router falls through to the next
+    /// eligible provider — no provider penalty.
+    #[serde(default)]
+    pub max_rps: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -124,8 +145,64 @@ pub struct ProviderState {
     /// provider while quarantined. Reset to 0 when the provider
     /// comes out of quarantine.
     last_recovery_probe_ms: AtomicU64,
+    /// Count of consecutive `Ok` recovery-probe outcomes. Resets to 0
+    /// on any non-OK outcome and on natural quarantine clear. Quarantine
+    /// is cleared by recovery probe only when this counter reaches the
+    /// configured `required_consecutive_ok` threshold (hysteresis to
+    /// dampen monthly-cap flicker).
+    consecutive_recovery_ok: AtomicU32,
     latency_ema_ms: AtomicU32,
     quota_state: AtomicU8,
+    /// Per-provider in-flight permit pool (bulkhead). Capacity is
+    /// `config.max_in_flight.unwrap_or(DEFAULT_MAX_IN_FLIGHT)` at
+    /// construction time. Held in `Arc` so the router can hand back
+    /// `OwnedSemaphorePermit`s to drop on response completion.
+    semaphore: Arc<Semaphore>,
+    /// Per-provider outbound rate limiter. `None` = unlimited.
+    rate_limiter: Option<Mutex<TokenBucket>>,
+}
+
+/// Single-threaded token bucket. The mutex is fine because rate-limit
+/// decisions are not on the request hot-path inner loop.
+#[derive(Debug)]
+struct TokenBucket {
+    /// Refill rate per second.
+    rate_per_sec: u32,
+    /// Maximum tokens (burst capacity). Fixed at `rate_per_sec` for
+    /// simplicity; gives sustained rate = burst.
+    burst: u32,
+    /// Current token count (fractional).
+    tokens: f64,
+    /// Last refill instant.
+    last_refill: Instant,
+}
+
+impl TokenBucket {
+    fn new(rate_per_sec: u32) -> Self {
+        let burst = rate_per_sec;
+        Self {
+            rate_per_sec,
+            burst,
+            // Start with a full bucket so cold-start traffic isn't
+            // artificially paced.
+            tokens: burst as f64,
+            last_refill: Instant::now(),
+        }
+    }
+
+    fn try_acquire(&mut self) -> bool {
+        let now = Instant::now();
+        let elapsed = now.saturating_duration_since(self.last_refill).as_secs_f64();
+        self.tokens =
+            (self.tokens + elapsed * self.rate_per_sec as f64).min(self.burst as f64);
+        self.last_refill = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,6 +214,11 @@ pub enum QuotaState {
 
 impl ProviderState {
     pub fn new(config: ProviderConfig) -> Self {
+        let in_flight = config.max_in_flight.unwrap_or(DEFAULT_MAX_IN_FLIGHT) as usize;
+        let rate_limiter = config
+            .max_rps
+            .filter(|r| *r > 0)
+            .map(|r| Mutex::new(TokenBucket::new(r)));
         Self {
             config,
             healthy: std::sync::atomic::AtomicBool::new(false),
@@ -144,9 +226,70 @@ impl ProviderState {
             quarantined_until_ms: AtomicU64::new(0),
             quarantined_since_ms: AtomicU64::new(0),
             last_recovery_probe_ms: AtomicU64::new(0),
+            consecutive_recovery_ok: AtomicU32::new(0),
             latency_ema_ms: AtomicU32::new(400),
             quota_state: AtomicU8::new(QuotaState::Ok as u8),
+            semaphore: Arc::new(Semaphore::new(in_flight.max(1))),
+            rate_limiter,
         }
+    }
+
+    /// Try to acquire one outbound rate-limit token. Returns `true` if
+    /// the call may proceed. `false` means the caller should treat
+    /// this provider as throttled-by-self and try the next eligible
+    /// sibling without bumping `consecutive_failures`.
+    pub fn try_acquire_rate_token(&self) -> bool {
+        let Some(rl) = &self.rate_limiter else {
+            return true;
+        };
+        let mut bucket = rl.lock().expect("rate-limit mutex poisoned");
+        bucket.try_acquire()
+    }
+
+    /// Acquire one in-flight permit, waiting up to `timeout`. Returns
+    /// `Some(permit)` to be held until the response completes, or
+    /// `None` if the bulkhead was full for the entire timeout window.
+    /// On `None`, caller falls through to the next eligible provider.
+    pub async fn acquire_in_flight(
+        &self,
+        timeout: Duration,
+    ) -> Option<OwnedSemaphorePermit> {
+        let sem = self.semaphore.clone();
+        match tokio::time::timeout(timeout, sem.acquire_owned()).await {
+            Ok(Ok(permit)) => Some(permit),
+            // Timeout elapsed.
+            Err(_) => None,
+            // Semaphore closed — treat as no-permit so we fall through
+            // gracefully. Should never happen in practice; the
+            // semaphore is owned by ProviderState which lives for the
+            // proxy's lifetime.
+            Ok(Err(_)) => None,
+        }
+    }
+
+    /// Snapshot the in-flight permit availability. Used in metrics.
+    pub fn available_in_flight(&self) -> usize {
+        self.semaphore.available_permits()
+    }
+
+    /// Record one successful recovery-probe outcome. Returns the new
+    /// counter value so the caller can compare against
+    /// `required_consecutive_ok` and decide whether to clear quarantine.
+    pub fn record_recovery_ok(&self) -> u32 {
+        self.consecutive_recovery_ok
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1)
+    }
+
+    /// Reset the consecutive-recovery-ok counter. Called when a probe
+    /// is non-OK or when the provider exits quarantine through any
+    /// path (natural cooldown, admin clear, recovery rescue).
+    pub fn reset_consecutive_recovery_ok(&self) {
+        self.consecutive_recovery_ok.store(0, Ordering::Release);
+    }
+
+    pub fn consecutive_recovery_ok(&self) -> u32 {
+        self.consecutive_recovery_ok.load(Ordering::Acquire)
     }
 
     pub fn name(&self) -> &str {
@@ -169,15 +312,29 @@ impl ProviderState {
         self.consecutive_failures.store(0, Ordering::Release);
         // EMA with alpha = 0.2 (rounded to integer ms; not an audit
         // metric, just for ranking).
-        let prev = self.latency_ema_ms.load(Ordering::Acquire);
-        let next = ((prev as u64 * 8 + latency_ms as u64 * 2) / 10) as u32;
-        self.latency_ema_ms.store(next.max(1), Ordering::Release);
+        self.update_latency_ema(latency_ms);
         self.set_healthy(true);
         self.quota_state
             .store(QuotaState::Ok as u8, Ordering::Release);
         self.quarantined_until_ms.store(0, Ordering::Release);
         self.quarantined_since_ms.store(0, Ordering::Release);
         self.last_recovery_probe_ms.store(0, Ordering::Release);
+        self.consecutive_recovery_ok.store(0, Ordering::Release);
+    }
+
+    /// Record a probe-Ok outcome WITHOUT clearing quarantine. Used by
+    /// the recovery-probe hysteresis path: we want the latency reading
+    /// (so the EMA reflects current upstream behaviour) but the
+    /// provider must stay quarantined until `consecutive_recovery_ok`
+    /// reaches the configured threshold.
+    pub fn record_recovery_probe_partial(&self, latency_ms: u32) {
+        self.update_latency_ema(latency_ms);
+    }
+
+    fn update_latency_ema(&self, latency_ms: u32) {
+        let prev = self.latency_ema_ms.load(Ordering::Acquire);
+        let next = ((prev as u64 * 8 + latency_ms as u64 * 2) / 10) as u32;
+        self.latency_ema_ms.store(next.max(1), Ordering::Release);
     }
 
     pub fn record_failure(&self) -> u32 {
@@ -194,6 +351,7 @@ impl ProviderState {
             self.quarantined_since_ms
                 .store(unix_ms_now(), Ordering::Release);
             self.last_recovery_probe_ms.store(0, Ordering::Release);
+            self.consecutive_recovery_ok.store(0, Ordering::Release);
         }
         n
     }
@@ -208,6 +366,7 @@ impl ProviderState {
         self.quarantined_since_ms
             .store(unix_ms_now(), Ordering::Release);
         self.last_recovery_probe_ms.store(0, Ordering::Release);
+        self.consecutive_recovery_ok.store(0, Ordering::Release);
         self.consecutive_failures.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -229,6 +388,7 @@ impl ProviderState {
         self.quarantined_until_ms.store(0, Ordering::Release);
         self.quarantined_since_ms.store(0, Ordering::Release);
         self.last_recovery_probe_ms.store(0, Ordering::Release);
+        self.consecutive_recovery_ok.store(0, Ordering::Release);
         self.consecutive_failures.store(0, Ordering::Release);
         // Reset quota state so the next probe can re-detect (rather
         // than paint over a stale "exhausted" reading).
@@ -364,15 +524,18 @@ impl Registry {
         cleared
     }
 
-    /// Return providers eligible for routing right now: healthy and not
-    /// quarantined. Sorted by `score()` ascending; ties broken by
+    /// Return providers eligible for routing right now: healthy, not
+    /// quarantined, and not weight-disabled. `weight = 0` is the
+    /// operator kill-switch: provider stays in the registry (probes
+    /// keep running, metrics keep flowing) but is excluded from
+    /// routing. Sorted by `score()` ascending; ties broken by
     /// round-robin so two equally-scored providers fairly share load
     /// without recomputing scores per-call.
     pub fn ranked_eligible(&self) -> Vec<std::sync::Arc<ProviderState>> {
         let mut eligible: Vec<_> = self
             .providers
             .iter()
-            .filter(|p| p.is_healthy() && !p.is_quarantined())
+            .filter(|p| p.config.weight > 0 && p.is_healthy() && !p.is_quarantined())
             .cloned()
             .collect();
         eligible.sort_by_key(|p| p.score());
@@ -428,6 +591,8 @@ mod tests {
             tags: vec![],
             ws_url: None,
             quota: None,
+            max_in_flight: None,
+            max_rps: None,
         })
     }
 
@@ -505,6 +670,8 @@ mod tests {
             tags: vec![],
             ws_url: None,
             quota: None,
+            max_in_flight: None,
+            max_rps: None,
         };
         let cfg_b = ProviderConfig {
             name: "Alchemy".into(),
@@ -530,6 +697,8 @@ mod tests {
             tags: vec![],
             ws_url: None,
             quota: None,
+            max_in_flight: None,
+            max_rps: None,
         };
         let cfg_b = ProviderConfig {
             name: "Alchemy".into(),
@@ -566,6 +735,47 @@ mod tests {
     }
 
     #[test]
+    fn weight_zero_excludes_provider_from_ranked_eligible() {
+        // weight = 0 is the operator kill-switch. The provider must
+        // stay in the registry (so probes/metrics keep flowing and
+        // re-enabling is just a config edit) but must not be picked
+        // by the router.
+        let disabled = ProviderConfig {
+            name: "disabled".into(),
+            url: "https://disabled.example".into(),
+            weight: 0,
+            headers: vec![],
+            tags: vec![],
+            ws_url: None,
+            quota: None,
+            max_in_flight: None,
+            max_rps: None,
+        };
+        let enabled = ProviderConfig {
+            name: "enabled".into(),
+            url: "https://enabled.example".into(),
+            weight: 1,
+            headers: vec![],
+            tags: vec![],
+            ws_url: None,
+            quota: None,
+            max_in_flight: None,
+            max_rps: None,
+        };
+        let registry = Registry::from_configs(vec![disabled, enabled]).unwrap();
+        // Force both providers to Healthy so the only thing left to
+        // gate the disabled one out of `ranked_eligible` is the
+        // weight=0 filter.
+        for p in &registry.providers {
+            p.record_success(50);
+        }
+        let eligible = registry.ranked_eligible();
+        let names: Vec<&str> = eligible.iter().map(|p| p.name()).collect();
+        assert_eq!(names, vec!["enabled"]);
+        assert_eq!(registry.providers.len(), 2, "weight=0 stays registered");
+    }
+
+    #[test]
     fn provider_score_inversely_weights_latency() {
         let a = ProviderConfig {
             name: "a".into(),
@@ -575,6 +785,8 @@ mod tests {
             tags: vec![],
             ws_url: None,
             quota: None,
+            max_in_flight: None,
+            max_rps: None,
         };
         let b = ProviderConfig {
             name: "b".into(),

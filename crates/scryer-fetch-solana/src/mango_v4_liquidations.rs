@@ -416,6 +416,7 @@ mod tests {
             accounts,
             data,
             inner_instructions: Vec::new(),
+            parsed: None,
         }
     }
 
@@ -458,6 +459,7 @@ mod tests {
             ],
             data: ix_data_b58(&TOKEN_LIQ_WITH_TOKEN_DISC, &args),
             inner_instructions: Vec::new(),
+            parsed: None,
         };
         let tx = make_tx(ix);
         let rows = extract_liquidations(&tx, &meta());
@@ -486,6 +488,7 @@ mod tests {
             ],
             data: ix_data_b58(&TOKEN_LIQ_BANKRUPTCY_DISC, &args),
             inner_instructions: Vec::new(),
+            parsed: None,
         };
         let tx = make_tx(ix);
         let rows = extract_liquidations(&tx, &meta());
@@ -513,6 +516,7 @@ mod tests {
             ],
             data: ix_data_b58(&LIQ_TOKEN_WITH_TOKEN_DISC, &args),
             inner_instructions: Vec::new(),
+            parsed: None,
         };
         let tx = make_tx(ix);
         let rows = extract_liquidations(&tx, &meta());
@@ -537,6 +541,7 @@ mod tests {
             ],
             data: ix_data_b58(&PERP_LIQ_BASE_OR_POSITIVE_PNL_DISC, &args),
             inner_instructions: Vec::new(),
+            parsed: None,
         };
         let tx = make_tx(ix);
         let rows = extract_liquidations(&tx, &meta());
@@ -567,6 +572,7 @@ mod tests {
                 ],
                 data: ix_data_b58(&disc, &args),
                 inner_instructions: Vec::new(),
+            parsed: None,
             };
             let tx = make_tx(ix);
             let rows = extract_liquidations(&tx, &meta());
@@ -589,6 +595,7 @@ mod tests {
                 accounts: vec![account("group"), account("at_risk_account")],
                 data: ix_data_b58(&disc, &args),
                 inner_instructions: Vec::new(),
+            parsed: None,
             };
             let tx = make_tx(ix);
             let rows = extract_liquidations(&tx, &meta());
@@ -617,6 +624,7 @@ mod tests {
             ],
             data: ix_data_b58(&TOKEN_LIQ_WITH_TOKEN_DISC, &args),
             inner_instructions: Vec::new(),
+            parsed: None,
         };
         let mut tx = make_tx(ix);
         tx.transaction_error = Some(serde_json::json!({"InstructionError": [0, "Custom"]}));
@@ -631,6 +639,7 @@ mod tests {
             accounts: vec![account("group"), account("liqee")],
             data: ix_data_b58(&[0xff; 8], &[]),
             inner_instructions: Vec::new(),
+            parsed: None,
         };
         let tx = make_tx(ix);
         assert!(extract_liquidations(&tx, &meta()).is_empty());
@@ -652,6 +661,7 @@ mod tests {
             ],
             data: ix_data_b58(&TOKEN_LIQ_WITH_TOKEN_DISC, &args),
             inner_instructions: Vec::new(),
+            parsed: None,
         };
         let tx = make_tx(ix);
         assert!(extract_liquidations(&tx, &meta()).is_empty());
@@ -680,6 +690,7 @@ mod tests {
             ],
             data: ix_data_b58(&TOKEN_LIQ_WITH_TOKEN_DISC, &args),
             inner_instructions: Vec::new(),
+            parsed: None,
         };
         let tx = make_tx(ix);
         assert!(extract_liquidations(&tx, &meta()).is_empty());

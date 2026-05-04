@@ -1038,20 +1038,24 @@ mod tests {
                     accounts: vec![],
                     data: String::new(),
                     inner_instructions: vec![],
+                    parsed: None,
                 },
                 HeliusInstruction {
                     program_id: VERIFIER_PROGRAM_ID.to_string(),
                     accounts: vec![],
                     data: ix_data_spy,
                     inner_instructions: vec![],
+                    parsed: None,
                 },
                 HeliusInstruction {
                     program_id: VERIFIER_PROGRAM_ID.to_string(),
                     accounts: vec![],
                     data: ix_data_qqq,
                     inner_instructions: vec![],
+                    parsed: None,
                 },
             ],
+            parsed: None,
         };
         let tx = ParsedTx {
             signature: "TEST_SIG".to_string(),
@@ -1143,7 +1147,9 @@ mod tests {
                 accounts: vec![],
                 data: ix_data_v11,
                 inner_instructions: vec![],
+                parsed: None,
             }],
+            parsed: None,
         };
         let tx = ParsedTx {
             signature: "V11_SIG".to_string(),

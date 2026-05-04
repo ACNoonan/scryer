@@ -224,14 +224,14 @@ resolves.
 
 ## marginfi_liquidation.v1
 
-**Status.** locked 2026-04-29; row shape amended 2026-05-03 after IDL pre-flight (see methodology entry "MarginFi-v2 schemas"). Implementation pending.
+**Status.** locked 2026-04-29; row shape amended 2026-05-03 after IDL pre-flight; native-unit fee derivation amended 2026-05-04 (phase 114, item 47.1) to use a per-IX inner SPL Token Transfer walk (see methodology entry "MarginFi-v2"). Code shipped phase 113; native-unit population shipped phase 114.
 
 **Source.** Solana mainnet, MarginFi-v2 program `MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA` (verified on-chain 2026-04-29). Anchor IX `lending_account_liquidate` (disc `[214,169,151,213,251,167,86,219]`). Direct IX accounts: `[group, asset_bank, liab_bank, liquidator_marginfi_account, authority (signer), liquidatee_marginfi_account, bank_liquidity_vault_authority, bank_liquidity_vault, bank_insurance_vault, token_program]`. Oracle accounts arrive via `remaining_accounts` gated by the `liquidatee_accounts: u8` and `liquidator_accounts: u8` count hints in the IX args. IX args: `asset_amount: u64`, `liquidatee_accounts: u8`, `liquidator_accounts: u8`.
 
 Per-event decode pulls from three sources:
 1. The Anchor `LendingAccountLiquidateEvent` (disc `[166,160,249,154,183,39,23,242]`), decoded from `meta.logMessages` `Program data: <base64>` lines, for liquidatee account/authority, both banks, both mints, pre/post f64 health, and pre/post `LiquidationBalances` (four f64 balances per side).
 2. The outer transaction for `signature`, `slot`, `block_time`, `fee_payer`, and `liquidator` (top-level signer).
-3. Outer-tx token-balance changes (`meta.{pre,post}TokenBalances` synthesized via `ParsedTx::account_data`) for `asset_amount_seized` (native u64 = liquidator's net positive delta in `asset_mint`) and `insurance_fund_fee_paid` (native u64 = matching positive delta on the bank's `insurance_vault_authority` PDA, derived in-process from the `insurance_vault_authority_bump` byte stored in `marginfi_reserve.v1::raw_account_b64` at absolute account offset 179 via `Pubkey::create_program_address(&[b"insurance_vault_auth", bank, &[bump]], &MARGINFI_PROGRAM_ID)`). 100% PDA derivation against the live 422-bank canonical snapshot.
+3. A per-IX walk of the matched `lending_account_liquidate` IX's `inner_instructions` for native-unit fees. For each inner SPL Token Program v1 / Token-2022 `transfer` or `transferChecked` IX, `asset_amount_seized` (native u64) sums amounts whose `source` matches `liquidate_ix.accounts[7]` (`bank_liquidity_vault`); `insurance_fund_fee_paid` (native u64) sums amounts whose `destination` matches `liquidate_ix.accounts[8]` (`bank_insurance_vault`). A single transfer that is both — out of liquidity vault, into insurance vault — counts toward both totals (the insurance fee leaves the liquidity vault). Replaces the prior wallet-delta heuristic that returned 0 for the dominant flashloan-arb pattern. Out-of-scope residual gap: for flashloan-wrapped liquidations the actual asset seizure happens in the FOLLOWING `lending_account_withdraw` IX in the same outer tx — walking that to attribute back to the matching liquidate IX is the 47.1.b scope; today `asset_amount_seized` reflects only the insurance fragment for those txs.
 
 `liquidator_fee_paid` is permanently reserved at `0`: MarginFi-v2's `lending_account_liquidate` does not emit a separate liquidator-fee SPL transfer — the liquidator's incentive is implicit in the asset/liability ratio. Consumers compute the effective bonus post-hoc from the oracle-priced delta.
 
@@ -256,13 +256,13 @@ liab_mint                       string
 liab_symbol                     string
 liab_decimals                   u8
 liab_oracle                     string  // same lookup for liab_bank
-asset_amount_seized             u64     // native units; liquidator's net positive delta in asset_mint from outer-tx {pre,post}TokenBalances
+asset_amount_seized             u64     // native units; sum of inner SPL Token Transfer amounts whose source == liquidate_ix.accounts[7] (bank_liquidity_vault). Captures the insurance fragment that leaves the liquidity vault inside the liquidate IX itself; for flashloan-wrapped liquidations the gross seizure happens in the following lending_account_withdraw IX (47.1.b out of scope).
 asset_amount_seized_decimal     f64     // human-readable; pre_balances.liquidatee_asset_balance − post_balances.liquidatee_asset_balance from the event
 liquidator_fee_paid             u64     // native units; permanently 0 — marginfi-v2 does not emit a separate liquidator-fee transfer
-insurance_fund_fee_paid         u64     // native units; positive delta on the bank's insurance_vault_authority PDA
+insurance_fund_fee_paid         u64     // native units; sum of inner SPL Token Transfer amounts whose destination == liquidate_ix.accounts[8] (bank_insurance_vault)
 fee_payer                       string  // outer-tx fee payer (Jito-bundle OEV join key)
-pre_health                      f64     // event.liquidatee_pre_health; sub-1.0 = liquidatable
-post_health                     f64     // event.liquidatee_post_health; expected ~1.0 after partial liquidation
+pre_health                      f64     // event.liquidatee_pre_health; maintenance-weighted USD-equivalent (asset_value_maint − liability_value_maint, both "* In dollars" per HealthCache IDL doc), summed over positions and cast f64. Sub-zero = liquidatable (more-negative = deeper underwater); marginfi-v2 rejects pre-liq with HealthyAccount when health > 0. Empirical 677-row sample range [-107.0630, 0.0000].
+post_health                     f64     // event.liquidatee_post_health; same scale/formula as pre_health. On-chain post-condition asserts health <= 0 AND health > pre_health, so a successful partial liquidation moves strictly upward toward zero. Empirical 677-row sample range [-41.4272, 0.0000]. Source: programs/marginfi/src/state/marginfi_account.rs (mrgnlabs/marginfi-v2 commit 843aa82d).
 pre_balances_liquidatee_asset   f64     // pre_balances.liquidatee_asset_balance (raw event)
 pre_balances_liquidatee_liab    f64
 post_balances_liquidatee_asset  f64

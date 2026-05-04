@@ -30,6 +30,13 @@ pub struct HealthConfig {
     /// ≤288 attempted probes per quarantine cycle, vs the previous
     /// behavior of 0 (manual `launchctl unload && load` only).
     pub recovery_probe_interval: Duration,
+    /// Number of consecutive OK recovery probes required before the
+    /// quarantine clears (PR.7 hysteresis). Default 2 — at the 5-min
+    /// `recovery_probe_interval` that's a 10-minute minimum
+    /// re-eligibility window, which dampens monthly-cap flicker. A
+    /// non-OK probe outcome resets the counter to zero, so a single
+    /// flaky OK sandwich between Exhausteds will not unquarantine.
+    pub required_consecutive_ok: u32,
 }
 
 impl Default for HealthConfig {
@@ -38,6 +45,7 @@ impl Default for HealthConfig {
             interval: Duration::from_secs(5),
             quota_exhausted_cooldown: Duration::from_secs(60 * 60 * 24),
             recovery_probe_interval: Duration::from_secs(5 * 60),
+            required_consecutive_ok: 2,
         }
     }
 }
@@ -87,6 +95,7 @@ pub fn spawn_loop(
                     let client = client.clone();
                     let metrics = metrics.clone();
                     let cooldown = cfg.quota_exhausted_cooldown;
+                    let required_ok = cfg.required_consecutive_ok;
                     tokio::spawn(async move {
                         probe_one_internal(
                             &p,
@@ -95,6 +104,7 @@ pub fn spawn_loop(
                             &metrics,
                             cooldown,
                             true, // is_recovery_probe
+                            required_ok,
                         )
                         .await;
                     });
@@ -105,8 +115,9 @@ pub fn spawn_loop(
                 let client = client.clone();
                 let metrics = metrics.clone();
                 let cooldown = cfg.quota_exhausted_cooldown;
+                let required_ok = cfg.required_consecutive_ok;
                 tokio::spawn(async move {
-                    probe_one(&p, chain.as_ref(), &client, &metrics, cooldown).await;
+                    probe_one(&p, chain.as_ref(), &client, &metrics, cooldown, required_ok).await;
                 });
             }
         }
@@ -141,6 +152,7 @@ pub async fn probe_one(
     client: &reqwest::Client,
     metrics: &Metrics,
     quota_exhausted_cooldown: Duration,
+    required_consecutive_ok: u32,
 ) {
     probe_one_internal(
         provider,
@@ -149,6 +161,7 @@ pub async fn probe_one(
         metrics,
         quota_exhausted_cooldown,
         false,
+        required_consecutive_ok,
     )
     .await;
 }
@@ -160,6 +173,7 @@ async fn probe_one_internal(
     metrics: &Metrics,
     quota_exhausted_cooldown: Duration,
     is_recovery_probe: bool,
+    required_consecutive_ok: u32,
 ) {
     // Defensive: skip the wasted-probe path for normal callers, but
     // recovery-probe callers know what they're doing — they want to
@@ -186,10 +200,14 @@ async fn probe_one_internal(
     metrics.probe_duration_seconds.observe(elapsed_secs);
 
     let name = provider.name();
+    let mut probe_outcome_was_ok = false;
 
     match resp {
         Ok(r) => {
             let disposition = classify(r.status, &r.body, provider.config.quota.as_ref());
+            if matches!(disposition, Disposition::Ok) {
+                probe_outcome_was_ok = true;
+            }
             match disposition {
                 Disposition::Ok => {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r.body) {
@@ -200,28 +218,69 @@ async fn probe_one_internal(
                                 .set(h as i64);
                         }
                     }
-                    provider.record_success(r.latency_ms);
-                    metrics.record_health(name, true);
-                    metrics.record_quota_state(name, crate::registry::QuotaState::Ok);
-                    metrics
-                        .provider_latency_ms
-                        .with_label_values(&[name])
-                        .set(provider.latency_ema_ms() as i64);
-                    metrics
-                        .provider_consecutive_failures
-                        .with_label_values(&[name])
-                        .set(0);
-                    // Recovery-probe rescue: a probe that began against
-                    // a quarantined provider succeeded, so the natural
-                    // cooldown is short-circuited. Counter pairs with
-                    // recovery_probes_total to show how often early-
-                    // recovery attempts pay off.
-                    if was_quarantined {
+                    if is_recovery_probe && was_quarantined && required_consecutive_ok > 1 {
+                        // Hysteresis path: this is one OK probe in a row
+                        // against a quarantined provider, but we don't
+                        // clear quarantine until we've seen
+                        // `required_consecutive_ok` consecutive OK
+                        // outcomes. Record the latency reading (so the
+                        // EMA reflects upstream behaviour during
+                        // recovery) but leave the circuit open.
+                        let n = provider.record_recovery_ok();
                         metrics
-                            .quarantine_cleared_total
-                            .with_label_values(&[name, "success_probe"])
-                            .inc();
-                        tracing::info!(provider = name, "quarantine cleared via recovery probe");
+                            .provider_latency_ms
+                            .with_label_values(&[name])
+                            .set(provider.latency_ema_ms() as i64);
+                        if n >= required_consecutive_ok {
+                            provider.record_success(r.latency_ms);
+                            metrics.record_health(name, true);
+                            metrics.record_quota_state(name, crate::registry::QuotaState::Ok);
+                            metrics
+                                .provider_consecutive_failures
+                                .with_label_values(&[name])
+                                .set(0);
+                            metrics
+                                .quarantine_cleared_total
+                                .with_label_values(&[name, "success_probe"])
+                                .inc();
+                            tracing::info!(
+                                provider = name,
+                                consecutive_ok = n,
+                                "quarantine cleared via recovery probe (hysteresis met)"
+                            );
+                        } else {
+                            tracing::debug!(
+                                provider = name,
+                                consecutive_ok = n,
+                                required = required_consecutive_ok,
+                                "recovery probe ok; hysteresis not yet met"
+                            );
+                        }
+                    } else {
+                        // Single-OK path: hysteresis disabled (threshold
+                        // = 0 or 1) OR not a recovery probe at all.
+                        // Restore full health immediately.
+                        provider.record_success(r.latency_ms);
+                        metrics.record_health(name, true);
+                        metrics.record_quota_state(name, crate::registry::QuotaState::Ok);
+                        metrics
+                            .provider_latency_ms
+                            .with_label_values(&[name])
+                            .set(provider.latency_ema_ms() as i64);
+                        metrics
+                            .provider_consecutive_failures
+                            .with_label_values(&[name])
+                            .set(0);
+                        if was_quarantined {
+                            metrics
+                                .quarantine_cleared_total
+                                .with_label_values(&[name, "success_probe"])
+                                .inc();
+                            tracing::info!(
+                                provider = name,
+                                "quarantine cleared via recovery probe"
+                            );
+                        }
                     }
                 }
                 Disposition::Exhausted => {
@@ -295,6 +354,17 @@ async fn probe_one_internal(
             tracing::debug!(provider = name, error = %e, "probe failed");
         }
     }
+
+    // Hysteresis: a non-OK outcome on a recovery probe of a still-
+    // quarantined provider invalidates any built-up consecutive-OK
+    // run. (`record_failure` only resets the counter on its own
+    // failures-to-quarantine threshold; `record_exhausted` resets
+    // unconditionally; Throttled / Transient / CapabilityMismatch /
+    // transport-error paths don't currently call either, so reset
+    // explicitly here.)
+    if is_recovery_probe && was_quarantined && !probe_outcome_was_ok {
+        provider.reset_consecutive_recovery_ok();
+    }
 }
 
 #[cfg(test)]
@@ -311,7 +381,47 @@ mod tests {
             tags: vec![],
             ws_url: None,
             quota: None,
+            max_in_flight: None,
+            max_rps: None,
         })
+    }
+
+    #[test]
+    fn hysteresis_first_ok_does_not_clear() {
+        let p = make_provider("Helius");
+        p.record_exhausted(60);
+        assert!(p.is_quarantined());
+        // First OK probe: bumps consecutive_recovery_ok to 1.
+        let n = p.record_recovery_ok();
+        assert_eq!(n, 1);
+        // We have NOT called record_success, so quarantine stays open.
+        assert!(p.is_quarantined());
+    }
+
+    #[test]
+    fn hysteresis_second_ok_clears() {
+        let p = make_provider("Helius");
+        p.record_exhausted(60);
+        let n1 = p.record_recovery_ok();
+        let n2 = p.record_recovery_ok();
+        assert_eq!(n1, 1);
+        assert_eq!(n2, 2);
+        // The probe loop tests `n >= required_consecutive_ok` and only
+        // then calls record_success. Simulate that.
+        p.record_success(50);
+        assert!(!p.is_quarantined());
+        assert_eq!(p.consecutive_recovery_ok(), 0);
+    }
+
+    #[test]
+    fn hysteresis_non_ok_resets_counter() {
+        let p = make_provider("Helius");
+        p.record_exhausted(60);
+        p.record_recovery_ok();
+        assert_eq!(p.consecutive_recovery_ok(), 1);
+        // A non-OK probe outcome must invalidate the buildup.
+        p.reset_consecutive_recovery_ok();
+        assert_eq!(p.consecutive_recovery_ok(), 0);
     }
 
     #[test]

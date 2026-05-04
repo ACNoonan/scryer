@@ -34,6 +34,7 @@ async fn make_state(providers: Vec<ProviderConfig>) -> Arc<ProxyState> {
         retry: RetryConfig {
             max_attempts_read: 2,
             quota_exhausted_cooldown_secs: 30,
+            bulkhead_acquire_timeout: std::time::Duration::from_millis(100),
         },
     })
 }
@@ -47,6 +48,8 @@ fn provider(name: &str, url: &str) -> ProviderConfig {
         tags: vec![],
         ws_url: None,
         quota: None,
+        max_in_flight: None,
+        max_rps: None,
     }
 }
 
@@ -433,6 +436,7 @@ async fn health_probe_marks_responsive_provider_healthy() {
             interval: std::time::Duration::from_millis(50),
             quota_exhausted_cooldown: std::time::Duration::from_secs(60),
             recovery_probe_interval: std::time::Duration::from_secs(300),
+            required_consecutive_ok: 1,
         },
     );
 

@@ -97,10 +97,33 @@ pub mod v1 {
         /// Outer-tx fee payer (Jito-bundle OEV join key).
         pub fee_payer: String,
 
-        /// `event.liquidatee_pre_health`. Sub-1.0 = liquidatable.
+        /// `event.liquidatee_pre_health` from the Anchor event. Maintenance-
+        /// weighted USD-equivalent health: `asset_value_maint −
+        /// liability_value_maint` (both `WrappedI80F48` "* In dollars"
+        /// per `HealthCache` IDL doc), summed over all positions and
+        /// converted via `I80F48::to_num::<f64>()`. The marginfi-v2
+        /// pre-liquidation gate rejects with `HealthyAccount` when this
+        /// value is `> 0`, so **sub-zero = liquidatable** (more-negative =
+        /// deeper underwater); the schema's prior "sub-1.0" docstring was
+        /// wrong (no [0,1] ratio is involved). Empirical 677-row sample
+        /// on `[2026-05-01, 2026-05-03]` ranges `[-107.0630, 0.0000]`.
+        /// Source: `programs/marginfi/src/state/marginfi_account.rs::
+        /// check_pre_liquidation_condition_and_get_account_health`
+        /// (mrgnlabs/marginfi-v2 commit `843aa82d`,
+        /// `account_health = assets.checked_sub(liabs)` over
+        /// `RiskRequirementType::Maintenance`).
         pub pre_health: f64,
-        /// `event.liquidatee_post_health`. Expected ~1.0 after a
-        /// successful partial liquidation.
+        /// `event.liquidatee_post_health` from the Anchor event. Same
+        /// scale and formula as `pre_health` (maintenance-weighted USD;
+        /// sub-zero = still liquidatable, zero or above = solvent).
+        /// The on-chain post-condition asserts both `health <= 0`
+        /// (else `TooSevereLiquidation`) and `health > pre_health`
+        /// (else `WorseHealthPostLiquidation`), so a successful partial
+        /// liquidation moves the value strictly upward toward zero but
+        /// does not cross it. Empirical 677-row sample ranges
+        /// `[-41.4272, 0.0000]`. Source: `check_post_liquidation_
+        /// condition_and_get_account_health` in the same file (commit
+        /// `843aa82d`).
         pub post_health: f64,
 
         /// Raw `LiquidationBalances` from the event, pre side.

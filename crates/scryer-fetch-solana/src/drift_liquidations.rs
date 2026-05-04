@@ -297,6 +297,7 @@ mod tests {
             ],
             data: build_ix_data(disc, args),
             inner_instructions: vec![],
+            parsed: None,
         }
     }
 
@@ -433,6 +434,7 @@ mod tests {
             accounts: vec![],
             data: bs58::encode([0u8; 16]).into_string(),
             inner_instructions: vec![drift_ix(LIQUIDATE_PERP_DISC, &args)],
+            parsed: None,
         };
         let tx = make_tx("sigJ", vec![outer]);
         let rows = extract_liquidations(&tx, &meta());

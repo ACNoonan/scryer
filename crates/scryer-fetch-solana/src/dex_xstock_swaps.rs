@@ -355,6 +355,7 @@ mod tests {
                 accounts: vec![pool.to_string(), trader.to_string()],
                 data: "swap_data".to_string(),
                 inner_instructions: vec![],
+            parsed: None,
             }],
             logs: vec![],
         }
@@ -438,6 +439,7 @@ mod tests {
             accounts: vec![],
             data: "data".into(),
             inner_instructions: vec![],
+            parsed: None,
         });
         let rows = extract_swaps(&tx, &default_registry(), &meta());
         assert_eq!(rows.len(), 1);
@@ -520,6 +522,7 @@ mod tests {
                 accounts: vec![],
                 data: "data".into(),
                 inner_instructions: vec![],
+            parsed: None,
             }],
             logs: vec![],
         };

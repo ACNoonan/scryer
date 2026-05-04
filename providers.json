@@ -2,7 +2,7 @@
   {
     "name": "Helius",
     "url": "https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}",
-    "weight": 2,
+    "weight": 0,
     "tags": ["paid", "enhanced-api"],
     "quota": {
       "exhaustion_jsonrpc_codes": [-32429]
@@ -11,19 +11,19 @@
   {
     "name": "Alchemy",
     "url": "${ALCHEMY_SOL_ENDPOINT_URL}",
-    "weight": 1,
+    "weight": 0,
     "tags": ["paid"]
   },
   {
     "name": "QuickNode",
     "url": "${QUICKNODE_ENDPOINT_URL}",
-    "weight": 1,
+    "weight": 0,
     "tags": ["paid"]
   },
   {
     "name": "RPCFast",
     "url": "${RPCFAST_RPC_URL}",
-    "weight": 1,
+    "weight": 0,
     "tags": ["paid"],
     "headers": [
       {"name": "x-api-key", "value": "${RPCFAST_API_KEY}"}
@@ -33,6 +33,7 @@
     "name": "Solana Foundation (mainnet)",
     "url": "https://api.mainnet-beta.solana.com",
     "weight": 1,
-    "tags": ["foundation", "public"]
+    "tags": ["foundation", "public"],
+    "max_rps": 2
   }
 ]

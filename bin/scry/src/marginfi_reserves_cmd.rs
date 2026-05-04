@@ -6,6 +6,7 @@
 //! Writes one `marginfi_reserve.v1::Reserve` row per matched Bank to
 //! `dataset/marginfi/reserves/v1/year=Y/month=M/day=D.parquet`.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -17,6 +18,7 @@ use scryer_fetch_solana::marginfi_reserves::{
 };
 use scryer_schema::{marginfi_reserve, Meta};
 use scryer_store::Dataset;
+use serde::Deserialize;
 
 #[derive(Parser, Debug)]
 pub struct MarginfiReservesArgs {
@@ -29,6 +31,14 @@ pub struct MarginfiReservesArgs {
     /// the canonical 8-xStock set.
     #[arg(long, default_value_t = false)]
     all: bool,
+    /// Optional path to a JSON `Vec<{"symbol": "...", "mint": "..."}>`
+    /// extending the built-in xStock registry with additional SPL
+    /// symbol → mint mappings. Used to populate `asset_symbol` for
+    /// non-xStock mints under `--all` (USDC, SOL, BONK, etc.). The
+    /// built-in 8 xStocks always remain in the registry; entries in
+    /// the JSON whose mint matches an xStock override the symbol.
+    #[arg(long)]
+    symbol_map_json: Option<PathBuf>,
     /// `_source` stamped on every emitted row.
     #[arg(long, default_value = "rpc:getProgramAccounts")]
     source: String,
@@ -40,14 +50,57 @@ pub struct MarginfiReservesArgs {
     venue: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct SymbolMapEntry {
+    symbol: String,
+    mint: String,
+}
+
+fn load_symbol_map(path: &PathBuf) -> Result<Vec<MintEntry>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading symbol-map JSON {}", path.display()))?;
+    let entries: Vec<SymbolMapEntry> =
+        serde_json::from_str(&text).context("parsing symbol-map JSON as Vec<{symbol,mint}>")?;
+    Ok(entries
+        .into_iter()
+        .map(|e| MintEntry {
+            symbol: e.symbol,
+            mint: e.mint,
+        })
+        .collect())
+}
+
 pub async fn run_marginfi_reserves(args: MarginfiReservesArgs) -> Result<()> {
-    let mints: Vec<MintEntry> = XSTOCK_MINTS
+    // Built-in 8-xStock registry, always present.
+    let mut mints: Vec<MintEntry> = XSTOCK_MINTS
         .iter()
         .map(|(s, m)| MintEntry {
             symbol: s.to_string(),
             mint: m.to_string(),
         })
         .collect();
+    // Merge in the optional caller-supplied symbol map. JSON entries
+    // override xStock entries when mints collide (last-write-wins via
+    // dedup-by-mint below); this keeps the JSON authoritative for any
+    // explicit operator override.
+    if let Some(path) = &args.symbol_map_json {
+        let extra = load_symbol_map(path)
+            .with_context(|| format!("loading symbol map from {}", path.display()))?;
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut merged: Vec<MintEntry> = Vec::with_capacity(mints.len() + extra.len());
+        // JSON entries first so their symbol wins on collision.
+        for e in extra.into_iter().chain(mints.into_iter()) {
+            if seen.insert(e.mint.clone()) {
+                merged.push(e);
+            }
+        }
+        mints = merged;
+        tracing::info!(
+            symbol_map_path = %path.display(),
+            registry_size = mints.len(),
+            "merged caller-supplied symbol map with built-in xStock registry"
+        );
+    }
 
     let cfg = MarginfiReservesFetcherConfig::new(args.proxy_url.clone());
     let client = reqwest::Client::builder()

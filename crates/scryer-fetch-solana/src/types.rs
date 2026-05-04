@@ -75,7 +75,15 @@ pub struct ParsedTx {
 /// One Helius parsed-tx instruction. `data` is base58-encoded
 /// (Helius convention). Empty `accounts` is possible for instructions
 /// the upstream couldn't fully resolve.
-#[derive(Clone, Debug, Deserialize)]
+///
+/// `parsed` is populated only by the proxy-routed `getTransaction(jsonParsed)`
+/// path for IXs that the standard RPC returned in jsonParsed shape (System,
+/// SPL Token, ATA, etc.). Helius `parseTransactions` and the unparsed shape
+/// leave it `None`. Decoders that need to walk SPL Token Transfer amounts
+/// inside an outer Anchor IX (e.g. `marginfi_liquidations`) use this to
+/// pull `info.amount` / `info.tokenAmount.amount` plus source/destination
+/// without depending on outer-tx token-balance deltas.
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct HeliusInstruction {
     #[serde(default, rename = "programId")]
     pub program_id: String,
@@ -85,6 +93,44 @@ pub struct HeliusInstruction {
     pub data: String,
     #[serde(default, rename = "innerInstructions")]
     pub inner_instructions: Vec<HeliusInstruction>,
+    #[serde(default)]
+    pub parsed: Option<ParsedIxInfo>,
+}
+
+/// Parsed-IX payload from `getTransaction(encoding=jsonParsed)`. The
+/// shape matches the standard Solana RPC encoding for known programs:
+/// `{"type": "<kind>", "info": {...}}`. We keep `info` as a free-form
+/// `serde_json::Value` and expose typed accessors for the SPL Token
+/// Transfer / TransferChecked fields the decoders actually need.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ParsedIxInfo {
+    /// E.g. "transfer", "transferChecked", "createAccount".
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    /// Free-form info bag from jsonParsed. Use the helpers below for
+    /// SPL Token Transfer fields.
+    #[serde(default)]
+    pub info: serde_json::Value,
+}
+
+impl ParsedIxInfo {
+    /// `info.amount: String` for SPL Token Transfer. `None` if the
+    /// field is missing or unparseable as u64.
+    pub fn token_amount_u64(&self) -> Option<u64> {
+        self.info.get("amount")?.as_str()?.parse().ok()
+    }
+    /// `info.tokenAmount.amount: String` for `transferChecked`.
+    pub fn token_checked_amount_u64(&self) -> Option<u64> {
+        self.info.get("tokenAmount")?.get("amount")?.as_str()?.parse().ok()
+    }
+    /// SPL Token Transfer source token account.
+    pub fn source(&self) -> Option<&str> {
+        self.info.get("source")?.as_str()
+    }
+    /// SPL Token Transfer destination token account.
+    pub fn destination(&self) -> Option<&str> {
+        self.info.get("destination")?.as_str()
+    }
 }
 
 impl HeliusInstruction {

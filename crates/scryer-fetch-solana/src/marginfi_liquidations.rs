@@ -12,14 +12,29 @@
 //!   banks, both mints, pre/post f64 health, pre/post `LiquidationBalances`.
 //! - Outer-tx fields populate: signature, slot, block_time, fee_payer,
 //!   liquidator (== top-level signer == `tx.fee_payer`).
-//! - `asset_amount_seized` (native u64) comes from the liquidator's net
-//!   positive delta in `asset_mint` from `ParsedTx::account_data`
-//!   (synthesized from `meta.{pre,post}TokenBalances`).
-//! - `liquidator_fee_paid` and `insurance_fund_fee_paid` ship as `0`
-//!   in v1 — a follow-on phase populates them once `marginfi_reserve.v1`
-//!   (or the bank registry) carries `liquidity_vault_authority` /
-//!   `insurance_vault_authority` PDA pubkeys. See methodology
-//!   "MarginFi-v2" entry.
+//! - `asset_amount_seized` and `insurance_fund_fee_paid` come from a
+//!   per-IX walk of the liquidate IX's `inner_instructions` (Phase
+//!   114, item 47.1). For each SPL Token Transfer / TransferChecked
+//!   inner IX we sum amounts where `source == bank_liquidity_vault`
+//!   (account index 7) into `seized_native` and `destination ==
+//!   bank_insurance_vault` (account index 8) into `insurance_native`.
+//!   A single transfer that is both — out of liquidity vault, into
+//!   insurance vault — counts toward both totals. This captures the
+//!   insurance-fee fragment that lives inside the liquidate IX itself.
+//! - `liquidator_fee_paid` ships as `0` permanently (marginfi-v2 does
+//!   not emit a separate liquidator-fee transfer; see methodology
+//!   "MarginFi-v2" entry).
+//!
+//! Out-of-scope residual gap (item 47.1.b, deferred): in the dominant
+//! flashloan-arb pattern observed in production, the actual asset
+//! seizure transfer happens in the FOLLOWING `lending_account_withdraw`
+//! IX in the same outer tx (out of `bank_liquidity_vault`, into the
+//! liquidator's withdraw target ATA). Walking that withdraw-IX and
+//! attributing it back to the matching liquidate IX is a future scope.
+//! Today, `asset_amount_seized` may underreport the gross seizure for
+//! flashloan-wrapped liquidations; the fragment that flows out of the
+//! liquidity vault inside the liquidate IX itself (typically only the
+//! insurance share) is what populates.
 //!
 //! Multi-liquidate-per-tx assumption: the decoder emits one row per
 //! liquidate IX found, but uses the first `LendingAccountLiquidateEvent`
@@ -41,6 +56,20 @@ use crate::types::{HeliusInstruction, ParsedTx};
 
 /// MarginFi-v2 program ID, verified on-chain 2026-04-29.
 pub const MARGINFI_PROGRAM_ID: &str = "MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA";
+
+/// SPL Token program (legacy v1).
+pub const SPL_TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
+/// SPL Token-2022 program. Both programs use the same `transfer` /
+/// `transferChecked` jsonParsed shape, so the walker accepts either.
+pub const SPL_TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+
+/// IDL-pinned account positions in `lending_account_liquidate` (0-indexed).
+/// `bank_liquidity_vault` is the SPL token account holding the (liability)
+/// bank's pooled asset; `bank_insurance_vault` is the same bank's
+/// insurance fund token account.
+pub const BANK_LIQUIDITY_VAULT_IX: usize = 7;
+pub const BANK_INSURANCE_VAULT_IX: usize = 8;
 
 /// Anchor disc for `lending_account_liquidate` IX.
 pub const LIQUIDATE_IX_DISC: [u8; 8] = [214, 169, 151, 213, 251, 167, 86, 219];
@@ -267,6 +296,85 @@ fn is_marginfi_liquidate_ix(ix: &HeliusInstruction) -> bool {
     bytes.len() >= 8 && bytes[..8] == LIQUIDATE_IX_DISC
 }
 
+/// True if this IX is an SPL Token Program v1 or Token-2022 invocation.
+fn is_spl_token_program(program_id: &str) -> bool {
+    program_id == SPL_TOKEN_PROGRAM || program_id == SPL_TOKEN_2022_PROGRAM
+}
+
+/// Pull a u64 native-unit token amount out of a parsed SPL Token IX.
+/// Handles `transfer` (`info.amount: String`) and `transferChecked`
+/// (`info.tokenAmount.amount: String`). Returns `None` for any other
+/// IX kind (createAccount, closeAccount, etc.) or when the field is
+/// missing / unparseable.
+fn parsed_spl_transfer_amount(parsed: &crate::types::ParsedIxInfo) -> Option<u64> {
+    match parsed.kind.as_str() {
+        "transfer" => parsed.token_amount_u64(),
+        "transferChecked" => parsed.token_checked_amount_u64(),
+        _ => None,
+    }
+}
+
+/// Walk one `lending_account_liquidate` IX's inner SPL Token Transfer
+/// IXs and return `(seized_native, insurance_native)` summed in native
+/// units of the liability bank's mint.
+///
+/// `seized_native` accumulates transfers whose `source` matches
+/// `liquidate_ix.accounts[7]` (`bank_liquidity_vault`), `insurance_native`
+/// accumulates transfers whose `destination` matches
+/// `liquidate_ix.accounts[8]` (`bank_insurance_vault`). A single transfer
+/// out of liquidity-vault into insurance-vault (typical for the
+/// liquidate IX's insurance fee SPL Transfer) counts toward both totals
+/// — that is the desired behavior because the seized accounting includes
+/// the insurance fragment.
+///
+/// Defensively guards against truncated `accounts` lists (e.g. test
+/// fixtures or upstream parser quirks) — if either index is missing,
+/// that side stays at 0.
+///
+/// Returns `(0, 0)` when there are no inner IXs or no SPL Token
+/// Transfers within them.
+pub fn walk_liquidate_ix_transfers(liquidate_ix: &HeliusInstruction) -> (u64, u64) {
+    let liquidity_vault = liquidate_ix.accounts.get(BANK_LIQUIDITY_VAULT_IX);
+    let insurance_vault = liquidate_ix.accounts.get(BANK_INSURANCE_VAULT_IX);
+    if liquidity_vault.is_none() && insurance_vault.is_none() {
+        return (0, 0);
+    }
+
+    let mut seized: u128 = 0;
+    let mut insurance: u128 = 0;
+    for inner in &liquidate_ix.inner_instructions {
+        inner.walk(&mut |node| {
+            if !is_spl_token_program(&node.program_id) {
+                return;
+            }
+            let parsed = match &node.parsed {
+                Some(p) => p,
+                None => return,
+            };
+            let amount = match parsed_spl_transfer_amount(parsed) {
+                Some(a) => a,
+                None => return,
+            };
+            let source = parsed.source();
+            let destination = parsed.destination();
+            if let (Some(src), Some(lv)) = (source, liquidity_vault) {
+                if src == lv {
+                    seized = seized.saturating_add(amount as u128);
+                }
+            }
+            if let (Some(dst), Some(iv)) = (destination, insurance_vault) {
+                if dst == iv {
+                    insurance = insurance.saturating_add(amount as u128);
+                }
+            }
+        });
+    }
+    (
+        seized.try_into().unwrap_or(u64::MAX),
+        insurance.try_into().unwrap_or(u64::MAX),
+    )
+}
+
 fn count_liquidate_ixs(tx: &ParsedTx) -> u32 {
     let mut n = 0u32;
     for ix in &tx.instructions {
@@ -277,40 +385,6 @@ fn count_liquidate_ixs(tx: &ParsedTx) -> u32 {
         });
     }
     n
-}
-
-/// Sum the user's net positive delta in `asset_mint` across all of
-/// their token-balance changes for this tx. Returns 0 if no matching
-/// change is found, or if `user` is empty (caller short-circuits the
-/// lookup that way for unknown accounts). Used for both the liquidator's
-/// asset receipt and the insurance-vault-authority's asset receipt.
-fn asset_mint_gain_for_user(tx: &ParsedTx, user: &str, asset_mint: &str) -> u64 {
-    if user.is_empty() {
-        return 0;
-    }
-    let mut gain: i128 = 0;
-    for entry in &tx.account_data {
-        if entry.account != user {
-            continue;
-        }
-        for change in &entry.token_balance_changes {
-            if change.mint != asset_mint {
-                continue;
-            }
-            if let Some(raw) = &change.raw_token_amount {
-                if let Ok(delta) = raw.token_amount.parse::<i128>() {
-                    if delta > 0 {
-                        gain += delta;
-                    }
-                }
-            }
-        }
-    }
-    if gain < 0 {
-        0
-    } else {
-        gain.try_into().unwrap_or(u64::MAX)
-    }
 }
 
 /// Walk one parsed tx and emit zero-or-more `Liquidation` rows. The
@@ -362,13 +436,8 @@ pub fn extract_liquidations(
     let (asset_symbol, asset_decimals, asset_oracle) = bank_registry.lookup(&asset_bank);
     let (liab_symbol, liab_decimals, liab_oracle) = bank_registry.lookup(&liab_bank);
 
-    let asset_amount_seized = asset_mint_gain_for_user(tx, &tx.fee_payer, &asset_mint);
     let asset_amount_seized_decimal =
         event.pre_balances_liquidatee_asset - event.post_balances_liquidatee_asset;
-    let insurance_vault_authority =
-        bank_registry.lookup_insurance_vault_authority(&asset_bank);
-    let insurance_fund_fee_paid =
-        asset_mint_gain_for_user(tx, &insurance_vault_authority, &asset_mint);
 
     let mut out = Vec::with_capacity(liquidate_count as usize);
     let mut ix_index = 0u32;
@@ -377,6 +446,11 @@ pub fn extract_liquidations(
             if !is_marginfi_liquidate_ix(inner) {
                 return;
             }
+            // Per-IX inner SPL Token Transfer walk (Phase 114, item 47.1).
+            // Replaces the old wallet-delta heuristic which returned 0
+            // for the dominant flashloan-arb pattern.
+            let (asset_amount_seized, insurance_fund_fee_paid) =
+                walk_liquidate_ix_transfers(inner);
             out.push(Liquidation {
                 signature: tx.signature.clone(),
                 ix_index,
@@ -418,7 +492,6 @@ pub fn extract_liquidations(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AccountData, RawTokenAmount, TokenBalanceChange};
 
     fn meta() -> Meta {
         Meta::new(
@@ -493,6 +566,7 @@ mod tests {
             accounts: vec!["GROUP".into(); 10],
             data: bs58::encode(data).into_string(),
             inner_instructions: vec![],
+            parsed: None,
         }
     }
 
@@ -647,105 +721,183 @@ mod tests {
         assert_eq!(r.insurance_fund_fee_paid, 0);
     }
 
-    #[test]
-    fn populates_asset_amount_seized_from_liquidator_token_delta() {
-        let asset_mint_arr = pk(11);
-        let asset_mint = bs58::encode(&asset_mint_arr).into_string();
-        let log = synth_event_log(
-            pk(7),
-            pk(8),
-            pk(9),
-            pk(10),
-            asset_mint_arr,
-            pk(12),
-            pk(13),
-            0.92,
-            1.01,
-            1.5,
-            1.49,
-        );
-        let mut tx = make_tx("sig-gain", vec![liquidate_ix(1)], vec![log]);
-        tx.account_data = vec![AccountData {
-            account: tx.fee_payer.clone(),
-            token_balance_changes: vec![TokenBalanceChange {
-                user_account: tx.fee_payer.clone(),
-                token_account: "ATA_LIQUIDATOR".into(),
-                mint: asset_mint.clone(),
-                raw_token_amount: Some(RawTokenAmount {
-                    token_amount: "12345".into(),
-                    decimals: 0,
+    /// Build a parsed SPL Token Program v1 `transfer` IX.
+    fn spl_transfer_ix(source: &str, destination: &str, amount: u64) -> HeliusInstruction {
+        HeliusInstruction {
+            program_id: SPL_TOKEN_PROGRAM.to_string(),
+            accounts: vec![source.into(), destination.into(), "AUTH".into()],
+            data: String::new(),
+            inner_instructions: vec![],
+            parsed: Some(crate::types::ParsedIxInfo {
+                kind: "transfer".to_string(),
+                info: serde_json::json!({
+                    "amount": amount.to_string(),
+                    "source": source,
+                    "destination": destination,
+                    "authority": "AUTH",
                 }),
-            }],
-        }];
-        let rows = extract_liquidations(&tx, &BankRegistry::new(), &meta());
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].asset_amount_seized, 12_345);
+            }),
+        }
+    }
+
+    /// Build a parsed SPL Token-2022 `transferChecked` IX.
+    fn spl_transfer_checked_ix(
+        source: &str,
+        destination: &str,
+        amount: u64,
+        decimals: u8,
+    ) -> HeliusInstruction {
+        HeliusInstruction {
+            program_id: SPL_TOKEN_2022_PROGRAM.to_string(),
+            accounts: vec![
+                source.into(),
+                "MINT".into(),
+                destination.into(),
+                "AUTH".into(),
+            ],
+            data: String::new(),
+            inner_instructions: vec![],
+            parsed: Some(crate::types::ParsedIxInfo {
+                kind: "transferChecked".to_string(),
+                info: serde_json::json!({
+                    "tokenAmount": {"amount": amount.to_string(), "decimals": decimals},
+                    "source": source,
+                    "destination": destination,
+                    "authority": "AUTH",
+                    "mint": "MINT",
+                }),
+            }),
+        }
+    }
+
+    /// Build a 10-account `lending_account_liquidate` IX whose
+    /// `accounts[7]` and `accounts[8]` are the requested vault
+    /// pubkeys, and whose `inner_instructions` are the supplied list
+    /// (test harness for the inner-IX SPL Transfer walker).
+    fn liquidate_ix_with_vaults(
+        liquidity_vault: &str,
+        insurance_vault: &str,
+        inner: Vec<HeliusInstruction>,
+    ) -> HeliusInstruction {
+        let mut data = Vec::new();
+        data.extend_from_slice(&LIQUIDATE_IX_DISC);
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.push(0);
+        data.push(0);
+        let mut accounts: Vec<String> = (0..10).map(|i| format!("ACCT_{i}")).collect();
+        accounts[BANK_LIQUIDITY_VAULT_IX] = liquidity_vault.to_string();
+        accounts[BANK_INSURANCE_VAULT_IX] = insurance_vault.to_string();
+        HeliusInstruction {
+            program_id: MARGINFI_PROGRAM_ID.to_string(),
+            accounts,
+            data: bs58::encode(data).into_string(),
+            inner_instructions: inner,
+            parsed: None,
+        }
     }
 
     #[test]
-    fn populates_insurance_fund_fee_from_authority_token_delta() {
-        let asset_bank_arr = pk(10);
-        let asset_mint_arr = pk(11);
-        let asset_bank = bs58::encode(&asset_bank_arr).into_string();
-        let asset_mint = bs58::encode(&asset_mint_arr).into_string();
+    fn populates_native_amounts_from_inner_spl_transfers() {
+        // Synthesize the dominant flashloan-arb shape: the liquidate IX
+        // emits ONE inner SPL Token Transfer (out of bank_liquidity_vault,
+        // into bank_insurance_vault — the insurance fee fragment) and
+        // ONE inner SPL Token Transfer (out of liquidity vault to a
+        // separate liquidator withdraw target). Both transfers count
+        // toward `seized_native`; only the insurance-vault one counts
+        // toward `insurance_native`.
         let log = synth_event_log(
-            pk(7),
-            pk(8),
-            pk(9),
-            asset_bank_arr,
-            asset_mint_arr,
-            pk(12),
-            pk(13),
-            0.92,
-            1.01,
-            1.5,
-            1.49,
+            pk(7), pk(8), pk(9), pk(10), pk(11), pk(12), pk(13),
+            0.92, 1.01, 1.5, 1.49,
         );
-        let insurance_vault_authority = "INSURANCE_AUTH_PUBKEY".to_string();
-        let mut registry = BankRegistry::new();
-        registry.insert(
-            asset_bank.clone(),
-            BankInfo {
-                mint: asset_mint.clone(),
-                mint_decimals: 8,
-                mint_symbol: "SPYx".to_string(),
-                oracle: "ORACLE_ASSET".to_string(),
-                insurance_vault_authority: insurance_vault_authority.clone(),
-            },
-        );
-        let mut tx = make_tx("sig-insurance", vec![liquidate_ix(1)], vec![log]);
-        tx.account_data = vec![
-            AccountData {
-                account: tx.fee_payer.clone(),
-                token_balance_changes: vec![TokenBalanceChange {
-                    user_account: tx.fee_payer.clone(),
-                    token_account: "ATA_LIQ".into(),
-                    mint: asset_mint.clone(),
-                    raw_token_amount: Some(RawTokenAmount {
-                        token_amount: "100000".into(),
-                        decimals: 0,
-                    }),
-                }],
-            },
-            AccountData {
-                account: insurance_vault_authority.clone(),
-                token_balance_changes: vec![TokenBalanceChange {
-                    user_account: insurance_vault_authority.clone(),
-                    token_account: "ATA_INSURANCE".into(),
-                    mint: asset_mint.clone(),
-                    raw_token_amount: Some(RawTokenAmount {
-                        token_amount: "2500".into(),
-                        decimals: 0,
-                    }),
-                }],
-            },
+        let liquidity_vault = "BANK_LIQUIDITY_VAULT";
+        let insurance_vault = "BANK_INSURANCE_VAULT";
+        let liquidator_target = "LIQUIDATOR_WITHDRAW_ATA";
+        let inner = vec![
+            spl_transfer_ix(liquidity_vault, insurance_vault, 2_500),
+            spl_transfer_ix(liquidity_vault, liquidator_target, 100_000),
         ];
-        let rows = extract_liquidations(&tx, &registry, &meta());
+        let ix = liquidate_ix_with_vaults(liquidity_vault, insurance_vault, inner);
+        let tx = make_tx("sig-inner", vec![ix], vec![log]);
+        let rows = extract_liquidations(&tx, &BankRegistry::new(), &meta());
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].asset_amount_seized, 100_000);
+        // Both transfers have source=liquidity_vault → both contribute.
+        assert_eq!(rows[0].asset_amount_seized, 102_500);
+        // Only the first has destination=insurance_vault.
         assert_eq!(rows[0].insurance_fund_fee_paid, 2_500);
         // liquidator_fee_paid stays 0 — not separately emitted by marginfi-v2.
         assert_eq!(rows[0].liquidator_fee_paid, 0);
+    }
+
+    #[test]
+    fn handles_token_transfer_checked() {
+        let log = synth_event_log(
+            pk(7), pk(8), pk(9), pk(10), pk(11), pk(12), pk(13),
+            0.92, 1.01, 1.5, 1.49,
+        );
+        let liquidity_vault = "LIQ_VAULT";
+        let insurance_vault = "INS_VAULT";
+        let inner = vec![
+            spl_transfer_checked_ix(liquidity_vault, insurance_vault, 750, 6),
+        ];
+        let ix = liquidate_ix_with_vaults(liquidity_vault, insurance_vault, inner);
+        let tx = make_tx("sig-checked", vec![ix], vec![log]);
+        let rows = extract_liquidations(&tx, &BankRegistry::new(), &meta());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].asset_amount_seized, 750);
+        assert_eq!(rows[0].insurance_fund_fee_paid, 750);
+    }
+
+    #[test]
+    fn truncated_ix_accounts_dont_panic() {
+        // Liquidate IX with only 5 accounts (indices 7 and 8 missing)
+        // — walker must defensively skip vault matching and return zeros
+        // instead of panicking on out-of-bounds.
+        let log = synth_event_log(
+            pk(7), pk(8), pk(9), pk(10), pk(11), pk(12), pk(13),
+            0.92, 1.01, 1.5, 1.49,
+        );
+        let mut data = Vec::new();
+        data.extend_from_slice(&LIQUIDATE_IX_DISC);
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.push(0);
+        data.push(0);
+        let truncated = HeliusInstruction {
+            program_id: MARGINFI_PROGRAM_ID.to_string(),
+            accounts: vec![
+                "A0".into(), "A1".into(), "A2".into(), "A3".into(), "A4".into(),
+            ],
+            data: bs58::encode(data).into_string(),
+            // Even with an "innocuous" inner SPL Transfer, the truncated
+            // account list means we can't match source/destination, so
+            // both totals must stay 0.
+            inner_instructions: vec![spl_transfer_ix("X", "Y", 999)],
+            parsed: None,
+        };
+        let tx = make_tx("sig-truncated", vec![truncated], vec![log]);
+        let rows = extract_liquidations(&tx, &BankRegistry::new(), &meta());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].asset_amount_seized, 0);
+        assert_eq!(rows[0].insurance_fund_fee_paid, 0);
+    }
+
+    #[test]
+    fn ignores_inner_transfers_outside_target_vaults() {
+        // SPL Token Transfers between unrelated accounts inside the
+        // liquidate IX (e.g. an ATA-init init-followed-by-transfer
+        // pattern) must not contribute to either total.
+        let log = synth_event_log(
+            pk(7), pk(8), pk(9), pk(10), pk(11), pk(12), pk(13),
+            0.92, 1.01, 1.5, 1.49,
+        );
+        let inner = vec![
+            spl_transfer_ix("OTHER_SRC", "OTHER_DST", 50_000),
+        ];
+        let ix = liquidate_ix_with_vaults("LIQ_VAULT", "INS_VAULT", inner);
+        let tx = make_tx("sig-noise", vec![ix], vec![log]);
+        let rows = extract_liquidations(&tx, &BankRegistry::new(), &meta());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].asset_amount_seized, 0);
+        assert_eq!(rows[0].insurance_fund_fee_paid, 0);
     }
 
     #[test]

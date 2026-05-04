@@ -29,7 +29,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::FetchError;
-use crate::types::{HeliusInstruction, ParsedTx};
+use crate::types::{HeliusInstruction, ParsedIxInfo, ParsedTx};
 
 #[derive(Clone, Debug)]
 pub struct GetTxConfig {
@@ -158,6 +158,14 @@ struct RpcInstruction {
     accounts: Vec<String>,
     #[serde(default)]
     data: String,
+    /// `{"type": "...", "info": {...}}` block emitted by jsonParsed for
+    /// programs the RPC node knows how to parse (System, SPL Token,
+    /// ATA, etc.). For SOME programs the RPC emits a non-object value
+    /// here (e.g. Vote programs sometimes get `"parsed": "<string>"`),
+    /// so we deserialize permissively into a `serde_json::Value` and
+    /// reshape into `ParsedIxInfo` only when it's a struct.
+    #[serde(default)]
+    parsed: Option<serde_json::Value>,
 }
 
 /// Fetch `Vec<ParsedTx>` from the proxy by issuing per-signature
@@ -402,12 +410,29 @@ fn synthesize_account_data(
 }
 
 fn convert_ix(raw: RpcInstruction) -> HeliusInstruction {
+    let parsed = raw.parsed.and_then(reshape_parsed);
     HeliusInstruction {
         program_id: raw.program_id,
         accounts: raw.accounts,
         data: raw.data,
         inner_instructions: vec![],
+        parsed,
     }
+}
+
+/// Reshape a permissive `serde_json::Value` from `RpcInstruction.parsed`
+/// into `ParsedIxInfo`. Returns `None` for non-object shapes (some
+/// programs emit `"parsed": "<string>"`). Tolerates missing `type` /
+/// `info` fields by defaulting them.
+fn reshape_parsed(v: serde_json::Value) -> Option<ParsedIxInfo> {
+    let obj = v.as_object()?;
+    let kind = obj
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let info = obj.get("info").cloned().unwrap_or(serde_json::Value::Null);
+    Some(ParsedIxInfo { kind, info })
 }
 
 #[cfg(test)]

@@ -223,6 +223,7 @@ mod tests {
             ],
             data: liquidation_ix_data(LIQUIDATE_V1_DISC, 1_000_000, 950_000, 0),
             inner_instructions: vec![],
+            parsed: None,
         }
     }
 
@@ -318,6 +319,7 @@ mod tests {
             accounts: vec![],
             data: bs58::encode([0u8; 16]).into_string(),
             inner_instructions: vec![klend_v1_ix()],
+            parsed: None,
         };
         let tx = make_tx("sigG", vec![outer]);
         let rows = extract_liquidations(&tx, &MarketFilter::Any, &ReserveSymbolMap::new(), &meta());

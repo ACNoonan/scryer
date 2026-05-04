@@ -191,6 +191,7 @@ mod tests {
             ],
             data: liquidate_ix_data(LIQUIDATE_DISC, 1_500_000, 42_u128, false),
             inner_instructions: vec![],
+            parsed: None,
         }
     }
 
@@ -272,6 +273,7 @@ mod tests {
             accounts: vec![],
             data: bs58::encode([0u8; 16]).into_string(),
             inner_instructions: vec![fluid_liquidate_ix()],
+            parsed: None,
         };
         let tx = make_tx("sigG", vec![outer]);
         let rows = extract_liquidations(&tx, &CollateralFilter::Any, &ReserveSymbolMap::new(), &meta());
