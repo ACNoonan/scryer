@@ -815,10 +815,13 @@ pub fn read_marginfi_bank_registry(
         });
     }
 
-    // Body offsets are post-Anchor-disc; raw_account_b64 includes
-    // the 8-byte disc, so absolute byte indices are 8 + body offset.
-    const RAW_LIQUIDITY_VAULT_AUTHORITY_BUMP: usize = 8 + 145;
-    const RAW_INSURANCE_VAULT_AUTHORITY_BUMP: usize = 8 + 179;
+    // Offsets are absolute (from start of account, including the
+    // 8-byte Anchor disc) — see the layout block in
+    // `crates/scryer-schema/src/marginfi_reserve.rs` whose first
+    // entry is `8  mint: pubkey`. raw_account_b64 holds the full
+    // account, so we index directly.
+    const RAW_LIQUIDITY_VAULT_AUTHORITY_BUMP: usize = 145;
+    const RAW_INSURANCE_VAULT_AUTHORITY_BUMP: usize = 179;
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine;
 

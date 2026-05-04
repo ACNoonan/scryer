@@ -231,9 +231,9 @@ resolves.
 Per-event decode pulls from three sources:
 1. The Anchor `LendingAccountLiquidateEvent` (disc `[166,160,249,154,183,39,23,242]`), decoded from `meta.logMessages` `Program data: <base64>` lines, for liquidatee account/authority, both banks, both mints, pre/post f64 health, and pre/post `LiquidationBalances` (four f64 balances per side).
 2. The outer transaction for `signature`, `slot`, `block_time`, `fee_payer`, and `liquidator` (top-level signer).
-3. Outer-tx token-balance changes (`meta.{pre,post}TokenBalances` synthesized via `ParsedTx::account_data`) for `asset_amount_seized` (native u64 = liquidator's net positive delta in `asset_mint`) and `insurance_fund_fee_paid` (native u64 = matching positive delta on the bank's `insurance_vault_authority` PDA, derived in-process from the `insurance_vault_authority_bump` byte stored in `marginfi_reserve.v1::raw_account_b64` at body offset 179 via `Pubkey::create_program_address(&[b"insurance_vault_auth", bank, &[bump]], &MARGINFI_PROGRAM_ID)`).
+3. Outer-tx token-balance changes (`meta.{pre,post}TokenBalances` synthesized via `ParsedTx::account_data`) for `asset_amount_seized` (native u64 = liquidator's net positive delta in `asset_mint`) and `insurance_fund_fee_paid` (native u64 = matching positive delta on the bank's `insurance_vault_authority` PDA, derived in-process from the `insurance_vault_authority_bump` byte stored in `marginfi_reserve.v1::raw_account_b64` at absolute account offset 179 via `Pubkey::create_program_address(&[b"insurance_vault_auth", bank, &[bump]], &MARGINFI_PROGRAM_ID)`). 100% PDA derivation against the live 422-bank canonical snapshot.
 
-`liquidator_fee_paid` is permanently reserved at `0`: MarginFi-v2's `lending_account_liquidate` does not emit a separate liquidator-fee SPL transfer — the liquidator's incentive is implicit in the asset/liability ratio. Consumers compute the effective bonus post-hoc from the oracle-priced delta. `insurance_fund_fee_paid` falls back to `0` when the bank's `insurance_vault_authority` PDA cannot be derived (which currently affects ~48% of live banks; investigation pending).
+`liquidator_fee_paid` is permanently reserved at `0`: MarginFi-v2's `lending_account_liquidate` does not emit a separate liquidator-fee SPL transfer — the liquidator's incentive is implicit in the asset/liability ratio. Consumers compute the effective bonus post-hoc from the oracle-priced delta.
 
 Oracle prices are *not* in-row; `asset_oracle` and `liab_oracle` pubkeys are carried as join keys for `oracle_context.v1` cross-source enrichment, resolved from the most recent `marginfi_reserve.v1::Bank.config.oracle_keys[0]` snapshot for each bank.
 
@@ -259,7 +259,7 @@ liab_oracle                     string  // same lookup for liab_bank
 asset_amount_seized             u64     // native units; liquidator's net positive delta in asset_mint from outer-tx {pre,post}TokenBalances
 asset_amount_seized_decimal     f64     // human-readable; pre_balances.liquidatee_asset_balance − post_balances.liquidatee_asset_balance from the event
 liquidator_fee_paid             u64     // native units; permanently 0 — marginfi-v2 does not emit a separate liquidator-fee transfer
-insurance_fund_fee_paid         u64     // native units; positive delta on the bank's insurance_vault_authority PDA. 0 when the bank's authority PDA is unmapped in the registry
+insurance_fund_fee_paid         u64     // native units; positive delta on the bank's insurance_vault_authority PDA
 fee_payer                       string  // outer-tx fee payer (Jito-bundle OEV join key)
 pre_health                      f64     // event.liquidatee_pre_health; sub-1.0 = liquidatable
 post_health                     f64     // event.liquidatee_post_health; expected ~1.0 after partial liquidation
