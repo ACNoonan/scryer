@@ -1,0 +1,42 @@
+# Forward-poll for `backed/corp_actions/v1` from Backed Finance's
+# corp-actions GitHub commit feed (Atom). Operator-fed via
+# `scry rss backed` until 2026-05-10 — at which point the on-disk
+# surface had gone 14 days stale (last fetch 2026-04-26), in line
+# with the soothsayer F3 ask (paper4_oracle_conditioned_amm
+# intraweek-overnight panel — needs corp-action events forward-current
+# with no >24h lag so the regime classifier picks up new xStock
+# events promptly).
+#
+# Cadence: hourly. Backed publishes corp-actions for upcoming
+# events (splits, dividends, listings, delistings) via GitHub
+# commits; commit cadence is sparse (~handful per week) but each
+# event matters, so the staleness window should be measured in
+# hours, not days. The Atom feed is small (~few KB), and dedup
+# is on `(repo, commit_sha)` so re-pulls within the hour are free.
+
+id = "backed-corp-actions"
+description = "Backed Finance corp-actions GitHub commit feed forward-poll, hourly. Single-tick mode; idempotent dedup on (repo, commit_sha)."
+schema_ids = ["backed.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "rss", "backed",
+    "--source", "github:atom:runner",
+]
+
+[criticality]
+tier = "tier-1"
+owner = "@adam"
+consumer_impact = "Source of truth for upcoming xStock corp-actions (splits, dividends, listings, delistings). Stale = soothsayer regime classifier and panel construction can miss a fresh corp-action; Paper-4 intraweek-overnight band publication can publish through an event window without flagging it."
+
+[freshness]
+# 4× cadence — alert if no fresh fire inside 4 hours.
+sla_secs = 14400
+
+[budget]
+# 1 Atom GET per fire. Loose cap.
+max_requests_per_run = 5
+
+[workflow]
+sensor = "interval(3600s)"

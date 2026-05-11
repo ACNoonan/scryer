@@ -10,6 +10,7 @@ members = [
     "crates/scryer-fetch-dexagg",
     "crates/scryer-fetch-redstone",
     "crates/scryer-fetch-pyth",
+    "crates/scryer-fetch-pyth-lazer",
     "crates/scryer-fetch-pyth-poster",
     "crates/scryer-fetch-jito",
     "crates/scryer-fetch-equities",

@@ -1,0 +1,84 @@
+# Pyth Lazer (formerly Pyth Pro) WebSocket subscriber. Cycles every
+# 60s; each cycle subscribes to the 26-feed default panel (3 crypto
+# control + 10 equity underliers + 13 stable xStock `*X/USD`) at
+# `fixed_rate@200ms` for 55 wall-clock seconds, then exits cleanly.
+# Writes one row per (price_feed_id, publish_timestamp_us) tuple to
+# `oracle.pyth_lazer.tape.v2`, partitioned by `feed_id`.
+#
+# Methodology lock: `methodology_log.md` "Pyth Lazer ingestion —
+# 2026-05-10" + correction "Pyth Lazer xStock feeds live under
+# `Crypto.<TICKER>X/USD`" (2026-05-11). Wishlist row: "Pyth Lazer
+# fetcher" (added 2026-05-10).
+#
+# **Free tier confirmation (2026-05-10 first-fire probe).** All 13
+# initially-subscribed feeds (3 crypto + 10 equity) returned
+# successfully on the free Pyth Terminal API key — no 403, no
+# rate-limiting, steady ~5 updates/sec/feed at fixed_rate@200ms with
+# signed Solana payloads present on every row. Critically, equity
+# feeds publish live prices during the Blue Ocean ATS overnight
+# window (8 PM – 4 AM ET Sun-Thu) despite SPY's `pythdata.app` page
+# advertising "Mon-Fri 09:30 – 16:00" — Blue Ocean's overnight
+# pricing flows into the public feed-id space under the free tier.
+# This was soothsayer's open question §6.1 / N1; the answer is yes,
+# free.
+#
+# **xStock direct-token expansion (2026-05-11).** Panel doubled from
+# 13 to 26 feeds after the 2026-05-10 catalog scan was found to have
+# false-negatived 28 XSTOCK-described feeds living under
+# `Crypto.<TICKER>X/USD` (`asset_type=crypto`) — the prior scan
+# looked for `Token.SPYx/USD` / `xStock.*` / lowercase `SPYx` under
+# `asset_type=equity`. 13 stable `*X/USD` feeds added: AAPLX, COINX,
+# CRCLX, GOOGLX, HOODX, MCDX, METAX, MSTRX, NVDAX, QQQX, SPYX
+# (= feed-id 1843), TSLAX, NFLXX. First-fire verification post-expand
+# is the trigger for closing the Data-Pending Verification row.
+#
+# Saturday + Sunday-pre-Blue-Ocean (the canonical xStock weekend gap)
+# is still uncovered; Lazer publishes stale-hold prices then. Confirm
+# this empirically by querying for variance across the Sat 00:00Z –
+# Sun 22:00Z window once enough forward-tape accrues.
+#
+# Cadence trade-off: 200ms is steady-cadence — 50ms floods, real_time
+# is unthrottled and harder to budget. At fixed_rate@200ms = 5
+# rows/sec/feed × 55s/cycle ≈ 275 rows/feed/cycle. Across the
+# 26-feed panel that is ~7k rows/cycle and ~10M rows/day total
+# (~395k rows/feed/day with one daily-partition file per feed per
+# UTC day). Manifest's [budget] caps reflect this.
+#
+# `--source pyth-lazer:ws:runner` distinguishes runner-driven rows
+# from any operator-driven `--source pyth-lazer:ws:probe` validation
+# pulls.
+
+id = "pyth-lazer-tape"
+description = "Pyth Lazer (formerly Pyth Pro) free-tier WebSocket subscriber, 26-feed panel (BTC/ETH/SOL + 10 US equity underliers + 13 stable xStock `Crypto.*X/USD`), every 60s for 55s of fixed_rate@200ms. Captures parsed price tuples + signed Solana payloads for on-chain verification replay."
+schema_ids = ["oracle.pyth_lazer.tape.v2"]
+
+[fetch]
+command = "scry"
+args = [
+    "pyth-lazer", "subscribe",
+    "--duration-secs", "55",
+    "--channel", "fixed_rate@200ms",
+    "--num-connections", "2",
+    "--source", "pyth-lazer:ws:runner",
+]
+
+[criticality]
+tier = "tier-1"
+owner = "@adam"
+consumer_impact = "Pyth Lazer comparator tape — what tokenized-equity AMM consumers see when they verify a Lazer signed payload on-chain. Stale = soothsayer cannot benchmark its signal against the AMM's actual oracle input. Also load-bearing for the Blue Ocean overnight equity coverage observed during 8 PM – 4 AM ET Sun-Thu (free-tier finding 2026-05-10)."
+
+[freshness]
+# 5x cadence — alert if no fresh row in 300s. Lazer publishes
+# steadily (no upstream-empty-bucket pattern), so a real freshness
+# breach signals an upstream outage or a token rotation.
+sla_secs = 300
+
+[budget]
+# One WebSocket subscription per fire (26 SubscribeRequests over a
+# single client — one per symbol so the response side can recover
+# the human-readable symbol from subscription_id without a catalog
+# lookup). Cap leaves headroom for reconnect retries.
+max_requests_per_run = 100
+
+[workflow]
+sensor = "interval(60s)"

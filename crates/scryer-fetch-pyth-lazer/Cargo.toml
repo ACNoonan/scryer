@@ -1,0 +1,28 @@
+[package]
+name = "scryer-fetch-pyth-lazer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pyth Lazer (formerly Pyth Pro) WebSocket subscriber — connects to wss://pyth-lazer-{0,1,2}.dourolabs.app/v1/stream with a Bearer token, subscribes to a configured feed-id set, decodes parsed updates and signed Solana payloads, and emits oracle.pyth_lazer.tape.v2 rows."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+scryer-schema = { path = "../scryer-schema" }
+pyth-lazer-client = "25"
+pyth-lazer-protocol = "0.40"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = "1"
+base64 = "0.22"
+url = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

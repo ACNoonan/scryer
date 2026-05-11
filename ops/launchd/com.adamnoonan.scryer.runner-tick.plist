@@ -61,6 +61,13 @@
         <string>--skip</string>
         <string>v5-tape</string>
         <!--
+            Pyth Lazer WS subscriber (added 2026-05-10) —
+            55s wall-clock per fire; per-manifest plist
+            `com.adamnoonan.scryer.runner-pyth-lazer-tape` owns it.
+        -->
+        <string>--skip</string>
+        <string>pyth-lazer-tape</string>
+        <!--
             Phase-A (remain on this plist): manifests not listed above
             are evaluated each tick — including yahoo-single-stock-iv
             (wishlist 52, daily IV via interval 86400s). Ensure scryer

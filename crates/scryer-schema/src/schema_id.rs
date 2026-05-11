@@ -233,6 +233,7 @@ pub const KNOWN_V2_SCHEMAS: &[SchemaId] = &[
     SchemaId::new_static(Domain::Internal, "scryer", "dead_letter", 2),
     SchemaId::new_static(Domain::Volatility, "yahoo", "single_stock_iv", 2),
     SchemaId::new_static(Domain::Oracle, "soothsayer_v6", "band_tape", 2),
+    SchemaId::new_static(Domain::Oracle, "pyth_lazer", "tape", 2),
 ];
 
 #[cfg(test)]

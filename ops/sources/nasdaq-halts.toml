@@ -1,0 +1,49 @@
+# Forward-poll for `nasdaq_halts.v1` from Nasdaq Trader's trade-halts
+# RSS feed. Operator-fed via `scry rss nasdaq-halts` until 2026-05-10
+# — at which point the on-disk surface had gone 14 days stale (last
+# fetch 2026-04-26), silently invalidating the soft dependency from
+# `nasdaq-halts-intraday` and from the soothsayer F3 ask
+# (paper4_oracle_conditioned_amm intraweek-overnight panel — needs
+# halt events forward-current with no >24h lag).
+#
+# Cadence: hourly. The RSS feed updates as halts are issued
+# intra-session, but a 60s cadence is wasteful — the feed is small,
+# halts on Soothsayer-universe symbols are rare (zero in the past
+# 30 days as of 2026-05-04 per `nasdaq-halts-intraday.toml` comments),
+# and `(symbol, halt_date, reason_code)` dedups cleanly so a missed
+# fire self-heals on the next one. Hourly gives ~24× margin under the
+# halt-arrival rate during US market hours and is plenty fresh for
+# the downstream `nasdaq-halts-intraday` dependency.
+#
+# Cadence trade-off note: a finer cadence (e.g. 15min during US
+# market hours, 4-hourly off-hours) would be more efficient but the
+# `interval(secs)` sensor today only supports a single fixed cadence
+# — `daily(HH:MMZ)` is too coarse for an intra-session feed. Hourly
+# is the simplest right answer.
+
+id = "nasdaq-halts"
+description = "Nasdaq Trader trade-halts RSS feed forward-poll, hourly. Single-tick mode; idempotent dedup on (symbol, halt_date, reason_code)."
+schema_ids = ["nasdaq_halts.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "rss", "nasdaq-halts",
+    "--source", "nasdaq:rss:runner",
+]
+
+[criticality]
+tier = "tier-1"
+owner = "@adam"
+consumer_impact = "Source of truth for NASDAQ trade-halt events. Stale = nasdaq-halts-intraday's 7d Yahoo backfill horizon misses halts that happen during the staleness window; soothsayer's W6 oracle-band-coverage analysis cannot resolve halt context for affected windows."
+
+[freshness]
+# 4× cadence — alert if no fresh fire inside 4 hours.
+sla_secs = 14400
+
+[budget]
+# 1 RSS GET per fire. Loose cap.
+max_requests_per_run = 5
+
+[workflow]
+sensor = "interval(3600s)"

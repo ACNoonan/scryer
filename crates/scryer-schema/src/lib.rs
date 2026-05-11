@@ -21,6 +21,7 @@
 
 pub mod backed;
 pub mod backed_nav_strikes;
+pub mod bo_intraday_1m;
 pub mod cboe_indices;
 pub mod cex_perp_funding_multi;
 pub mod cex_stock_perp_ohlcv;
@@ -63,6 +64,7 @@ pub mod meta;
 pub mod nasdaq_halts;
 pub mod nasdaq_halts_intraday;
 pub mod oracle_context;
+pub mod oracle_pyth_lazer_tape;
 pub mod oracle_soothsayer_v6_band_tape;
 pub mod pool_snapshot;
 pub mod pyth;
@@ -139,6 +141,7 @@ pub const KNOWN_V1_SCHEMAS: &[&str] = &[
     "geckoterminal.v1",
     "geckoterminal_ohlcv.v1",
     "cme_intraday_1m.v1",
+    "bo_intraday_1m.v1",
     "cboe_indices.v1",
     "yahoo.v1",
     "yahoo_corp_actions.v1",

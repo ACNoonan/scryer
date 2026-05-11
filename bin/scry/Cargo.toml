@@ -16,6 +16,7 @@ scryer-store = { path = "../../crates/scryer-store" }
 scryer-fetch-solana = { path = "../../crates/scryer-fetch-solana" }
 scryer-fetch-redstone = { path = "../../crates/scryer-fetch-redstone" }
 scryer-fetch-pyth = { path = "../../crates/scryer-fetch-pyth" }
+scryer-fetch-pyth-lazer = { path = "../../crates/scryer-fetch-pyth-lazer" }
 scryer-fetch-pyth-poster = { path = "../../crates/scryer-fetch-pyth-poster" }
 solana-sdk = "2"
 solana-client = "2"

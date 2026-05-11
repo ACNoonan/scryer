@@ -14,8 +14,10 @@ use anyhow::{Context, Result};
 use chrono::{NaiveDate, TimeZone, Utc};
 use clap::Parser;
 use scryer_fetch_databento::{
-    fetch_equities_daily, fetch_ohlcv_1m, symbol_to_databento_continuous, PollConfig,
+    fetch_equities_daily, fetch_ocea_ohlcv_1m, fetch_ohlcv_1m, symbol_to_databento_continuous,
+    PollConfig,
 };
+use scryer_schema::bo_intraday_1m::v1 as bo_schema;
 use scryer_schema::cme_intraday_1m::v1 as schema;
 use scryer_schema::yahoo::v1 as yahoo_schema;
 use scryer_schema::Meta;
@@ -301,6 +303,157 @@ pub async fn run_equities_daily(args: EquitiesDailyArgs) -> Result<()> {
     }
     println!(
         "databento equities-daily: rows_added={} rows_deduped={} partitions_written={} total_records={} symbols_failed={}",
+        total_added, total_deduped, total_partitions, total_records, errors.len()
+    );
+    Ok(())
+}
+
+// ============================================================
+// scry databento ocea-1m  —  Blue Ocean ATS overnight 1m bars
+// ============================================================
+
+#[derive(Parser, Debug)]
+pub struct OceaIntradayArgs {
+    /// Comma-separated NMS tickers. Defaults to the 10-symbol
+    /// Soothsayer panel — same set Pyth Lazer's free tier serves
+    /// for the live overnight feed.
+    #[arg(long, value_delimiter = ',')]
+    symbols: Vec<String>,
+    /// Window start as `YYYY-MM-DD` UTC (inclusive day boundary).
+    /// When unset, derives from `--lookback-days` before `--end`.
+    #[arg(long, default_value = "")]
+    start: String,
+    /// Window end as `YYYY-MM-DD` UTC (exclusive day boundary).
+    /// When unset, defaults to `now - --end-safety-margin-secs`.
+    #[arg(long, default_value = "")]
+    end: String,
+    /// Rolling-window lookback in days when `--start`/`--end` are
+    /// omitted. Default 2 lets a daily fire re-cover yesterday's
+    /// overnight session for dedup-safe self-healing.
+    #[arg(long, default_value_t = 2)]
+    lookback_days: i64,
+    /// Safety margin (seconds) subtracted from `now` when computing
+    /// the default `end`. Databento's published-data horizon for
+    /// OCEA.MEMOIR is ~5-10 min for the realtime tier; the operator's
+    /// account may be on the delayed-access tier (~8h) — set this to
+    /// 36000 in that case (mirrors the cme-intraday-1m manifest tune).
+    #[arg(long, default_value_t = 600)]
+    end_safety_margin_secs: i64,
+    /// Databento API key. Defaults to `DATABENTO_API_KEY` env var.
+    #[arg(long, env = "DATABENTO_API_KEY")]
+    api_key: String,
+    #[arg(long, default_value = "databento:ocea-memoir")]
+    source: String,
+    #[arg(long, default_value_t = 120)]
+    request_timeout_secs: u64,
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
+    dataset: PathBuf,
+    /// Venue. Default `blue_ocean` keeps OCEA bars separate from CME
+    /// futures (`cme`) and Stooq/Databento daily bars (`yahoo` /
+    /// `databento`).
+    #[arg(long, default_value = venue::BLUE_OCEAN)]
+    venue: String,
+}
+
+const DEFAULT_OCEA_SYMBOLS: &[&str] = &[
+    "SPY", "QQQ", "AAPL", "GOOGL", "NVDA", "TSLA", "MSTR", "HOOD", "GLD", "TLT",
+];
+
+pub async fn run_ocea_intraday(args: OceaIntradayArgs) -> Result<()> {
+    if args.api_key.is_empty() {
+        anyhow::bail!(
+            "Databento API key required; pass --api-key or set DATABENTO_API_KEY env var"
+        );
+    }
+    if args.lookback_days <= 0 {
+        anyhow::bail!("--lookback-days must be positive; got {}", args.lookback_days);
+    }
+    let cfg = PollConfig {
+        source_label: args.source.clone(),
+        request_timeout: Duration::from_secs(args.request_timeout_secs),
+    };
+    let now = Utc::now();
+    let meta = Meta::new(bo_schema::SCHEMA_VERSION, now.timestamp(), &args.source);
+
+    let symbols: Vec<String> = if args.symbols.is_empty() {
+        DEFAULT_OCEA_SYMBOLS.iter().map(|s| s.to_string()).collect()
+    } else {
+        args.symbols.clone()
+    };
+
+    let (end_dt, end_label) = if args.end.is_empty() {
+        let end_chrono = now - chrono::Duration::seconds(args.end_safety_margin_secs);
+        let dt = OffsetDateTime::from_unix_timestamp(end_chrono.timestamp())
+            .context("converting end to OffsetDateTime")?;
+        (dt, end_chrono.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+    } else {
+        (parse_ymd_to_offset(&args.end)?, args.end.clone())
+    };
+    let (start_dt, start_label) = if args.start.is_empty() {
+        let start_chrono = now
+            - chrono::Duration::seconds(args.end_safety_margin_secs)
+            - chrono::Duration::days(args.lookback_days);
+        let dt = OffsetDateTime::from_unix_timestamp(start_chrono.timestamp())
+            .context("converting start to OffsetDateTime")?;
+        (dt, start_chrono.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+    } else {
+        (parse_ymd_to_offset(&args.start)?, args.start.clone())
+    };
+
+    tracing::info!(
+        symbols = symbols.len(),
+        start = start_label,
+        end = end_label,
+        "Databento OCEA.MEMOIR ohlcv-1m batch"
+    );
+
+    let mut by_symbol: BTreeMap<String, Vec<bo_schema::Bar>> = BTreeMap::new();
+    let mut errors: Vec<(String, String)> = Vec::new();
+    let mut total_records = 0usize;
+    for sym in &symbols {
+        tracing::info!(sym, "fetching");
+        match fetch_ocea_ohlcv_1m(&args.api_key, &cfg, sym, start_dt, end_dt, &meta).await {
+            Ok(rows) => {
+                tracing::info!(sym, records = rows.len(), "decoded");
+                total_records += rows.len();
+                by_symbol.entry(sym.clone()).or_default().extend(rows);
+            }
+            Err(e) => {
+                tracing::warn!(sym, error = %e, "fetch failed; continuing");
+                errors.push((sym.clone(), e.to_string()));
+            }
+        }
+    }
+
+    if by_symbol.values().all(|v| v.is_empty()) {
+        if !errors.is_empty() {
+            anyhow::bail!(
+                "all {} symbol(s) failed; first error: {}",
+                errors.len(),
+                errors.first().map(|(_, e)| e.as_str()).unwrap_or("?")
+            );
+        }
+        println!("databento ocea-1m: rows_added=0 (empty window)");
+        return Ok(());
+    }
+
+    let ds = Dataset::new(&args.dataset);
+    let mut total_added = 0usize;
+    let mut total_deduped = 0usize;
+    let mut total_partitions = 0usize;
+    for (sym, rows) in &by_symbol {
+        if rows.is_empty() {
+            continue;
+        }
+        let stats = ds
+            .write::<bo_schema::Bar>(&args.venue, Some(sym), rows)
+            .with_context(|| format!("Dataset::write bo_intraday_1m for {sym}"))?;
+        total_added += stats.rows_added;
+        total_deduped += stats.rows_deduped;
+        total_partitions += stats.partitions_written;
+    }
+    println!(
+        "databento ocea-1m: rows_added={} rows_deduped={} partitions_written={} total_records={} symbols_failed={}",
         total_added, total_deduped, total_partitions, total_records, errors.len()
     );
     Ok(())

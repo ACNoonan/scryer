@@ -1,8 +1,14 @@
-# Daily forward-poll for `cme_intraday_1m.v1` over the four CME
-# factor-futures continuous contracts (ES=F, NQ=F, GC=F, ZN=F).
-# Backfill 2018-2026 already shipped (phase 63); this manifest
-# stands up the missing forward-cadence so the surface stays current
-# instead of decaying after the backfill cursor.
+# Daily forward-poll for `cme_intraday_1m.v1` over six CME
+# continuous contracts: the four factor futures (ES=F, NQ=F, GC=F,
+# ZN=F) plus CL=F (NYMEX crude) and 6E=F (CME Euro FX). Backfill
+# 2018-2026 already shipped (phase 63) for ES/NQ/GC/ZN; CL=F / 6E=F
+# are new on this manifest as of soothsayer F2 ask 2026-05-10
+# (paper4_oracle_conditioned_amm intraweek-overnight panel — exogenous
+# factors per soothsayer.universe.EXOGENOUS_EQUITY). First-fire smoke
+# verifies that GLBX.MDP3 serves CL.v.0 and 6E.v.0 under the operator's
+# delayed-access tier; if either returns zero rows on the first
+# manifest fire, drop the symbol from `--symbols` and file a
+# wishlist row for an alternative continuous-contract syntax.
 #
 # Cadence: `daily(06:00Z)` — fires 02:00 ET. Operator's Databento
 # subscription is the delayed-access tier (no realtime GLBX.MDP3
@@ -42,14 +48,14 @@
 # against the standard signup credit; budget cap below is loose.
 
 id = "cme-intraday-1m"
-description = "Daily Databento GLBX.MDP3 forward-poll for the 4 CME factor-futures continuous contracts (ES=F, NQ=F, GC=F, ZN=F). 2-day rolling lookback for dedup-safe re-pulls."
+description = "Daily Databento GLBX.MDP3 forward-poll for 6 CME continuous contracts (ES=F, NQ=F, GC=F, ZN=F, CL=F, 6E=F). 2-day rolling lookback for dedup-safe re-pulls."
 schema_ids = ["cme_intraday_1m.v1"]
 
 [fetch]
 command = "scry"
 args = [
     "databento", "intraday1m",
-    "--symbols", "ES=F,NQ=F,GC=F,ZN=F",
+    "--symbols", "ES=F,NQ=F,GC=F,ZN=F,CL=F,6E=F",
     "--lookback-days", "2",
     "--end-safety-margin-secs", "36000",
     "--source", "databento:glbx-mdp3:runner",
@@ -58,15 +64,15 @@ args = [
 [criticality]
 tier = "tier-1"
 owner = "@adam"
-consumer_impact = "Minute-resolution CME factor-futures bars feeding Soothsayer's M6 §6.6 path-fitted conformal runner (Fri 16:00 ET → Mon 09:30 ET path extrema). Stale = §6.6 row of M6 forward-tape battery cannot score post-freeze weekends."
+consumer_impact = "Minute-resolution CME bars feeding Soothsayer's M6 §6.6 path-fitted conformal runner (Fri 16:00 ET → Mon 09:30 ET path extrema). The four factor futures (ES/NQ/GC/ZN) feed §6.6 directly; CL=F and 6E=F are exogenous-equity factors per soothsayer.universe.EXOGENOUS_EQUITY consumed by the intraweek-overnight extension. Stale = §6.6 row of M6 forward-tape battery cannot score post-freeze weekends."
 
 [freshness]
 # 25h ceiling: matches `equities-daily` shape (24h cadence + 1h grace).
 sla_secs = 90000
 
 [budget]
-# 4 symbols × 1 Databento range call each. Loose cap.
-max_requests_per_run = 20
+# 6 symbols × 1 Databento range call each. Loose cap.
+max_requests_per_run = 30
 
 [workflow]
 sensor = "daily(06:00Z)"

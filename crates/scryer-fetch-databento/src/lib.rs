@@ -32,6 +32,7 @@ use std::time::Duration;
 use databento::dbn::{Dataset, OhlcvMsg, SType, Schema as DbnSchema};
 use databento::historical::timeseries::GetRangeParams;
 use databento::HistoricalClient;
+use scryer_schema::bo_intraday_1m::v1::Bar as BoBar;
 use scryer_schema::cme_intraday_1m::v1::Bar;
 use scryer_schema::yahoo::v1::Bar as YahooBar;
 use scryer_schema::Meta;
@@ -147,6 +148,75 @@ pub async fn fetch_ohlcv_1m(
     Ok(out)
 }
 
+/// Fetch 1-minute OHLCV bars from Blue Ocean ATS (`OCEA.MEMOIR`).
+///
+/// Blue Ocean ATS operates Sun-Thu 8:00 PM – 4:00 AM ET (the canonical
+/// US-equity overnight window). Databento's historical coverage starts
+/// 2025-08-24. Symbols are raw NMS tickers (`SPY`, `AAPL`, etc.) — no
+/// continuous-contract suffix — and are passed through `SType::RawSymbol`.
+///
+/// Pricing: $0.40/GB or included with subscription per Databento's blog
+/// announcement; OHLCV-1m volume across the 10-symbol Soothsayer panel
+/// over the ~37 weeks since 2025-08-24 is well under 1 GB.
+pub async fn fetch_ocea_ohlcv_1m(
+    api_key: &str,
+    cfg: &PollConfig,
+    symbol: &str,
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+    meta: &Meta,
+) -> Result<Vec<BoBar>, FetchError> {
+    if api_key.is_empty() {
+        return Err(FetchError::NoApiKey);
+    }
+    let mut client = HistoricalClient::builder()
+        .key(api_key)
+        .map_err(|e| FetchError::Databento(format!("client key: {e}")))?
+        .build()
+        .map_err(|e| FetchError::Databento(format!("client build: {e}")))?;
+
+    let params = GetRangeParams::builder()
+        .dataset(Dataset::OceaMemoir)
+        .date_time_range(start..end)
+        .symbols(symbol)
+        .stype_in(SType::RawSymbol)
+        .schema(DbnSchema::Ohlcv1M)
+        .build();
+
+    let mut decoder = client
+        .timeseries()
+        .get_range(&params)
+        .await
+        .map_err(|e| FetchError::Databento(format!("get_range: {e}")))?;
+
+    let mut out: Vec<BoBar> = Vec::new();
+    loop {
+        match decoder.decode_record::<OhlcvMsg>().await {
+            Ok(Some(rec)) => {
+                let scale = 1e-9;
+                let ts_ns: i64 = rec.hd.ts_event as i64;
+                let ts = ts_ns / 1_000_000_000;
+                out.push(BoBar {
+                    symbol: symbol.to_string(),
+                    ts,
+                    open: rec.open as f64 * scale,
+                    high: rec.high as f64 * scale,
+                    low: rec.low as f64 * scale,
+                    close: rec.close as f64 * scale,
+                    volume: rec.volume,
+                    meta: meta.clone(),
+                });
+            }
+            Ok(None) => break,
+            Err(e) => {
+                return Err(FetchError::Databento(format!("decode: {e}")));
+            }
+        }
+    }
+    let _ = cfg.request_timeout;
+    Ok(out)
+}
+
 /// Fetch daily equity OHLCV bars via Databento's `DBEQ.BASIC` dataset.
 /// Reuses the existing `yahoo.v1::Bar` schema (the schema name is
 /// historical from soothsayer's yfinance era; the row shape is
@@ -236,6 +306,8 @@ mod tests {
         assert_eq!(symbol_to_databento_continuous("NQ=F").as_deref(), Some("NQ.v.0"));
         assert_eq!(symbol_to_databento_continuous("GC=F").as_deref(), Some("GC.v.0"));
         assert_eq!(symbol_to_databento_continuous("ZN=F").as_deref(), Some("ZN.v.0"));
+        assert_eq!(symbol_to_databento_continuous("CL=F").as_deref(), Some("CL.v.0"));
+        assert_eq!(symbol_to_databento_continuous("6E=F").as_deref(), Some("6E.v.0"));
     }
 
     #[test]

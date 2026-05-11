@@ -53,6 +53,7 @@ mod pool_snapshots_cmd;
 mod priority_fees_cmd;
 mod pyth_backfill_cmd;
 mod pyth_cmd;
+mod pyth_lazer_cmd;
 mod pyth_poster_cmd;
 mod pyth_publisher_cmd;
 mod redstone_cmd;
@@ -82,6 +83,12 @@ enum Command {
     Redstone(RedstoneCmd),
     /// Pyth Hermes oracle-tape fetchers (REST, no proxy).
     Pyth(PythCmd),
+    /// Pyth Lazer (formerly Pyth Pro) WebSocket subscriber. Distinct
+    /// surface from Hermes — push-based with Ed25519-signed Solana
+    /// payloads. Schema `oracle.pyth_lazer.tape.v2`. Free-tier API key
+    /// from `pythdata.app`; pass via `LAZER_ACCESS_TOKEN` or
+    /// `PYTH_LAZER_API_KEY`.
+    PythLazer(PythLazerCmd),
     /// DEX aggregator clients (GeckoTerminal). REST per-venue; no proxy.
     Dexagg(DexaggCmd),
     /// Soothsayer V5 tape — joined Chainlink + Jupiter observation
@@ -246,6 +253,23 @@ struct RedstoneCmd {
 struct PythCmd {
     #[command(subcommand)]
     target: PythTarget,
+}
+
+#[derive(Parser, Debug)]
+struct PythLazerCmd {
+    #[command(subcommand)]
+    target: PythLazerTarget,
+}
+
+#[derive(Subcommand, Debug)]
+enum PythLazerTarget {
+    /// Connect to wss://pyth-lazer-{0,1,2}.dourolabs.app/v1/stream,
+    /// subscribe to a configured Pyth-canonical symbol set, drain
+    /// updates for `--duration-secs`, and write
+    /// `oracle.pyth_lazer.tape.v2` rows. `--dry-run` skips the
+    /// parquet write and prints a per-feed summary — use this for
+    /// the first-fire probe before committing to a runner cadence.
+    Subscribe(pyth_lazer_cmd::SubscribeArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -441,6 +465,11 @@ enum DatabentoTarget {
     /// (`databento`, not `yahoo`) so cross-source validation against
     /// Stooq-sourced bars is possible without parquet collisions.
     EquitiesDaily(databento_cmd::EquitiesDailyArgs),
+    /// Blue Ocean ATS overnight 1m OHLCV (OCEA.MEMOIR dataset). US
+    /// equity bars during the Sun-Thu 8 PM – 4 AM ET overnight window.
+    /// Historical companion to the Pyth Lazer free-tier live tape.
+    /// Writes dataset/blue_ocean/intraday_1m/v1/symbol={X}/year=Y/month=M/day=D.parquet.
+    Ocea1m(databento_cmd::OceaIntradayArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -785,6 +814,9 @@ async fn main() -> Result<()> {
             PythTarget::Tape(a) => pyth_cmd::run_tape(a).await,
             PythTarget::Backfill(a) => pyth_backfill_cmd::run_backfill(a).await,
         },
+        Command::PythLazer(c) => match c.target {
+            PythLazerTarget::Subscribe(a) => pyth_lazer_cmd::run_subscribe_cmd(a).await,
+        },
         Command::Dexagg(c) => match c.target {
             DexaggTarget::GtTrades(a) => dexagg_cmd::run_gt_trades(a).await,
             DexaggTarget::RaydiumPoolMetadata(a) => dexagg_cmd::run_raydium_pool_metadata(a).await,
@@ -818,6 +850,7 @@ async fn main() -> Result<()> {
         Command::Databento(c) => match c.target {
             DatabentoTarget::Intraday1m(a) => databento_cmd::run_intraday(a).await,
             DatabentoTarget::EquitiesDaily(a) => databento_cmd::run_equities_daily(a).await,
+            DatabentoTarget::Ocea1m(a) => databento_cmd::run_ocea_intraday(a).await,
         },
         Command::Cboe(c) => match c.target {
             CboeTarget::Indices(a) => cboe_cmd::run_indices(a).await,

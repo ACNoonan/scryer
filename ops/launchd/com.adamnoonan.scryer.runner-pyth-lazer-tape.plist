@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.runner-pyth-lazer-tape</string>
+
+    <!--
+        Per-manifest plist. Fires `scryer-runner tick --only
+        pyth-lazer-tape` every 60s; each tick opens the Pyth Lazer
+        WebSocket subscription, drains for 55s, exits cleanly.
+
+        Wall-clock per fire is 55s by construction; launchd's
+        skip-if-running protects the next tick if the WS connect
+        retries push us past 60s.
+
+        No legacy plist sibling — Pyth Lazer is a new ingest path
+        landing 2026-05-10, so this is the only deploy target.
+    -->
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin/scryer-runner</string>
+        <string>tick</string>
+        <string>--only</string>
+        <string>pyth-lazer-tape</string>
+        <string>--manifests</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/manifests</string>
+        <string>--dataset</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/dataset</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/runner-pyth-lazer-tape.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/runner-pyth-lazer-tape.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+        <key>PATH</key>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+        <key>HOSTNAME</key>
+        <string>samachi-mac</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>

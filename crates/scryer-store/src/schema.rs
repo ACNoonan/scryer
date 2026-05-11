@@ -22,13 +22,13 @@
 use arrow_array::RecordBatch;
 use arrow_schema::ArrowError;
 use scryer_schema::{
-    backed, backed_nav_strikes, cboe_indices, cex_perp_funding_multi, cex_stock_perp_ohlcv, cex_stock_perp_tape, chainlink_data_streams, clmm_pool_state, cme_intraday_1m, dead_letter, deribit_iv, dex_xstock_swaps, dlmm_pool_state, drift_liquidation, earnings, edgar_8k, evm_liquidation, fluid_vault_config, freshness_check, fred_macro, fred_macro_extended, geckoterminal, geckoterminal_ohlcv,
+    backed, backed_nav_strikes, bo_intraday_1m, cboe_indices, cex_perp_funding_multi, cex_stock_perp_ohlcv, cex_stock_perp_tape, chainlink_data_streams, clmm_pool_state, cme_intraday_1m, dead_letter, deribit_iv, dex_xstock_swaps, dlmm_pool_state, drift_liquidation, earnings, edgar_8k, evm_liquidation, fluid_vault_config, freshness_check, fred_macro, fred_macro_extended, geckoterminal, geckoterminal_ohlcv,
     jito_bundle_tape, jito_bundles, jito_tip_floor, jupiter_lend_liquidation,
     kamino_liquidation, kamino_obligation,
     kamino_obligation_position, kamino_reserve, kamino_scope, kraken_funding, loopscale_loan,
     loopscale_loan_collateral, mango_v4_liquidation, mango_v4_oracle_config, marginfi_liquidation, marginfi_reserve,
     nasdaq_halts, nasdaq_halts_intraday,
-    oracle_context, oracle_soothsayer_v6_band_tape,
+    oracle_context, oracle_pyth_lazer_tape, oracle_soothsayer_v6_band_tape,
     pool_snapshot, pyth, pyth_poster_post, pyth_poster_tx, pyth_publisher,
     raydium_pool_metadata, redstone, single_stock_iv, solana_priority_fees, swap, trade, v5_tape, validator_client, workflow_run, workflow_run_summary, xstock_holders, yahoo, yahoo_corp_actions, FromArrowError,
 };
@@ -646,6 +646,29 @@ impl DatasetSchema for cme_intraday_1m::v1::Bar {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         cme_intraday_1m::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for bo_intraday_1m::v1::Bar {
+    /// `dataset/blue_ocean/intraday_1m/v1/symbol={SYM}/year=Y/month=M/day=D.parquet`.
+    /// Identical row-shape to `cme_intraday_1m.v1`, separate venue +
+    /// schema id to keep Blue Ocean's overnight-only schedule and
+    /// raw-NMS-ticker symbology distinct from CME continuous futures.
+    const DATA_TYPE: &'static str = "intraday_1m";
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("symbol");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.ts
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        bo_intraday_1m::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        bo_intraday_1m::v1::from_record_batch(batch)
     }
 }
 
@@ -1327,6 +1350,41 @@ impl DatasetSchema for workflow_run::v2::WorkflowRun {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         workflow_run::v2::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for oracle_pyth_lazer_tape::v2::Row {
+    /// `dataset/oracle.pyth_lazer/tape/v2/feed_id={N}/year=Y/month=M/day=D.parquet`.
+    /// Partition by `price_feed_id` (integer), not by `symbol` —
+    /// Pyth-canonical symbol strings like `"Equity.US.SPY/USD"`
+    /// contain a `/` that would break the partition path layout.
+    /// `price_feed_id` is the canonical Lazer identifier, is `/`-free,
+    /// and dedupes 1:1 with the symbol string in practice. Consumers
+    /// who want the human-readable label read it from the in-row
+    /// `symbol` column. Daily granularity matches the manifest's
+    /// planned 60s-cycle subscriber pattern.
+    const DATA_TYPE: &'static str = "tape";
+    const SCHEMA_MAJOR: u32 = 2;
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("feed_id");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        // Partition by `publish_timestamp_us`, not `_fetched_at`.
+        // Re-runs of the same window produce identical
+        // (price_feed_id, publish_timestamp_us) tuples and dedup
+        // naturally; partitioning by publish-time keeps the file
+        // boundary aligned with the publish-timeline question
+        // consumers ask.
+        self.publish_timestamp_us / 1_000_000
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        oracle_pyth_lazer_tape::v2::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        oracle_pyth_lazer_tape::v2::from_record_batch(batch)
     }
 }
 

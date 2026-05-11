@@ -90,6 +90,12 @@ pub mod venue {
     pub const LOOPSCALE: &str = "loopscale";
     pub const FRED: &str = "fred";
     pub const CME: &str = "cme";
+    /// Blue Ocean ATS overnight US-equity venue (Databento
+    /// `OCEA.MEMOIR`). Operates Sun-Thu 8 PM – 4 AM ET. Schema id
+    /// `bo_intraday_1m.v1`. Distinct from `cme` (futures, 23/5) and
+    /// from `yahoo`/`databento` daily bars — the venue + schedule
+    /// semantics matter at the partition level.
+    pub const BLUE_OCEAN: &str = "blue_ocean";
     /// Databento-sourced equity bars. Distinct from `yahoo` venue
     /// (Stooq-sourced) so cross-source validation can compare both
     /// without collision in the same parquet file.
@@ -144,6 +150,15 @@ pub mod venue {
     /// at write time. Source segment encodes the experiment iteration
     /// per the "Soothsayer venue versioning" methodology lock.
     pub const ORACLE_SOOTHSAYER_V6: &str = "oracle.soothsayer_v6";
+
+    /// Pyth Lazer (formerly Pyth Pro) WebSocket-streamed price tape
+    /// venue (wishlist row "Pyth Lazer fetcher", added 2026-05-10).
+    /// Schema id `oracle.pyth_lazer.tape.v2`. Distinct from the
+    /// existing `pyth` venue's `pyth.v1` Hermes tape — Hermes is REST/
+    /// SSE pull at slot cadence; Lazer is WebSocket push at sub-
+    /// second cadence with Ed25519-signed payloads. Two surfaces, two
+    /// venues, no co-mingling.
+    pub const ORACLE_PYTH_LAZER: &str = "oracle.pyth_lazer";
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
