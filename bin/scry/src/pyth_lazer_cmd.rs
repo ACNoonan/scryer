@@ -42,8 +42,12 @@ pub struct SubscribeArgs {
     #[arg(long, default_value = "fixed_rate@200ms")]
     channel: String,
     /// How long to keep the subscription open before exiting. Default
-    /// 55s fits inside a 60s manifest tick with a 5s margin.
-    #[arg(long, default_value_t = 55)]
+    /// 45s is for one-shot operator probes. The runner manifest pins
+    /// `--duration-secs=30` because each per-feed parquet write adds
+    /// ~10s of merge-dedup at end-of-UTC-day partition sizes, and
+    /// total wall-clock must stay under launchd's 60s `StartInterval`
+    /// boundary to avoid skip-if-running halving the cadence to 120s.
+    #[arg(long, default_value_t = 45)]
     duration_secs: u64,
     /// Number of redundant WS connections (SDK default 4). Lower is
     /// fine for the cycling-fire pattern.

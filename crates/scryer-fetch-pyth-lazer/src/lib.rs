@@ -11,11 +11,20 @@
 //! `"Equity.US.SPY/USD"`, `"Crypto.SPYX/USD"`), and emits one
 //! `oracle.pyth_lazer.tape.v2::Row` per parsed price update.
 //!
-//! The subscriber runs for `cfg.duration` then exits cleanly. The
-//! manifest cycles the fetcher on a 60s interval via the runner-tick
-//! pattern; each cycle captures ~55s of updates, writes a parquet
-//! batch, and exits. This is simpler than a long-running KeepAlive
-//! daemon and reuses the existing per-manifest tick infrastructure.
+//! The subscriber runs for `cfg.duration` from WS-connect-start to
+//! drain-deadline, then writes one parquet partition per subscribed
+//! feed and exits. The manifest cycles the fetcher on a 60s interval
+//! via the runner-tick pattern; `cfg.duration` bounds the subscribe
+//! phase of total scry wall-clock — the per-feed parquet merge-dedup
+//! write adds ~10s end-of-UTC-day, dominated by the 26-feed panel
+//! size and the per-feed file size growing through the day. launchd's
+//! skip-if-running semantics miss intervals where the prior job is
+//! still running, so total wall-clock must stay comfortably under
+//! 60s. The runner manifest pins `--duration-secs=30` for that
+//! reason; the CLI default below stays at 45 for one-shot operator
+//! probes that don't compete with the runner's launchd boundary.
+//! Simpler than a long-running KeepAlive daemon and reuses the
+//! existing per-manifest tick infrastructure.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -174,7 +183,7 @@ impl Default for PollConfig {
             num_connections: 2,
             symbols: DEFAULT_CRYPTO_SYMBOLS.iter().map(|s| s.to_string()).collect(),
             channel: LazerChannel::FixedRate200Ms,
-            duration: Duration::from_secs(55),
+            duration: Duration::from_secs(45),
             source_label: "pyth-lazer:ws".to_string(),
             connect_timeout: Duration::from_secs(10),
         }
@@ -240,6 +249,19 @@ pub async fn run_subscribe(cfg: &PollConfig) -> Result<(Vec<Row>, SubscribeStats
             })
             .collect::<Result<Vec<_>, _>>()?
     };
+
+    // `started` covers the full client-lifecycle clock: WS connect +
+    // 26 SubscribeRequests + drain. The manifest's `--duration-secs`
+    // is sized against the launchd interval (60s), so it must bound
+    // total scry wall-clock — not just the drain phase. Previously
+    // (pre-2026-05-11 cadence fix) `started` was placed after the
+    // subscribe loop, which made the 10–13s of setup overhead invisible
+    // to the budget; total wall-clock kept straddling launchd's 60s
+    // skip-if-running boundary and the runner landed on a 120s
+    // effective cadence. With `started` here, `--duration-secs=45`
+    // produces ~45s scry wall-clock + ~2s parquet write, comfortably
+    // under the 60s threshold.
+    let started = std::time::Instant::now();
 
     let mut client = PythLazerStreamClientBuilder::new(cfg.access_token.clone())
         .with_endpoints(endpoints.clone())
@@ -311,7 +333,6 @@ pub async fn run_subscribe(cfg: &PollConfig) -> Result<(Vec<Row>, SubscribeStats
 
     let mut rows: Vec<Row> = Vec::new();
     let mut stats = SubscribeStats::default();
-    let started = std::time::Instant::now();
     let now_us = || -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

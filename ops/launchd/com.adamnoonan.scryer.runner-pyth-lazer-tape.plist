@@ -6,13 +6,23 @@
     <string>com.adamnoonan.scryer.runner-pyth-lazer-tape</string>
 
     <!--
-        Per-manifest plist. Fires `scryer-runner tick --only
-        pyth-lazer-tape` every 60s; each tick opens the Pyth Lazer
-        WebSocket subscription, drains for 55s, exits cleanly.
+        Per-manifest plist. Polls `scryer-runner tick --only
+        pyth-lazer-tape` every 10s; the manifest sensor `interval(60s)`
+        in `ops/sources/pyth-lazer-tape.toml` enforces the actual
+        60s fire cadence — most launchd ticks therefore evaluate the
+        sensor and `Hold` cheaply (sub-100ms), with one fire per
+        60-second window.
 
-        Wall-clock per fire is 55s by construction; launchd's
-        skip-if-running protects the next tick if the WS connect
-        retries push us past 60s.
+        Why poll-and-hold instead of launchd's `StartInterval=60`:
+        macOS launchd's `StartInterval=N` semantic empirically waits
+        `(previous_job_exit + N)`, not `(previous_job_start + N)`. With
+        per-fire wall-clock ~41s (30s WS drain + ~11s parquet merge-
+        dedup across the 26-feed panel), `StartInterval=60` produced
+        a 101s effective cadence instead of 60s. `StartInterval=10`
+        with skip-if-running and the in-binary `interval(60s)` sensor
+        recovers the 60s cadence: each fire blocks the next 3-4
+        launchd ticks (skip-if-running), then the first poll after
+        the job exits and 60s-elapsed checks both pass and fires.
 
         No legacy plist sibling — Pyth Lazer is a new ingest path
         landing 2026-05-10, so this is the only deploy target.
@@ -37,7 +47,7 @@
     <true/>
 
     <key>StartInterval</key>
-    <integer>60</integer>
+    <integer>10</integer>
 
     <key>StandardOutPath</key>
     <string>/Users/adamnoonan/Library/Logs/scryer/runner-pyth-lazer-tape.out.log</string>
