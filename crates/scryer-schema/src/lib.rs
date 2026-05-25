@@ -90,11 +90,15 @@ pub use error::FromArrowError;
 pub use meta::Meta;
 pub use schema_id::{Domain, SchemaId, SchemaIdError, KNOWN_V2_SCHEMAS};
 
-/// Registry of every shipped v1 schema id string. v1 ids retain the
-/// pre-taxonomy two-part `<name>.v1` form and are not represented by
+/// Registry of every shipped pre-taxonomy schema id string. These
+/// retain the two-part `<name>.v<n>` form and are not represented by
 /// `SchemaId`; manifest validation in `scryer-manifest` accepts a
-/// string when it parses as `SchemaId` (v2) or matches an entry here
-/// (v1). Update this list whenever a new v1 schema module is added.
+/// string when it parses as `SchemaId` (v2 taxonomy) or matches an
+/// entry here. Update this list whenever a new such schema module is
+/// added. Almost all are `.v1`; the exception is `earnings.v2`, a
+/// v1-lineage schema (v1-style `yahoo/earnings/v<n>/` dataset path)
+/// that took a major bump for session timing without moving to the v2
+/// `<domain>.<source>.<record_type>` taxonomy.
 ///
 /// Order matches the migration index in `docs/platform_plan.md`.
 pub const KNOWN_V1_SCHEMAS: &[&str] = &[
@@ -146,6 +150,7 @@ pub const KNOWN_V1_SCHEMAS: &[&str] = &[
     "yahoo.v1",
     "yahoo_corp_actions.v1",
     "earnings.v1",
+    "earnings.v2",
     "backed.v1",
     "backed_nav_strikes.v1",
     "nasdaq_halts.v1",
@@ -223,13 +228,18 @@ mod v1_registry_tests {
     }
 
     #[test]
-    fn known_v1_schemas_have_v1_suffix_and_lowercase_name() {
+    fn known_v1_schemas_have_version_suffix_and_lowercase_name() {
         for s in KNOWN_V1_SCHEMAS {
             let (name, suffix) = s
                 .rsplit_once('.')
-                .unwrap_or_else(|| panic!("v1 schema id missing dot: {s}"));
-            assert_eq!(suffix, "v1", "v1 schema id has non-v1 suffix: {s}");
-            assert!(!name.is_empty(), "v1 schema id has empty name: {s}");
+                .unwrap_or_else(|| panic!("schema id missing dot: {s}"));
+            // Pre-taxonomy ids are `<name>.v<n>` — almost all v1, plus
+            // the `earnings.v2` major bump of a v1-lineage schema.
+            let version_ok = suffix
+                .strip_prefix('v')
+                .is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()));
+            assert!(version_ok, "schema id has malformed version suffix: {s}");
+            assert!(!name.is_empty(), "schema id has empty name: {s}");
             for c in name.chars() {
                 let ok = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_';
                 assert!(ok, "v1 schema id name has invalid char `{c}`: {s}");
