@@ -25,8 +25,8 @@
 # bails immediately with a clear error.
 
 id = "earnings"
-description = "Daily Finnhub earnings-calendar forward-poll over the 6-symbol Soothsayer single-name set (AAPL, GOOGL, HOOD, MSTR, NVDA, TSLA). Rolling -30d/+90d window per fire."
-schema_ids = ["earnings.v1"]
+description = "Daily Finnhub earnings-calendar forward-poll over the 6-symbol Soothsayer single-name set (AAPL, GOOGL, HOOD, MSTR, NVDA, TSLA). Rolling -30d/+90d window per fire. Emits earnings.v2 with session timing (bmo/amc/dmh) from Finnhub's `hour` field. Deep history + historical timing come from the one-shot `scry equities earnings-backfill` (Yahoo); Finnhub serves no history."
+schema_ids = ["earnings.v2"]
 
 [fetch]
 command = "scry"

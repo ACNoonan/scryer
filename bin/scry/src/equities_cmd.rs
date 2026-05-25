@@ -22,10 +22,10 @@ use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use clap::Parser;
 use scryer_fetch_equities::{
-    finnhub, stooq, yahoo_corp_actions, PollConfig, FetchError as EqFetchError,
+    finnhub, stooq, yahoo_corp_actions, yahoo_earnings, PollConfig, FetchError as EqFetchError,
 };
 use scryer_schema::{earnings, yahoo, yahoo_corp_actions as schema_corp_actions, Meta};
-use scryer_store::{venue, Dataset};
+use scryer_store::{venue, Dataset, PartitionTime};
 
 #[derive(Parser, Debug)]
 pub struct BarsArgs {
@@ -159,6 +159,72 @@ pub struct CorpActionsArgs {
     /// keeps a small safety margin.
     #[arg(long, default_value_t = 1100)]
     rate_limit_ms: u64,
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
+    dataset: PathBuf,
+    #[arg(long, default_value = venue::YAHOO)]
+    venue: String,
+}
+
+/// `scry equities earnings-backfill` — one-shot deep-history earnings
+/// pull from Yahoo's visualization API (the only free first-party
+/// source with both deep history and an explicit session field).
+/// Finnhub's free tier returns no history, so this is how `earnings.v2`
+/// gets historical `bmo`/`amc` timing. Writes to `yahoo/earnings/v2/`.
+#[derive(Parser, Debug)]
+pub struct EarningsBackfillArgs {
+    /// Comma-separated reporting-equity tickers (ETFs/futures/crypto
+    /// have no earnings; Yahoo returns empty for them).
+    #[arg(long, value_delimiter = ',', required = true)]
+    symbols: Vec<String>,
+    /// Max events returned per symbol. Yahoo caps at 250; 100 covers
+    /// ~25 years of quarterly reports.
+    #[arg(long, default_value_t = 100)]
+    size: u32,
+    /// `_source` stamped on every emitted row.
+    #[arg(long, default_value = "yahoo:earnings:visualization")]
+    source: String,
+    /// Yahoo `query{1,2}` host the crumb is bound to.
+    #[arg(long, default_value = yahoo_earnings::DEFAULT_BASE_URL)]
+    base_url: String,
+    /// Browser-shaped User-Agent — Yahoo's gate rejects non-browser
+    /// TLS clients. Matches the corp-actions fetcher default.
+    #[arg(
+        long,
+        default_value = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )]
+    user_agent: String,
+    #[arg(long, default_value_t = 30)]
+    request_timeout_secs: u64,
+    #[arg(long, default_value_t = 3)]
+    retry_max: u32,
+    #[arg(long, default_value_t = 2)]
+    retry_delay_secs: u64,
+    /// Delay between successive symbol calls. Yahoo's per-IP throttle
+    /// trips around 1-2 req/sec; 1500ms keeps a margin for a one-shot.
+    #[arg(long, default_value_t = 1500)]
+    rate_limit_ms: u64,
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
+    dataset: PathBuf,
+    #[arg(long, default_value = venue::YAHOO)]
+    venue: String,
+}
+
+/// `scry equities earnings-migrate` — one-time cutover that re-expresses
+/// existing `earnings.v1` rows as `earnings.v2` with `session=unknown`,
+/// so the v2 path carries the full pre-existing date coverage even
+/// where no source can supply timing.
+///
+/// MUST be run AFTER `earnings-backfill` (Yahoo) and the Finnhub
+/// `earnings` runner: the store's dedup keeps the *existing* row on a
+/// `(symbol, date)` collision, so any date already written with real
+/// timing is preserved and only genuinely-uncovered dates receive an
+/// `unknown` row. `rows_added` = gaps filled; `rows_deduped` = dates
+/// that already had timing. v1 partitions are left untouched.
+#[derive(Parser, Debug)]
+pub struct EarningsMigrateArgs {
+    /// Comma-separated tickers whose v1 partitions to migrate into v2.
+    #[arg(long, value_delimiter = ',', required = true)]
+    symbols: Vec<String>,
     #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
     #[arg(long, default_value = venue::YAHOO)]
@@ -304,7 +370,7 @@ pub async fn run_earnings(args: EarningsArgs) -> Result<()> {
     } else {
         args.to.clone()
     };
-    let meta = Meta::new(earnings::v1::SCHEMA_VERSION, now.timestamp(), &args.source);
+    let meta = Meta::new(earnings::v2::SCHEMA_VERSION, now.timestamp(), &args.source);
 
     tracing::info!(
         symbols = args.symbols.len(),
@@ -313,7 +379,7 @@ pub async fn run_earnings(args: EarningsArgs) -> Result<()> {
         "fetching Finnhub earnings"
     );
 
-    let mut by_symbol: BTreeMap<String, Vec<earnings::v1::Event>> = BTreeMap::new();
+    let mut by_symbol: BTreeMap<String, Vec<earnings::v2::Event>> = BTreeMap::new();
     let mut errors: Vec<(String, String)> = Vec::new();
     let mut symbols_with_earnings: usize = 0;
     for symbol in &args.symbols {
@@ -363,7 +429,7 @@ pub async fn run_earnings(args: EarningsArgs) -> Result<()> {
             continue;
         }
         let stats = ds
-            .write::<earnings::v1::Event>(&args.venue, Some(symbol), events)
+            .write::<earnings::v2::Event>(&args.venue, Some(symbol), events)
             .with_context(|| format!("Dataset::write yahoo earnings for {symbol}"))?;
         total_added += stats.rows_added;
         total_deduped += stats.rows_deduped;
@@ -378,6 +444,184 @@ pub async fn run_earnings(args: EarningsArgs) -> Result<()> {
         errors.len()
     );
     Ok(())
+}
+
+pub async fn run_earnings_backfill(args: EarningsBackfillArgs) -> Result<()> {
+    let cfg = PollConfig {
+        request_timeout: Duration::from_secs(args.request_timeout_secs),
+        retry_max: args.retry_max,
+        retry_delay: Duration::from_secs(args.retry_delay_secs),
+        source_label: args.source.clone(),
+        user_agent: args.user_agent.clone(),
+        ..Default::default()
+    };
+
+    let now = Utc::now();
+    let meta = Meta::new(earnings::v2::SCHEMA_VERSION, now.timestamp(), &args.source);
+
+    // One cookie+crumb handshake for the whole run; the crumb rides on
+    // every visualization POST.
+    let session = yahoo_earnings::bootstrap_session(&cfg, &args.base_url)
+        .await
+        .context("yahoo cookie+crumb bootstrap (one-shot backfill)")?;
+
+    tracing::info!(symbols = args.symbols.len(), size = args.size, "fetching Yahoo earnings history");
+
+    let mut by_symbol: BTreeMap<String, Vec<earnings::v2::Event>> = BTreeMap::new();
+    let mut errors: Vec<(String, String)> = Vec::new();
+    let mut symbols_with_earnings = 0usize;
+    for symbol in &args.symbols {
+        match yahoo_earnings::fetch_earnings(
+            &session,
+            &cfg,
+            &args.base_url,
+            symbol,
+            args.size,
+            &meta,
+        )
+        .await
+        {
+            Ok(events) => {
+                if !events.is_empty() {
+                    symbols_with_earnings += 1;
+                }
+                tracing::info!(symbol, rows = events.len(), "decoded");
+                by_symbol.entry(symbol.clone()).or_default().extend(events);
+            }
+            Err(e) => {
+                tracing::warn!(symbol, error = %e, "fetch failed; continuing");
+                errors.push((symbol.clone(), format_eq_error(&e)));
+            }
+        }
+        if args.rate_limit_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(args.rate_limit_ms)).await;
+        }
+    }
+
+    if by_symbol.values().all(|v| v.is_empty()) {
+        if !errors.is_empty() {
+            anyhow::bail!(
+                "all {} symbol(s) failed; first error: {}",
+                errors.len(),
+                errors.first().map(|(_, e)| e.as_str()).unwrap_or("?")
+            );
+        }
+        println!("equities earnings-backfill: rows_added=0 partitions_written=0 (empty)");
+        return Ok(());
+    }
+
+    let ds = Dataset::new(&args.dataset);
+    let mut total_added = 0usize;
+    let mut total_deduped = 0usize;
+    let mut total_partitions = 0usize;
+    for (symbol, events) in &by_symbol {
+        if events.is_empty() {
+            continue;
+        }
+        let stats = ds
+            .write::<earnings::v2::Event>(&args.venue, Some(symbol), events)
+            .with_context(|| format!("Dataset::write yahoo earnings (backfill) for {symbol}"))?;
+        total_added += stats.rows_added;
+        total_deduped += stats.rows_deduped;
+        total_partitions += stats.partitions_written;
+    }
+    println!(
+        "equities earnings-backfill: rows_added={} rows_deduped={} partitions_written={} symbols_with_earnings={} symbols_failed={}",
+        total_added, total_deduped, total_partitions, symbols_with_earnings, errors.len()
+    );
+    Ok(())
+}
+
+pub async fn run_earnings_migrate(args: EarningsMigrateArgs) -> Result<()> {
+    let ds = Dataset::new(&args.dataset);
+    let mut total_added = 0usize;
+    let mut total_deduped = 0usize;
+    let mut total_partitions = 0usize;
+    let mut symbols_migrated = 0usize;
+
+    for symbol in &args.symbols {
+        let v1_dir = args
+            .dataset
+            .join(&args.venue)
+            .join("earnings")
+            .join("v1")
+            .join(format!("symbol={symbol}"));
+        let years = match read_partition_years(&v1_dir) {
+            Ok(y) => y,
+            Err(e) => {
+                tracing::warn!(symbol, dir = %v1_dir.display(), error = %e, "no v1 partitions; skipping");
+                continue;
+            }
+        };
+        if years.is_empty() {
+            tracing::warn!(symbol, "no v1 year partitions found; skipping");
+            continue;
+        }
+        let mut v2_rows: Vec<earnings::v2::Event> = Vec::new();
+        for year in years {
+            let v1_rows = ds
+                .read::<earnings::v1::Event>(&args.venue, Some(symbol), PartitionTime::Yearly(year))
+                .with_context(|| format!("read v1 earnings {symbol} year={year}"))?;
+            for r in v1_rows {
+                v2_rows.push(earnings::v2::Event {
+                    symbol: r.symbol,
+                    earnings_date: r.earnings_date,
+                    // No source can supply historical timing for these
+                    // legacy rows; mark explicitly unknown.
+                    session: earnings::v2::Session::Unknown,
+                    session_confirmed: None,
+                    // Preserve original provenance (where the date came
+                    // from) and fetch time; only re-stamp the version.
+                    meta: Meta::new(
+                        earnings::v2::SCHEMA_VERSION,
+                        r.meta.fetched_at,
+                        &r.meta.source,
+                    ),
+                });
+            }
+        }
+        if v2_rows.is_empty() {
+            continue;
+        }
+        let stats = ds
+            .write::<earnings::v2::Event>(&args.venue, Some(symbol), &v2_rows)
+            .with_context(|| format!("Dataset::write v2 earnings (migrate) for {symbol}"))?;
+        tracing::info!(
+            symbol,
+            gaps_filled = stats.rows_added,
+            already_timed = stats.rows_deduped,
+            "migrated v1→v2"
+        );
+        total_added += stats.rows_added;
+        total_deduped += stats.rows_deduped;
+        total_partitions += stats.partitions_written;
+        symbols_migrated += 1;
+    }
+    println!(
+        "equities earnings-migrate: rows_added={} (gaps filled as unknown) rows_deduped={} (already timed in v2) partitions_written={} symbols_migrated={}",
+        total_added, total_deduped, total_partitions, symbols_migrated
+    );
+    Ok(())
+}
+
+/// Enumerate the `year=YYYY` values present in a yearly+symbol-keyed
+/// partition directory (`.../symbol=X/year=YYYY.parquet`).
+fn read_partition_years(dir: &std::path::Path) -> std::io::Result<Vec<i32>> {
+    let mut years = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if let Some(rest) = name.strip_prefix("year=") {
+            if let Some(y) = rest.strip_suffix(".parquet") {
+                if let Ok(year) = y.parse::<i32>() {
+                    years.push(year);
+                }
+            }
+        }
+    }
+    years.sort_unstable();
+    Ok(years)
 }
 
 pub async fn run_corp_actions(args: CorpActionsArgs) -> Result<()> {

@@ -1867,9 +1867,71 @@ forward.
 
 ## earnings.v1
 
-**Status.** done — Phase 33. Earnings calendar (Stooq + Finnhub).
+**Status.** frozen — Phase 33. Superseded by `earnings.v2` (session
+timing). Existing `yahoo/earnings/v1/` partitions stay readable; the
+one-time `scry equities earnings-migrate` lifts them into v2 with
+`session=unknown`. No new writes target v1.
 
-**CLI.** `scry equities earnings --symbols ...`.
+Columns: `symbol`, `earnings_date` (Date32), + audit meta. CLI was
+`scry equities earnings`.
+
+---
+
+## earnings.v2
+
+**Status.** done — earnings calendar + session timing. Adds the one
+upstream field soothsayer needs to map an earnings event to the single
+overnight gap it drives.
+
+```
+symbol             string
+earnings_date      date    (Date32, days since unix epoch; US/Eastern
+                            calendar date of the announcement)
+session            string  // 'bmo' | 'amc' | 'dmh' | 'unknown'
+session_confirmed  bool nullable  // true = already reported (timing is
+                            historical fact); false = forward/estimated;
+                            null = source can't say (e.g. migrated v1)
+```
+
+`session` is relative to `earnings_date` in **US/Eastern**: a `bmo` row
+dated D fires before D's 09:30 open; an `amc` row dated D fires after
+D's 16:00 close; `dmh` is intraday. This is the consumer contract — for
+an overnight gap close(D0)→open(D1), an event is assigned to that gap
+iff it is `amc` dated D0 or `bmo` dated D1.
+
+`dedup_key = "earnings:{symbol}:{earnings_date}"` — identical to v1.
+`session` is an *attribute* of an announcement, not part of its
+identity, so a later fetch that learns real timing for an already-known
+date must not create a second row. Yearly + symbol-keyed partition:
+`dataset/yahoo/earnings/v2/symbol={X}/year=YYYY.parquet`.
+
+**Sources & why two.**
+
+- **Forward (`finnhub:earnings:runner`).** Finnhub's
+  `/calendar/earnings` already returns `hour` ∈ {bmo, amc, dmh}; we now
+  persist it. `session_confirmed` = whether `epsActual` is present.
+  Finnhub's free tier serves **no history** (a purely-past window
+  returns zero rows) — only the current reported quarter + next ~1–2
+  forward. So Finnhub covers the daily forward path only.
+- **History backfill (`yahoo:earnings:visualization`).** Yahoo's
+  `query1.finance.yahoo.com/v1/finance/visualization` (the `earnings`
+  entity — same upstream `yfinance.get_earnings_dates` wraps) returns
+  many years of events with an explicit `startdatetimetype`
+  (BMO/AMC/TAS/TNS) and `gmtOffsetMilliSeconds` for ET-date resolution.
+  Behind Yahoo's cookie+crumb gate; one-shot backfill, not a recurring
+  runner.
+
+**CLI.**
+- `scry equities earnings --symbols ...` — Finnhub forward poll (the
+  daily runner).
+- `scry equities earnings-backfill --symbols ...` — Yahoo deep-history
+  one-shot. Run first.
+- `scry equities earnings-migrate --symbols ...` — v1→v2 cutover, run
+  last. Relies on the store's existing-row-wins dedup so only
+  uncovered dates get `session=unknown`.
+
+**Crate.** Schema `scryer-schema::earnings::v2`; fetchers
+`scryer-fetch-equities::{finnhub, yahoo_earnings}`.
 
 ---
 

@@ -15,10 +15,13 @@
 //! }
 //! ```
 //!
-//! For [`earnings::v1::Event`] only the `date` field is decoded; the
-//! rest are upstream metadata that consumers can re-fetch on demand.
+//! For [`earnings::v2::Event`] we decode `date`, `hour` (→ `session`),
+//! and `epsActual` presence (→ `session_confirmed`: a reported quarter
+//! has a non-null actual, so its session is historical fact; a forward
+//! quarter is scheduled/estimated). The remaining fields are upstream
+//! metadata that consumers can re-fetch on demand.
 
-use scryer_schema::earnings::v1::Event;
+use scryer_schema::earnings::v2::{Event, Session};
 use scryer_schema::Meta;
 
 use crate::{parse_ymd_to_date32, FetchError, PollConfig};
@@ -130,9 +133,26 @@ pub fn parse_response(body: &str, symbol: &str, meta: &Meta) -> Result<Vec<Event
         if !seen.insert(date32) {
             continue;
         }
+        // `hour` ∈ {bmo, amc, dmh}; empty/absent for far-future
+        // entries Finnhub hasn't classified yet → Unknown.
+        let session = entry
+            .get("hour")
+            .and_then(|h| h.as_str())
+            .filter(|h| !h.is_empty())
+            .map(Session::from_token)
+            .unwrap_or(Session::Unknown);
+        // A non-null `epsActual` means the quarter already reported, so
+        // the session is a historical fact (confirmed); otherwise it's
+        // a forward/scheduled estimate.
+        let reported = entry
+            .get("epsActual")
+            .map(|v| !v.is_null())
+            .unwrap_or(false);
         out.push(Event {
             symbol: row_symbol,
             earnings_date: date32,
+            session,
+            session_confirmed: Some(reported),
             meta: meta.clone(),
         });
     }
@@ -145,7 +165,7 @@ mod tests {
 
     fn meta() -> Meta {
         Meta::new(
-            scryer_schema::earnings::v1::SCHEMA_VERSION,
+            scryer_schema::earnings::v2::SCHEMA_VERSION,
             1_777_300_000,
             "finnhub:earnings",
         )
@@ -155,8 +175,8 @@ mod tests {
     fn parses_typical_response() {
         let body = r#"{
             "earningsCalendar": [
-                {"date":"2026-05-01","epsEstimate":1.34,"hour":"bmo","symbol":"AAPL","year":2026,"quarter":1},
-                {"date":"2026-08-01","epsEstimate":1.50,"hour":"amc","symbol":"AAPL","year":2026,"quarter":3}
+                {"date":"2026-05-01","epsActual":1.40,"epsEstimate":1.34,"hour":"bmo","symbol":"AAPL","year":2026,"quarter":1},
+                {"date":"2026-08-01","epsActual":null,"epsEstimate":1.50,"hour":"amc","symbol":"AAPL","year":2026,"quarter":3}
             ]
         }"#;
         let events = parse_response(body, "AAPL", &meta()).expect("parse");
@@ -164,6 +184,28 @@ mod tests {
         assert_eq!(events[0].symbol, "AAPL");
         // 2026-05-01 → 20574 days
         assert_eq!(events[0].earnings_date, 20_574);
+        // Reported quarter (epsActual present) with bmo timing.
+        assert_eq!(events[0].session, Session::Bmo);
+        assert_eq!(events[0].session_confirmed, Some(true));
+        // Forward quarter (epsActual null) with amc timing.
+        assert_eq!(events[1].session, Session::Amc);
+        assert_eq!(events[1].session_confirmed, Some(false));
+    }
+
+    #[test]
+    fn missing_hour_maps_to_unknown() {
+        let body = r#"{
+            "earningsCalendar": [
+                {"date":"2027-02-01","epsEstimate":1.60,"symbol":"AAPL"},
+                {"date":"2027-05-01","hour":"","symbol":"AAPL"}
+            ]
+        }"#;
+        let events = parse_response(body, "AAPL", &meta()).expect("parse");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].session, Session::Unknown);
+        assert_eq!(events[1].session, Session::Unknown);
+        // No epsActual → forward/estimated.
+        assert_eq!(events[0].session_confirmed, Some(false));
     }
 
     #[test]

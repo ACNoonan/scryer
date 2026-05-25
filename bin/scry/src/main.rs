@@ -500,9 +500,18 @@ enum EquitiesTarget {
     /// dataset/yahoo/equities_daily/v1/ (the venue path retains the
     /// historical `yahoo` name for parquet-layout backward compat).
     Bars(equities_cmd::BarsArgs),
-    /// Earnings dates from Finnhub per symbol. Writes one yearly
-    /// parquet per symbol under dataset/yahoo/earnings/v1/.
+    /// Earnings dates + session timing from Finnhub per symbol. Writes
+    /// one yearly parquet per symbol under dataset/yahoo/earnings/v2/
+    /// (forward window only — Finnhub serves no history).
     Earnings(equities_cmd::EarningsArgs),
+    /// One-shot deep-history earnings backfill from Yahoo's
+    /// visualization API (history + explicit session). Writes
+    /// dataset/yahoo/earnings/v2/. Run before earnings-migrate.
+    EarningsBackfill(equities_cmd::EarningsBackfillArgs),
+    /// One-time v1→v2 cutover: re-express existing earnings.v1 rows as
+    /// v2 with session=unknown, filling only dates not already timed in
+    /// v2. Run AFTER earnings-backfill + the earnings runner.
+    EarningsMigrate(equities_cmd::EarningsMigrateArgs),
     /// Per-symbol corporate-action history (splits + dividends) from
     /// Yahoo's `chart` endpoint with `events=div|split`. Writes one
     /// yearly parquet per symbol under dataset/yahoo/corp_actions/v1/.
@@ -828,6 +837,8 @@ async fn main() -> Result<()> {
         Command::Equities(c) => match c.target {
             EquitiesTarget::Bars(a) => equities_cmd::run_bars(a).await,
             EquitiesTarget::Earnings(a) => equities_cmd::run_earnings(a).await,
+            EquitiesTarget::EarningsBackfill(a) => equities_cmd::run_earnings_backfill(a).await,
+            EquitiesTarget::EarningsMigrate(a) => equities_cmd::run_earnings_migrate(a).await,
             EquitiesTarget::CorpActions(a) => equities_cmd::run_corp_actions(a).await,
         },
         Command::Rss(c) => match c.target {

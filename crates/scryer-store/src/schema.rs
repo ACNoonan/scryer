@@ -1008,6 +1008,28 @@ impl DatasetSchema for earnings::v1::Event {
     }
 }
 
+impl DatasetSchema for earnings::v2::Event {
+    const DATA_TYPE: &'static str = "earnings";
+    const SCHEMA_MAJOR: u32 = 2;
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("symbol");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Yearly;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        // earnings_date is days since unix epoch; year is what we
+        // partition by, so seconds at UTC midnight is sufficient.
+        (self.earnings_date as i64) * 86_400
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        earnings::v2::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        earnings::v2::from_record_batch(batch)
+    }
+}
+
 impl DatasetSchema for yahoo::v1::Bar {
     const DATA_TYPE: &'static str = "equities_daily";
     const PARTITION_KEY_PREFIX: Option<&'static str> = Some("symbol");

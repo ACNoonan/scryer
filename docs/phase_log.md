@@ -165,6 +165,7 @@ Last compacted: 2026-05-02.
 | 59-63 | 2026-04-29/30 | Backed NAV, Chainlink, corp actions, halts, CME backfill |
 | 64-74 | 2026-04-30/05-01 | poster tx, cadence, watchdog, MarginFi, Pyth backfill, proxy/deploy, Kraken trades |
 | 77-84 | 2026-05-01 | LVR pivots, Paper-4 specs, v0.2 platform methodology |
+| 126 | 2026-05-25 | `earnings.v2` session timing: Finnhub forward `hour`→`session`, Yahoo `visualization` deep-history backfill (ET time-of-day derivation), `scry equities earnings-migrate` v1→v2 cutover. Landed 6 Soothsayer names; 100% timed among reported earnings 2015+. |
 
 ## Append Rule
 
