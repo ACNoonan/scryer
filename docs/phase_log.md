@@ -166,6 +166,7 @@ Last compacted: 2026-05-02.
 | 64-74 | 2026-04-30/05-01 | poster tx, cadence, watchdog, MarginFi, Pyth backfill, proxy/deploy, Kraken trades |
 | 77-84 | 2026-05-01 | LVR pivots, Paper-4 specs, v0.2 platform methodology |
 | 126 | 2026-05-25 | `earnings.v2` session timing: Finnhub forward `hour`→`session`, Yahoo `visualization` deep-history backfill (ET time-of-day derivation), `scry equities earnings-migrate` v1→v2 cutover. Landed 6 Soothsayer names; 100% timed among reported earnings 2015+. |
+| 127 | 2026-05-25 | `yahoo_corp_actions.v1` overnight ex-dividend backfill (no new code): landed 10-name full Yahoo history (SPY→1993) for soothsayer's close→next-open dividend adjustment. Spot-checked SPY amounts + AAPL/NVDA/TSLA/MSTR split ratios. GLD/HOOD legitimately empty. |
 
 ## Append Rule
 

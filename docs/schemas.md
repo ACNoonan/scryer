@@ -1937,11 +1937,29 @@ date must not create a second row. Yearly + symbol-keyed partition:
 
 ## yahoo_corp_actions.v1
 
-**Status.** locked — phase 61 (2026-04-29). Closes
+**Status.** done — locked phase 61 (2026-04-29); 10-symbol overnight
+backfill landed 2026-05-25 (phase 127). Originally closed the
 soothsayer-paper-1-blocker §10.2 follow-up filter (drop OOS weekends
-with corp-action confounders, rerun DQ). Existing `backed.v1`
-corp_actions venue is mis-labeled (tracks Backed.fi GitHub-repo
-commit metadata, not equity-side actions on the underlying tickers).
+with corp-action confounders, rerun DQ). Now also the ex-dividend
+source for soothsayer's overnight (close→next-open) calibration: an
+ex-div morning otherwise reads as a systematic down-gap on the raw
+open, biasing the lower band; the consumer subtracts `dividend_amount`
+from the `event_date` open. Existing `backed.v1` corp_actions venue is
+mis-labeled (tracks Backed.fi GitHub-repo commit metadata, not
+equity-side actions on the underlying tickers) and is **not** a
+substitute.
+
+**Backfill landed (10 soothsayer names, full Yahoo history).** Per-symbol
+earliest `event_date` / row count: SPY 1993-03-19 (134) · QQQ 2000-03-20
+(89) · AAPL 1990-02-16 (84) · NVDA 2000-06-27 (60) · TLT 2002-09-03
+(284, monthly) · GOOGL 2014-04-03 (10) · MSTR 2000-01-27 (3, splits
+only) · TSLA 2020-08-31 (2, splits only). **GLD and HOOD have zero rows
+— correct**: GLD (gold trust) pays no distribution and has never split;
+HOOD pays no dividend and hasn't split since its 2021 IPO. Consumer
+mapping: `ex_date` = `event_date`, `cash_amount` = `dividend_amount`,
+`action_type` = `event_type` (filter `= 'split'` to exclude splits from
+the dividend adjustment). Spot-checked: SPY quarterly amounts and the
+AAPL/NVDA/TSLA/MSTR split ratios match reality.
 
 **Source.** Yahoo `query2.finance.yahoo.com/v8/finance/chart/{symbol}
 ?events=div|split` — same upstream that Python `yfinance` wraps
