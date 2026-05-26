@@ -14,8 +14,8 @@ use anyhow::{Context, Result};
 use chrono::{NaiveDate, TimeZone, Utc};
 use clap::Parser;
 use scryer_fetch_databento::{
-    fetch_equities_daily, fetch_ocea_ohlcv_1m, fetch_ohlcv_1m, symbol_to_databento_continuous,
-    PollConfig,
+    fetch_equities_daily, fetch_ocea_ohlcv_1m, fetch_ohlcv_1m, fetch_us_equity_ohlcv_1m,
+    symbol_to_databento_continuous, PollConfig,
 };
 use scryer_schema::bo_intraday_1m::v1 as bo_schema;
 use scryer_schema::cme_intraday_1m::v1 as schema;
@@ -344,6 +344,18 @@ pub struct OceaIntradayArgs {
     api_key: String,
     #[arg(long, default_value = "databento:ocea-memoir")]
     source: String,
+    /// Databento dataset code. Defaults to OCEA.MEMOIR (Blue Ocean
+    /// ATS — the historical-companion dataset for the Pyth Lazer
+    /// overnight tape). Other US-equity OHLCV-1m datasets accepted
+    /// for venue-coverage probes: `DBEQ.PLUS`, `DBEQ.BASIC`,
+    /// `EQUS.ALL`, `EQUS.MINI`, `EQUS.SUMMARY`. When using a probe
+    /// dataset, point `--dataset`/`SCRYER_DATASET` at a tmp dir to
+    /// isolate probe data from the canonical store; the venue/
+    /// schema-id is `bo_intraday_1m.v1` regardless and the schema
+    /// docstring would be misleading if probe rows landed in the
+    /// canonical `blue_ocean/` partition tree.
+    #[arg(long, default_value = "OCEA.MEMOIR")]
+    databento_dataset: String,
     #[arg(long, default_value_t = 120)]
     request_timeout_secs: u64,
     #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
@@ -402,17 +414,32 @@ pub async fn run_ocea_intraday(args: OceaIntradayArgs) -> Result<()> {
 
     tracing::info!(
         symbols = symbols.len(),
+        dataset = %args.databento_dataset,
         start = start_label,
         end = end_label,
-        "Databento OCEA.MEMOIR ohlcv-1m batch"
+        "Databento ohlcv-1m batch"
     );
 
     let mut by_symbol: BTreeMap<String, Vec<bo_schema::Bar>> = BTreeMap::new();
     let mut errors: Vec<(String, String)> = Vec::new();
     let mut total_records = 0usize;
     for sym in &symbols {
-        tracing::info!(sym, "fetching");
-        match fetch_ocea_ohlcv_1m(&args.api_key, &cfg, sym, start_dt, end_dt, &meta).await {
+        tracing::info!(sym, dataset = %args.databento_dataset, "fetching");
+        let result = if args.databento_dataset == "OCEA.MEMOIR" {
+            fetch_ocea_ohlcv_1m(&args.api_key, &cfg, sym, start_dt, end_dt, &meta).await
+        } else {
+            fetch_us_equity_ohlcv_1m(
+                &args.api_key,
+                &cfg,
+                &args.databento_dataset,
+                sym,
+                start_dt,
+                end_dt,
+                &meta,
+            )
+            .await
+        };
+        match result {
             Ok(rows) => {
                 tracing::info!(sym, records = rows.len(), "decoded");
                 total_records += rows.len();

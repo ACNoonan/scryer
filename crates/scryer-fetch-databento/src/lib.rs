@@ -166,9 +166,34 @@ pub async fn fetch_ocea_ohlcv_1m(
     end: OffsetDateTime,
     meta: &Meta,
 ) -> Result<Vec<BoBar>, FetchError> {
+    fetch_us_equity_ohlcv_1m(api_key, cfg, "OCEA.MEMOIR", symbol, start, end, meta).await
+}
+
+/// Generalized 1-minute OHLCV fetcher across any Databento US-equity
+/// dataset that supports `Schema::Ohlcv1M` + `SType::RawSymbol`.
+/// Used for venue probes (DBEQ.PLUS, EQUS.ALL, EQUS.MINI) without
+/// committing to a separate per-dataset schema. Returns `bo_intraday_1m::v1::Bar`
+/// rows so probe output is comparable to the OCEA backfill.
+///
+/// `dataset_code` is the Databento canonical string (`"OCEA.MEMOIR"`,
+/// `"DBEQ.PLUS"`, `"EQUS.ALL"`, etc.); the SDK parses it via
+/// `Dataset::from_str`. Returns FetchError::Databento if the code is
+/// unrecognized.
+pub async fn fetch_us_equity_ohlcv_1m(
+    api_key: &str,
+    cfg: &PollConfig,
+    dataset_code: &str,
+    symbol: &str,
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+    meta: &Meta,
+) -> Result<Vec<BoBar>, FetchError> {
     if api_key.is_empty() {
         return Err(FetchError::NoApiKey);
     }
+    let dataset: Dataset = dataset_code
+        .parse()
+        .map_err(|e| FetchError::Databento(format!("unknown dataset {dataset_code}: {e}")))?;
     let mut client = HistoricalClient::builder()
         .key(api_key)
         .map_err(|e| FetchError::Databento(format!("client key: {e}")))?
@@ -176,7 +201,7 @@ pub async fn fetch_ocea_ohlcv_1m(
         .map_err(|e| FetchError::Databento(format!("client build: {e}")))?;
 
     let params = GetRangeParams::builder()
-        .dataset(Dataset::OceaMemoir)
+        .dataset(dataset)
         .date_time_range(start..end)
         .symbols(symbol)
         .stype_in(SType::RawSymbol)
