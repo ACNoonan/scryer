@@ -38,7 +38,7 @@
 # poll") so the gap is tracked rather than silent.
 
 id = "equities-daily"
-description = "Daily Stooq EOD OHLCV poll for the Soothsayer 10-symbol universe + BTC-USD (11 total). Forward-only; lookback=7d for cheap dedup-safe re-pulls. Futures + ^VIX intentionally excluded — Stooq does not serve them; tracked separately in wishlist."
+description = "Daily Yahoo /v8/finance/chart EOD OHLCV poll for the Soothsayer 10-symbol universe + BTC-USD (11 total). Forward-only; lookback=10d for cheap dedup-safe re-pulls. Source switched from Stooq → Yahoo 2026-06-25 after Stooq gated its free CSV behind a JS bot-challenge (silent stall from ~Jun 5). Yahoo needs no apikey; raw yfinance symbols. Futures + ^VIX still excluded — tracked separately in wishlist."
 schema_ids = ["yahoo.v1"]
 
 [fetch]
@@ -46,8 +46,8 @@ command = "scry"
 args = [
     "equities", "bars",
     "--symbols", "SPY,QQQ,AAPL,GOOGL,NVDA,TSLA,HOOD,GLD,TLT,MSTR,BTC-USD",
-    "--lookback-days", "7",
-    "--source", "stooq:csv:runner",
+    "--lookback-days", "10",
+    "--source", "yahoo:chart:v8:runner",
 ]
 
 [criticality]

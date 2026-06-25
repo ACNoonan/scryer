@@ -22,7 +22,8 @@ use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use clap::Parser;
 use scryer_fetch_equities::{
-    finnhub, stooq, yahoo_corp_actions, yahoo_earnings, PollConfig, FetchError as EqFetchError,
+    finnhub, stooq, yahoo_corp_actions, yahoo_daily, yahoo_earnings, PollConfig,
+    FetchError as EqFetchError,
 };
 use scryer_schema::{earnings, yahoo, yahoo_corp_actions as schema_corp_actions, Meta};
 use scryer_store::{venue, Dataset, PartitionTime};
@@ -53,15 +54,23 @@ pub struct BarsArgs {
     /// idempotent.
     #[arg(long, default_value_t = 7)]
     lookback_days: i64,
-    /// Stooq API key. Free, captcha-acquired at
+    /// Stooq API key — only consulted when `--source` selects the
+    /// legacy `stooq:*` provider (Stooq gated its free CSV behind a JS
+    /// bot-challenge in mid-2026; the default provider is now Yahoo,
+    /// which needs no key). Free, captcha-acquired at
     /// `https://stooq.com/q/d/?s=spy.us&get_apikey`. Defaults to the
     /// `STOOQ_API_KEY` env var (loaded from `./.env` via dotenvy).
-    #[arg(long, env = "STOOQ_API_KEY")]
+    #[arg(long, env = "STOOQ_API_KEY", default_value = "")]
     apikey: String,
-    /// `_source` stamped on every emitted row.
-    #[arg(long, default_value = "stooq:csv")]
+    /// `_source` stamped on every emitted row, and the provider
+    /// selector: a value starting with `yahoo` uses the Yahoo
+    /// `/v8/finance/chart` daily endpoint (no key, raw yfinance
+    /// symbols); anything else uses the legacy Stooq CSV path.
+    #[arg(long, default_value = yahoo_daily::SOURCE_LABEL)]
     source: String,
-    /// Stooq base URL.
+    /// Provider base URL. Defaults to Stooq's host; when `--source`
+    /// selects Yahoo and this is left at the Stooq default, the Yahoo
+    /// chart host is substituted automatically.
     #[arg(long, default_value = stooq::DEFAULT_BASE_URL)]
     base_url: String,
     #[arg(long, default_value_t = 30)]
@@ -232,20 +241,35 @@ pub struct EarningsMigrateArgs {
 }
 
 pub async fn run_bars(args: BarsArgs) -> Result<()> {
-    if args.apikey.is_empty() {
+    // `--source` doubles as the provider selector. Yahoo (`yahoo:*`) is
+    // the default and needs no key; the legacy Stooq path still requires
+    // its apikey.
+    let use_yahoo = args.source.starts_with("yahoo");
+    if !use_yahoo && args.apikey.is_empty() {
         anyhow::bail!(
-            "Stooq apikey required; pass --apikey or set STOOQ_API_KEY env var. Acquire one at https://stooq.com/q/d/?s=spy.us&get_apikey"
+            "Stooq apikey required for source={}; pass --apikey or set STOOQ_API_KEY env var. Acquire one at https://stooq.com/q/d/?s=spy.us&get_apikey",
+            args.source
         );
     }
     if args.lookback_days <= 0 {
         anyhow::bail!("--lookback-days must be positive; got {}", args.lookback_days);
     }
-    let cfg = PollConfig {
+    let mut cfg = PollConfig {
         request_timeout: Duration::from_secs(args.request_timeout_secs),
         retry_max: args.retry_max,
         retry_delay: Duration::from_secs(args.retry_delay_secs),
         source_label: args.source.clone(),
         ..Default::default()
+    };
+    if use_yahoo {
+        // Yahoo's chart gate rejects non-browser TLS clients.
+        cfg.user_agent = yahoo_daily::DEFAULT_USER_AGENT.to_string();
+    }
+    // Substitute the Yahoo host when the caller left the Stooq default.
+    let base_url = if use_yahoo && args.base_url == stooq::DEFAULT_BASE_URL {
+        yahoo_daily::DEFAULT_BASE_URL.to_string()
+    } else {
+        args.base_url.clone()
     };
     let client = reqwest::Client::builder()
         .timeout(cfg.request_timeout)
@@ -273,24 +297,29 @@ pub async fn run_bars(args: BarsArgs) -> Result<()> {
         symbols = args.symbols.len(),
         start = %start,
         end = %end,
-        "fetching Stooq bars"
+        provider = if use_yahoo { "yahoo:chart:v8" } else { "stooq:csv" },
+        "fetching equities bars"
     );
 
     let mut by_symbol: BTreeMap<String, Vec<yahoo::v1::Bar>> = BTreeMap::new();
     let mut errors: Vec<(String, String)> = Vec::new();
     for symbol in &args.symbols {
-        match stooq::fetch_bars(
-            &client,
-            &cfg,
-            &args.base_url,
-            &args.apikey,
-            symbol,
-            &start,
-            &end,
-            &meta,
-        )
-        .await
-        {
+        let fetched = if use_yahoo {
+            yahoo_daily::fetch_bars(&client, &cfg, &base_url, symbol, &start, &end, &meta).await
+        } else {
+            stooq::fetch_bars(
+                &client,
+                &cfg,
+                &base_url,
+                &args.apikey,
+                symbol,
+                &start,
+                &end,
+                &meta,
+            )
+            .await
+        };
+        match fetched {
             Ok(bars) => {
                 tracing::info!(symbol, rows = bars.len(), "decoded");
                 by_symbol.entry(symbol.clone()).or_default().extend(bars);

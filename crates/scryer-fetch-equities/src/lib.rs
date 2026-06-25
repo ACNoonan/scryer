@@ -30,6 +30,7 @@
 pub mod finnhub;
 pub mod stooq;
 pub mod yahoo_corp_actions;
+pub mod yahoo_daily;
 pub mod yahoo_earnings;
 pub mod yahoo_intraday;
 
