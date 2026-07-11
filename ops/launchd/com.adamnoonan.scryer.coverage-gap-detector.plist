@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    LaunchAgent (user-level) — weekend/overnight coverage-gap detector.
+
+    Why this exists:
+      The disablesleep-watchdog prevents IDLE and CLAMSHELL sleep via the
+      persistent `SleepDisabled` flag, but nothing software-side can prevent
+      critical-battery force-sleep or power-loss. Those leave silent holes in
+      the live 24/7 cadence tapes (pyth, kamino_scope, redstone, cex_stock_
+      perp, soothsayer_v5) that were historically found only by manual
+      inspection days later (e.g. the 2026-07 audit that found half-covered
+      Sundays Jun 21 / Jul 5 and a mostly-down Mon Jun 22).
+
+      `scry freshness` catches "stale right now" but NOT "had a gap over the
+      weekend and recovered" — while the machine is off, the freshness
+      watchdog is off too. This agent runs on login/boot (RunAtLoad) and
+      daily, scanning the trailing window for days where >= 2 tapes dropped
+      together, and fires a macOS notification so a recovered-from gap is
+      LOUD instead of silent.
+
+    Install target: ~/Library/LaunchAgents (user session — osascript
+    notifications require the Aqua login session; a LaunchDaemon cannot post
+    them).
+
+    Install:
+      cp ops/launchd/com.adamnoonan.scryer.coverage-gap-detector.plist ~/Library/LaunchAgents/
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.adamnoonan.scryer.coverage-gap-detector.plist
+    Reload after edits:
+      launchctl bootout  gui/$(id -u)/com.adamnoonan.scryer.coverage-gap-detector 2>/dev/null
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.adamnoonan.scryer.coverage-gap-detector.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.coverage-gap-detector</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/.local/bin/uv</string>
+        <string>run</string>
+        <string>--no-project</string>
+        <string>--quiet</string>
+        <string>/Users/adamnoonan/Documents/scryer/ops/coverage_gap_detector.py</string>
+    </array>
+
+    <!-- Fire on login/boot: the first thing after a recovery is a report of
+         what was missed while down. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Plus a daily heartbeat at 09:00 local. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/adamnoonan/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/coverage-gap-detector.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/coverage-gap-detector.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>
