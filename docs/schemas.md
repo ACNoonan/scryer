@@ -1935,6 +1935,134 @@ date must not create a second row. Yearly + symbol-keyed partition:
 
 ---
 
+## earnings.v3
+
+**Status.** proposed — 2026-07-25. Supersedes v2, which is **unrepairable
+in place** (see "Why a new version" below). Requested by soothsayer after
+the 2026-07 `earnings_night` outage.
+
+```
+symbol                string
+fiscal_period         string   // '2026Q1' — the STABLE identity of the event
+earnings_date         date     (Date32, US/Eastern calendar date)
+earnings_date_source  string   // 'finnhub' | 'yahoo_backfill'
+session               string   // 'bmo' | 'amc' | 'dmh' | 'unknown'
+session_source        string nullable  // 'edgar_8k' | 'yahoo_backfill' | 'finnhub'
+session_confirmed     bool     // DERIVED: session_source in {edgar_8k, yahoo_backfill}
+filing_ts             i64 nullable     // UTC; populated iff session_source = 'edgar_8k'
+accession_number      string nullable  // the 8-K that supplied the timing
+```
+
+`session` semantics are unchanged from v2 and remain the consumer
+contract: for an overnight gap close(D0)→open(D1), an event belongs to
+that gap iff it is `amc` dated D0 or `bmo` dated D1.
+
+`_dedup_key = "earnings3:{symbol}:{fiscal_period}:{earnings_date}:{session_source}"`.
+
+### Why a new version rather than a fix to v2
+
+v2 cannot be repaired by writing to it. Three defects, and the first is
+structural:
+
+1. **First-writer-wins freezes the worst claim.** v2's dedup key omits
+   `session` deliberately — "session is an *attribute* of an
+   announcement, not part of its identity, so a later fetch that learns
+   real timing for an already-known date must not create a second row."
+   The intent was right, but `merge_dedup`
+   (`crates/scryer-store/src/lib.rs:397`) keeps the **first** row on a
+   collision. So a later fetch that learns real timing does not update
+   the row — it is discarded. `earnings-migrate` (2026-04-27) ran before
+   `earnings-backfill` (2026-05-25), inverting the ordering
+   `bin/scry/src/equities_cmd.rs:226` documents as mandatory, and 20
+   legacy `session=unknown, session_confirmed=NULL` rows now permanently
+   shadow 2025-07 → 2026-04. Even a live upstream returns
+   `rows_added=0`.
+2. **Date revisions manufacture phantom events.** With `earnings_date`
+   in the identity, a Finnhub date revision appends a second row rather
+   than superseding the first: AAPL 07-29/07-30, GOOGL
+   07-21/07-22/07-28, MSTR 07-29/07-30/08-04, NVDA 08-25/08-26. Counts
+   run 5–6/yr against a true 4, and downstream this fabricates extra
+   earnings nights.
+3. **`_source` cannot express per-field provenance.** After EDGAR, the
+   *date* may come from Finnhub while the *session* comes from an 8-K
+   acceptance timestamp. One row-level `_source` would have to lie about
+   one of them.
+
+v3 fixes all three without touching shared store semantics. `symbol +
+fiscal_period` is the stable identity, so a revised date supersedes
+rather than duplicates. `session_source` is in the key, so **every source
+states its claim exactly once** and first-writer-wins becomes harmless —
+nobody is trying to overwrite anybody. Resolution moves to read time.
+
+### Read-time resolution — use the helper, do not hand-roll
+
+A consumer wanting the live view of an event resolves in this order:
+
+- **session** — `edgar_8k` > `yahoo_backfill` > `finnhub`. The first two
+  are authoritative timing; Finnhub's `hour` is an estimate and is *not*
+  confirmation.
+- **earnings_date** — latest `_fetched_at` for the `(symbol,
+  fiscal_period)` group.
+
+Ship this as a documented helper rather than leaving it to each caller.
+Divergent hand-rolled resolution is how the 2026-07 defect stayed
+invisible for 14 months across two consumers.
+
+### EDGAR is a timing oracle, never a date-discovery source
+
+`edgar_8k.v1` supplies `filing_ts` acceptance timestamps. Item-2.02
+acceptance times in ET resolve `bmo`/`amc` exactly and authoritatively —
+they close 19 of the 22 rows left dark in soothsayer's panel window
+(AAPL/GOOGL/NVDA `amc` 16:01–16:31, TSLA 2026-04-22 `amc` 16:10,
+MSTR/HOOD likewise).
+
+**Hard constraint, enforced in the builder and not merely documented:**
+a row may take `session_source = 'edgar_8k'` only when `(symbol,
+fiscal_period)` **already exists** from a date source. EDGAR must never
+create a row. A naive "item 2.02 ⇒ earnings" rule adds **8 phantoms**,
+because TSLA files quarterly *delivery* 8-Ks at ~09:05 ET under the same
+item. Encoding the constraint makes that failure structurally impossible;
+documenting it only makes it rediscoverable.
+
+Rows with no 2.02 filing (GOOGL 2025-06-06, HOOD/NVDA 2025-06-26) stay
+unconfirmed and are correctly excluded by consumers that require
+confirmation.
+
+### Sources
+
+- **`finnhub:earnings:runner`** — forward dates + estimated `hour`.
+  Writes `earnings_date_source='finnhub'`, `session_source='finnhub'`.
+  Free tier serves no history.
+- **`yahoo:earnings:visualization`** — historical dates + confirmed
+  BMO/AMC. **Dead upstream as of ~Apr–Jun 2025**: returns 461 rows
+  terminating AAPL 2025-05-01 / MSTR 05-22 / TSLA 04-22 / GOOGL 06-06 /
+  HOOD 06-26 / NVDA 06-26, and not a `--size` truncation (GOOGL/HOOD/TSLA
+  return 84/18/59 against a cap of 100). Retained for history; must not
+  be relied on for anything recent.
+- **`sec:edgar-8k`** — item-2.02 acceptance timestamps, the only live
+  confirmation path.
+
+### CLI
+
+- `scry equities earnings --symbols ...` — Finnhub forward poll.
+- `scry equities earnings-backfill --symbols ...` — Yahoo history
+  one-shot. **Reports `symbols_failed=0` even though the upstream is
+  dead**; treat a `rows_added=0` as suspicious, not as a clean no-op.
+- `scry sec edgar-8k --tickers ...` — must run before the v3 session
+  join.
+- `scry equities earnings-migrate-v3` — v2 → v3 rebuild. Unlike the v1→v2
+  migration this is **order-independent**, because every source claim
+  carries its own key.
+
+### Health check
+
+Confirmation decays silently while dates stay current, so recency of
+`earnings_date` is not a usable signal. Assert on **confirmed fraction**
+and **confirmation lag** within a trailing window. Reference
+implementation: `soothsayer.backtest.panel.check_earnings_confirmation_health`.
+
+---
+
 ## yahoo_corp_actions.v1
 
 **Status.** done — locked phase 61 (2026-04-29); 10-symbol overnight
