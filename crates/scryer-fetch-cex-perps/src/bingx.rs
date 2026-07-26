@@ -138,6 +138,9 @@ pub fn parse_ticker_response(
             .and_then(|s| s.as_str())
             .and_then(|s| s.parse::<f64>().ok()),
         suspended: None,
+        capture_id: None,
+        capture_started_at_us: None,
+        available_at_us: None,
         meta: Meta::new(SCHEMA_VERSION, fetched_at, SOURCE_LABEL),
     }))
 }

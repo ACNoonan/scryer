@@ -89,6 +89,9 @@ pub fn parse_ticker_response(
         open_interest: d.get("holdVol").and_then(|x| x.as_f64()),
         vol_24h: d.get("amount24").and_then(|x| x.as_f64()),
         suspended: None,
+        capture_id: None,
+        capture_started_at_us: None,
+        available_at_us: None,
         meta: Meta::new(SCHEMA_VERSION, fetched_at, SOURCE_LABEL),
     }))
 }

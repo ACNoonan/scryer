@@ -67,13 +67,28 @@ pub async fn run_indices(args: IndicesArgs) -> Result<()> {
 
     let mut all_rows: Vec<cboe_indices::v1::Bar> = Vec::new();
     let mut per_index: BTreeMap<String, usize> = BTreeMap::new();
+    // Per-index isolation: a transport blip on one index must not
+    // discard the other five. `VIX` is first in SUPPORTED_INDICES, so
+    // the previous fail-fast `?` meant a single DNS flap on VIX wrote
+    // ZERO rows for the whole bundle (observed 2026-06-26, 07-01,
+    // 07-22, 07-25 — the 07-25 instance left Friday's VIX bar missing
+    // and aborted soothsayer's weekend band-commitment).
+    // Failures are still surfaced: partial rows are written first, then
+    // the command exits non-zero so the runner records a `failed`
+    // workflow_run + dead_letter row. Salvage the data, keep the alarm.
+    let mut failures: Vec<String> = Vec::new();
     for idx in &indices {
-        let rows = fetch_index_history(&client, &cfg, idx, fetched_at)
-            .await
-            .with_context(|| format!("fetch_index_history {idx}"))?;
-        per_index.insert(idx.clone(), rows.len());
-        tracing::info!(index = %idx, rows = rows.len(), "decoded");
-        all_rows.extend(rows);
+        match fetch_index_history(&client, &cfg, idx, fetched_at).await {
+            Ok(rows) => {
+                per_index.insert(idx.clone(), rows.len());
+                tracing::info!(index = %idx, rows = rows.len(), "decoded");
+                all_rows.extend(rows);
+            }
+            Err(e) => {
+                tracing::error!(index = %idx, error = %e, "cboe index fetch failed; continuing");
+                failures.push(format!("{idx}: {e}"));
+            }
+        }
         if cfg.rate_limit_delay > Duration::ZERO {
             tokio::time::sleep(cfg.rate_limit_delay).await;
         }
@@ -81,6 +96,13 @@ pub async fn run_indices(args: IndicesArgs) -> Result<()> {
 
     if all_rows.is_empty() {
         println!("cboe indices: rows_added=0 (empty across all indices)");
+        if !failures.is_empty() {
+            anyhow::bail!(
+                "all {} index fetches failed: {}",
+                indices.len(),
+                failures.join("; ")
+            );
+        }
         return Ok(());
     }
 
@@ -105,5 +127,14 @@ pub async fn run_indices(args: IndicesArgs) -> Result<()> {
     println!(
         "cboe indices: rows_added={total_added} rows_deduped={total_deduped} partitions_written={total_partitions} per_index={per_index:?}"
     );
+
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "{}/{} index fetches failed (rows for the rest were written): {}",
+            failures.len(),
+            indices.len(),
+            failures.join("; ")
+        );
+    }
     Ok(())
 }

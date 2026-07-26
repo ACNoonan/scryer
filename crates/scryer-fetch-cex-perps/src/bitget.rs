@@ -105,6 +105,9 @@ pub fn parse_tickers_response(
             open_interest: parse_str_f64(entry.get("holdingAmount")),
             vol_24h: parse_str_f64(entry.get("usdtVolume")),
             suspended: None,
+            capture_id: None,
+            capture_started_at_us: None,
+            available_at_us: None,
             meta: Meta::new(SCHEMA_VERSION, fetched_at, SOURCE_LABEL),
         });
     }

@@ -23,6 +23,7 @@
 use std::time::Duration;
 
 use serde::Deserialize;
+use serde_json::Value;
 use thiserror::Error;
 
 pub const QUOTE_URL: &str = "https://lite-api.jup.ag/swap/v1/quote";
@@ -34,14 +35,14 @@ pub const XSTOCK_DECIMALS: u8 = 8;
 /// xStock `(symbol, mint)` registry. Verified on-chain 2026-04-22;
 /// re-derive if Backed (xStock issuer) ever rotates a mint.
 pub const XSTOCK_MINTS: &[(&str, &str)] = &[
-    ("SPYx",   "XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W"),
-    ("QQQx",   "Xs8S1uUs1zvS2p7iwtsG3b6fkhpvmwz4GYU3gWAmWHZ"),
-    ("TSLAx",  "XsDoVfqeBukxuZHWhdvWHBhgEHjGNst4MLodqsJHzoB"),
+    ("SPYx", "XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W"),
+    ("QQQx", "Xs8S1uUs1zvS2p7iwtsG3b6fkhpvmwz4GYU3gWAmWHZ"),
+    ("TSLAx", "XsDoVfqeBukxuZHWhdvWHBhgEHjGNst4MLodqsJHzoB"),
     ("GOOGLx", "XsCPL9dNWBMvFtTmwcCA5v3xWPSMEBCszbQdiLLq6aN"),
-    ("AAPLx",  "XsbEhLAtcf6HdfpFZ5xEMdqW8nfAvcsP5bdudRLJzJp"),
-    ("NVDAx",  "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh"),
-    ("MSTRx",  "XsP7xzNPvEHS1m6qfanPUGjNmdnmsLKEoNAnHjdxxyZ"),
-    ("HOODx",  "XsvNBAYkrDRNhA7wPHQfX3ZUXZyZLdnCQDfHZ56bzpg"),
+    ("AAPLx", "XsbEhLAtcf6HdfpFZ5xEMdqW8nfAvcsP5bdudRLJzJp"),
+    ("NVDAx", "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh"),
+    ("MSTRx", "XsP7xzNPvEHS1m6qfanPUGjNmdnmsLKEoNAnHjdxxyZ"),
+    ("HOODx", "XsvNBAYkrDRNhA7wPHQfX3ZUXZyZLdnCQDfHZ56bzpg"),
 ];
 
 #[derive(Debug, Error)]
@@ -85,9 +86,25 @@ impl Default for JupiterConfig {
 /// Subset of Jupiter's quote response. Other fields (routePlan,
 /// priceImpactPct, etc.) are tolerantly ignored.
 #[derive(Deserialize, Debug)]
-struct QuoteResponse {
+pub struct QuoteResponse {
+    #[serde(rename = "inAmount")]
+    pub in_amount: String,
     #[serde(rename = "outAmount")]
-    out_amount: String,
+    pub out_amount: String,
+    #[serde(rename = "otherAmountThreshold")]
+    pub other_amount_threshold: String,
+    #[serde(rename = "swapMode")]
+    pub swap_mode: String,
+    #[serde(rename = "slippageBps")]
+    pub slippage_bps: u32,
+    #[serde(rename = "priceImpactPct")]
+    pub price_impact_pct: String,
+    #[serde(rename = "routePlan")]
+    pub route_plan: Value,
+    #[serde(rename = "contextSlot")]
+    pub context_slot: Option<u64>,
+    #[serde(rename = "timeTaken")]
+    pub time_taken: Option<f64>,
 }
 
 /// Get the xStock mint for a given symbol.
@@ -108,6 +125,21 @@ pub async fn quote(
     output_mint: &str,
     amount_raw: u128,
 ) -> Result<u128, JupiterError> {
+    let parsed = quote_details(client, cfg, input_mint, output_mint, amount_raw).await?;
+    parsed
+        .out_amount
+        .parse::<u128>()
+        .map_err(|e| JupiterError::MalformedBody(format!("outAmount: {e}")))
+}
+
+/// Issue one quote call and preserve the execution-relevant response.
+pub async fn quote_details(
+    client: &reqwest::Client,
+    cfg: &JupiterConfig,
+    input_mint: &str,
+    output_mint: &str,
+    amount_raw: u128,
+) -> Result<QuoteResponse, JupiterError> {
     let resp = client
         .get(&cfg.quote_url)
         .query(&[
@@ -129,10 +161,7 @@ pub async fn quote(
     }
     let parsed: QuoteResponse = serde_json::from_str(&text)
         .map_err(|e| JupiterError::MalformedBody(format!("non-json: {e}")))?;
-    parsed
-        .out_amount
-        .parse::<u128>()
-        .map_err(|e| JupiterError::MalformedBody(format!("outAmount: {e}")))
+    Ok(parsed)
 }
 
 /// Sell-side mid for an xStock: USDC-per-share implied by Jupiter's
@@ -145,7 +174,8 @@ pub async fn xstock_mid_usdc(
     symbol: &str,
     shares: f64,
 ) -> Result<f64, JupiterError> {
-    let mint = xstock_mint(symbol).ok_or_else(|| JupiterError::UnknownSymbol(symbol.to_string()))?;
+    let mint =
+        xstock_mint(symbol).ok_or_else(|| JupiterError::UnknownSymbol(symbol.to_string()))?;
     let amount_raw = (shares * 10f64.powi(XSTOCK_DECIMALS as i32)).round() as u128;
     let out = quote(client, cfg, mint, USDC_MINT, amount_raw).await?;
     let usdc = out as f64 / 10f64.powi(USDC_DECIMALS as i32);
@@ -164,7 +194,8 @@ pub async fn xstock_two_sided_mid_usdc(
     symbol: &str,
     shares: f64,
 ) -> Result<(f64, f64, f64), JupiterError> {
-    let mint = xstock_mint(symbol).ok_or_else(|| JupiterError::UnknownSymbol(symbol.to_string()))?;
+    let mint =
+        xstock_mint(symbol).ok_or_else(|| JupiterError::UnknownSymbol(symbol.to_string()))?;
 
     let sell_raw = (shares * 10f64.powi(XSTOCK_DECIMALS as i32)).round() as u128;
     let sell_out = quote(client, cfg, mint, USDC_MINT, sell_raw).await?;
@@ -176,8 +207,7 @@ pub async fn xstock_two_sided_mid_usdc(
         });
     }
 
-    let buy_usdc_raw =
-        ((bid * shares) * 10f64.powi(USDC_DECIMALS as i32)).round() as u128;
+    let buy_usdc_raw = ((bid * shares) * 10f64.powi(USDC_DECIMALS as i32)).round() as u128;
     let buy_out = quote(client, cfg, USDC_MINT, mint, buy_usdc_raw).await?;
     let shares_out = buy_out as f64 / 10f64.powi(XSTOCK_DECIMALS as i32);
 
@@ -224,12 +254,17 @@ mod tests {
         // Real Jupiter response shape (truncated; many other fields
         // exist but we only care about outAmount).
         let body = r#"{
+            "inAmount":"100000000",
             "inputMint":"XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W",
             "outputMint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
             "outAmount":"71422500",
             "swapMode":"ExactIn",
+            "otherAmountThreshold":"71000000",
+            "slippageBps":50,
             "priceImpactPct":"0.0001",
-            "routePlan":[]
+            "routePlan":[],
+            "contextSlot":123,
+            "timeTaken":0.01
         }"#;
         let parsed: QuoteResponse = serde_json::from_str(body).unwrap();
         assert_eq!(parsed.out_amount, "71422500");

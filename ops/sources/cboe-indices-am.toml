@@ -1,0 +1,74 @@
+# Morning catch-up sibling of `cboe-indices`. Same fetcher, same
+# canonical dataset, different time of day — the point is redundancy,
+# not new data.
+#
+# Why this exists (2026-07-25 incident):
+# The evening `cboe-indices` fire at `daily(22:30Z)` (18:30 ET) is the
+# primary. It has two failure modes that compounded into a lost
+# soothsayer weekend band-commitment:
+#
+#   1. CBOE republishes the `VIX` and `SKEW` history CSVs LATER than
+#      the rest of the VIX family. On Fri 2026-07-24 the 18:30 ET fire
+#      succeeded but returned VIX/SKEW stale at 07-23 while
+#      VIX1D/3M/6M/9D all carried 07-24. Phase 121 sized the cadence
+#      off a "~2h post-16:15 ET settlement" assumption — ~15 min of
+#      margin, and it slips.
+#   2. Transient DNS failures on `cdn.cboe.com` at the 18:30 ET fire
+#      (2026-06-26, 07-01, 07-22, 07-25).
+#
+# Normally (1) self-heals: the NEXT evening fire catches the prior
+# close. But that recovery lands 18:30 ET Saturday, and the only
+# consumer deadline that matters — soothsayer's Saturday 19:30 ET
+# band-commitment, with a Sunday 10:00 ET retry — sits between it and
+# Globex reopen Sunday 18:00 ET. On 2026-07-25 the Saturday evening
+# fire hit (2) and died, so the Sunday 10:00 ET retry had nothing to
+# read either and the weekend's pre-open commitment would have been
+# lost outright, not merely delayed. One hour of margin, single point
+# of failure, no attempt left before the deadline.
+#
+# `daily(11:00Z)` = 07:00 EDT / 06:00 EST. Chosen because:
+#   - CBOE's overnight republish is long done, so the prior session's
+#     VIX/SKEW are reliably present — this is the fire that fixes (1).
+#   - It is ~12.5h ahead of the Saturday 19:30 ET band-commitment
+#     instead of 1h, so a single failure is no longer terminal.
+#   - It is decorrelated in time from the 18:30 ET fire, which is what
+#     buys redundancy against (2) — a network flap at one hour of the
+#     day says nothing about the other.
+#   - It stays clear of soothsayer's Tuesday 09:00 ET forward-tape
+#     harness, which needs Monday's close already landed.
+#
+# Cost of the duplication is ~nil: each fire pulls the FULL public
+# history and the store dedups idempotently on
+# `cboe_indices:{index}:{date}`, so a fire that finds nothing new
+# writes nothing. ~3s wall-clock, 6 public CDN CSVs, no auth.
+#
+# Retry budget matches the evening manifest (5x10s = 50s) — see the
+# note there; the 3x2s default cannot ride out a DNS flap.
+
+id = "cboe-indices-am"
+description = "Morning catch-up re-pull of the CBOE VIX-family + SKEW CSVs. Redundant sibling of `cboe-indices`, offset ~12h to decorrelate transport failures and to absorb CBOE's late VIX/SKEW republish before soothsayer's weekend band-commitment reads them."
+schema_ids = ["cboe_indices.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "cboe", "indices",
+    "--source", "cboe:csv:runner-am",
+    "--retry-max", "5",
+    "--retry-delay-secs", "10",
+]
+
+[criticality]
+tier = "tier-2"
+owner = "@adam"
+consumer_impact = "Redundancy fire for the daily VIX-family + SKEW levels. Stale = no immediate impact on its own (the evening `cboe-indices` fire is primary), but losing BOTH leaves soothsayer's Saturday band-commitment with no ^VIX bar and no attempt remaining before Globex reopen."
+
+[freshness]
+# 25h ceiling, same shape as the evening sibling.
+sla_secs = 90000
+
+[budget]
+max_requests_per_run = 30
+
+[workflow]
+sensor = "daily(11:00Z)"

@@ -170,10 +170,7 @@ impl fmt::Display for SchemaId {
 pub enum SchemaIdError {
     WrongShape(String),
     UnknownDomain(String),
-    BadSegment {
-        kind: &'static str,
-        value: String,
-    },
+    BadSegment { kind: &'static str, value: String },
     BadVersion(String),
 }
 
@@ -234,6 +231,8 @@ pub const KNOWN_V2_SCHEMAS: &[SchemaId] = &[
     SchemaId::new_static(Domain::Volatility, "yahoo", "single_stock_iv", 2),
     SchemaId::new_static(Domain::Oracle, "soothsayer_v6", "band_tape", 2),
     SchemaId::new_static(Domain::Oracle, "pyth_lazer", "tape", 2),
+    SchemaId::new_static(Domain::Cex, "aggregate", "stock_perp_bbo", 2),
+    SchemaId::new_static(Domain::Solana, "jupiter", "route_quote", 2),
 ];
 
 #[cfg(test)]
@@ -313,8 +312,8 @@ mod tests {
     fn known_v2_schemas_all_parse() {
         for id in KNOWN_V2_SCHEMAS {
             let s = id.to_canonical_string();
-            let reparsed = SchemaId::parse(&s)
-                .unwrap_or_else(|e| panic!("registry id {s} fails parse: {e}"));
+            let reparsed =
+                SchemaId::parse(&s).unwrap_or_else(|e| panic!("registry id {s} fails parse: {e}"));
             assert_eq!(*id, reparsed, "registry id {s} fails round-trip");
         }
     }
@@ -325,7 +324,10 @@ mod tests {
         let mut seen: BTreeSet<String> = BTreeSet::new();
         for id in KNOWN_V2_SCHEMAS {
             let s = id.to_canonical_string();
-            assert!(seen.insert(s.clone()), "duplicate schema id in registry: {s}");
+            assert!(
+                seen.insert(s.clone()),
+                "duplicate schema id in registry: {s}"
+            );
         }
     }
 }

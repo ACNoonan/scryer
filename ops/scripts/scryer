@@ -161,7 +161,18 @@ cmd_deploy() {
   local manifest_src_dir="$REPO_ROOT/ops/sources"
   local manifest_dest_dir="$SUPPORT_ROOT/manifests"
   local plist_src_dir="$REPO_ROOT/ops/launchd"
-  local target_dir="$REPO_ROOT/target/release"
+  # Resolve the cargo target dir rather than assuming $REPO_ROOT/target.
+  # The global ~/.cargo/config.toml sets `build.target-dir` to a shared
+  # ~/.cache/cargo-target (deduped deps + one place to GC), so the
+  # hardcoded path did not exist and every `scryer deploy` failed at the
+  # `[[ ! -x ]]` check below. Ask cargo where it actually built.
+  local cargo_target_root
+  cargo_target_root="$( cd "$REPO_ROOT" && cargo metadata --no-deps --format-version 1 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null )"
+  if [[ -z "$cargo_target_root" ]]; then
+    cargo_target_root="$REPO_ROOT/target"
+  fi
+  local target_dir="$cargo_target_root/release"
 
   echo "==> deploy: build"
   ( cd "$REPO_ROOT" && cargo build --release -p scry-bin -p scryer-proxy-bin -p scryer-runner-bin )

@@ -65,6 +65,7 @@ pub mod venue {
     pub const NASDAQ: &str = "nasdaq";
     pub const KAMINO: &str = "kamino";
     pub const JUPITER_LEND: &str = "jupiter_lend";
+    pub const JUPITER: &str = "jupiter";
     pub const DRIFT: &str = "drift";
     pub const SOLANA: &str = "solana";
     pub const MANGO_V4: &str = "mango_v4";
@@ -81,6 +82,7 @@ pub mod venue {
     pub const EVM: &str = "evm";
     pub const CEX_PERP_FUNDING: &str = "cex_perp_funding";
     pub const CEX_STOCK_PERP: &str = "cex_stock_perp";
+    pub const CEX_AGGREGATE: &str = "cex.aggregate";
     /// Chainlink Data Streams reports observed on Solana via the
     /// Verifier program. Single venue covers all schema versions
     /// (v10, v11, future) — the row's `schema_id` column distinguishes.
@@ -238,12 +240,14 @@ impl Dataset {
         validate_partition_key::<S>(partition_key)?;
         let pt = time.into();
         if pt.granularity() != S::PARTITION_GRANULARITY {
-            return Err(StoreError::Arrow(arrow_schema::ArrowError::ComputeError(format!(
-                "schema `{}` is {:?}-granular but read was passed {:?} time",
-                std::any::type_name::<S>(),
-                S::PARTITION_GRANULARITY,
-                pt.granularity(),
-            ))));
+            return Err(StoreError::Arrow(arrow_schema::ArrowError::ComputeError(
+                format!(
+                    "schema `{}` is {:?}-granular but read was passed {:?} time",
+                    std::any::type_name::<S>(),
+                    S::PARTITION_GRANULARITY,
+                    pt.granularity(),
+                ),
+            )));
         }
         let path = partition_path_for::<S>(&self.root, venue, partition_key, pt);
         read_partition::<S>(&path)
@@ -268,15 +272,9 @@ fn partition_path_for<S: DatasetSchema>(
     time: PartitionTime,
 ) -> PathBuf {
     match (S::PARTITION_KEY_PREFIX, partition_key, time) {
-        (Some(prefix), Some(key), PartitionTime::Daily(day)) => partition::partition_path(
-            root,
-            venue,
-            S::DATA_TYPE,
-            S::SCHEMA_MAJOR,
-            prefix,
-            key,
-            day,
-        ),
+        (Some(prefix), Some(key), PartitionTime::Daily(day)) => {
+            partition::partition_path(root, venue, S::DATA_TYPE, S::SCHEMA_MAJOR, prefix, key, day)
+        }
         (Some(prefix), Some(key), PartitionTime::Monthly { year, month }) => {
             partition::partition_path_keyed_monthly(
                 root,
@@ -363,11 +361,12 @@ where
                 PartitionTime::Daily(day)
             }
             PartitionGranularity::Monthly => {
-                let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0).ok_or_else(|| {
-                    StoreError::Arrow(arrow_schema::ArrowError::ComputeError(format!(
-                        "timestamp {ts} (unix seconds) out of representable range for month"
-                    )))
-                })?;
+                let dt =
+                    chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0).ok_or_else(|| {
+                        StoreError::Arrow(arrow_schema::ArrowError::ComputeError(format!(
+                            "timestamp {ts} (unix seconds) out of representable range for month"
+                        )))
+                    })?;
                 use chrono::Datelike;
                 PartitionTime::Monthly {
                     year: dt.year(),
@@ -375,11 +374,12 @@ where
                 }
             }
             PartitionGranularity::Yearly => {
-                let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0).ok_or_else(|| {
-                    StoreError::Arrow(arrow_schema::ArrowError::ComputeError(format!(
-                        "timestamp {ts} (unix seconds) out of representable range for year"
-                    )))
-                })?;
+                let dt =
+                    chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0).ok_or_else(|| {
+                        StoreError::Arrow(arrow_schema::ArrowError::ComputeError(format!(
+                            "timestamp {ts} (unix seconds) out of representable range for year"
+                        )))
+                    })?;
                 use chrono::Datelike;
                 PartitionTime::Yearly(dt.year())
             }
@@ -551,9 +551,7 @@ fn lock_path_for(path: &Path) -> PathBuf {
 ///
 /// Skips files that don't carry all three columns (e.g. accidentally
 /// pointing at a different schema's parquet).
-pub fn read_signature_slot_block_time(
-    path: &Path,
-) -> Result<Vec<(String, u64, i64)>, StoreError> {
+pub fn read_signature_slot_block_time(path: &Path) -> Result<Vec<(String, u64, i64)>, StoreError> {
     use arrow_array::{Int64Array, LargeStringArray};
 
     let mut files: Vec<PathBuf> = Vec::new();
@@ -586,7 +584,10 @@ pub fn read_signature_slot_block_time(
             let sig_idx = schema.index_of("signature").unwrap();
             let slot_idx = schema.index_of("slot").unwrap();
             let bt_idx = schema.index_of("block_time").unwrap();
-            let Some(sig) = batch.column(sig_idx).as_any().downcast_ref::<LargeStringArray>()
+            let Some(sig) = batch
+                .column(sig_idx)
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
             else {
                 continue;
             };
@@ -676,16 +677,12 @@ pub fn read_liquidation_events(path: &Path) -> Result<Vec<LiquidationEvent>, Sto
                 .index_of("repay_symbol")
                 .ok()
                 .or_else(|| schema.index_of("supply_symbol").ok())
-                .and_then(|i| {
-                    batch.column(i).as_any().downcast_ref::<LargeStringArray>()
-                });
+                .and_then(|i| batch.column(i).as_any().downcast_ref::<LargeStringArray>());
             let sym_b = schema
                 .index_of("withdraw_symbol")
                 .ok()
                 .or_else(|| schema.index_of("borrow_symbol").ok())
-                .and_then(|i| {
-                    batch.column(i).as_any().downcast_ref::<LargeStringArray>()
-                });
+                .and_then(|i| batch.column(i).as_any().downcast_ref::<LargeStringArray>());
             for i in 0..batch.num_rows() {
                 let mut symbols: Vec<String> = Vec::new();
                 if let Some(a) = sym_a {
@@ -765,11 +762,7 @@ pub fn read_kamino_reserve_symbol_map(
             };
             for i in 0..batch.num_rows() {
                 let decimals = dec.value(i).clamp(0, u8::MAX as i64) as u8;
-                out.push((
-                    pda.value(i).to_string(),
-                    sym.value(i).to_string(),
-                    decimals,
-                ));
+                out.push((pda.value(i).to_string(), sym.value(i).to_string(), decimals));
             }
         }
     }
@@ -812,9 +805,7 @@ pub struct MarginfiBankEntry {
 /// largest `_fetched_at` wins. Used by the `marginfi-liquidations`
 /// CLI to build its `BankRegistry` for per-row symbol/oracle
 /// enrichment.
-pub fn read_marginfi_bank_registry(
-    path: &Path,
-) -> Result<Vec<MarginfiBankEntry>, StoreError> {
+pub fn read_marginfi_bank_registry(path: &Path) -> Result<Vec<MarginfiBankEntry>, StoreError> {
     use arrow_array::{Int64Array, LargeStringArray, UInt8Array};
     use std::collections::HashMap;
 
@@ -882,10 +873,12 @@ pub fn read_marginfi_bank_registry(
                 continue;
             };
             // raw_account_b64 is optional — older partitions may lack it.
-            let raw = schema
-                .index_of("raw_account_b64")
-                .ok()
-                .and_then(|idx| batch.column(idx).as_any().downcast_ref::<LargeStringArray>());
+            let raw = schema.index_of("raw_account_b64").ok().and_then(|idx| {
+                batch
+                    .column(idx)
+                    .as_any()
+                    .downcast_ref::<LargeStringArray>()
+            });
             for i in 0..batch.num_rows() {
                 let bank_pda = bank.value(i).to_string();
                 let primary_oracle = okeys

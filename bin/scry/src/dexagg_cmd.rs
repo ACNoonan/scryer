@@ -9,6 +9,200 @@ use scryer_schema::geckoterminal;
 use scryer_schema::Meta;
 use scryer_store::Dataset;
 
+use scryer_fetch_dexagg::jupiter::{
+    quote_details, xstock_mint, JupiterConfig, USDC_DECIMALS, USDC_MINT,
+};
+use scryer_schema::jupiter_route_quote;
+
+#[derive(Parser, Debug)]
+pub struct JupiterQuoteTapeArgs {
+    #[arg(long, value_delimiter = ',', default_value = "SPYx,QQQx")]
+    symbols: Vec<String>,
+    /// Fixed USDC ExactIn ladder. The second leg sells the exact xStock
+    /// amount returned by the first leg, measuring an executable round trip.
+    #[arg(long, value_delimiter = ',', default_value = "100,1000,10000")]
+    notionals_usdc: Vec<f64>,
+    #[arg(long, default_value_t = 50)]
+    slippage_bps: u32,
+    #[arg(long, default_value_t = 15)]
+    request_timeout_secs: u64,
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
+    dataset: PathBuf,
+    #[arg(long, default_value = venue::JUPITER)]
+    venue: String,
+}
+
+pub async fn run_jupiter_quote_tape(args: JupiterQuoteTapeArgs) -> Result<()> {
+    if args.symbols.is_empty() || args.notionals_usdc.is_empty() {
+        anyhow::bail!("--symbols and --notionals-usdc cannot be empty");
+    }
+    if args
+        .notionals_usdc
+        .iter()
+        .any(|n| !n.is_finite() || *n <= 0.0)
+    {
+        anyhow::bail!("every notional must be finite and positive");
+    }
+    for symbol in &args.symbols {
+        if xstock_mint(symbol).is_none() {
+            anyhow::bail!("unknown xStock symbol: {symbol}");
+        }
+    }
+    let started_us = Utc::now().timestamp_micros();
+    let capture_id = format!("{started_us}-{:010}", std::process::id());
+    let cfg = JupiterConfig {
+        slippage_bps: args.slippage_bps,
+        request_timeout: Duration::from_secs(args.request_timeout_secs),
+        ..Default::default()
+    };
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(args.request_timeout_secs))
+        .user_agent(concat!("scry/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("building reqwest client")?;
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for symbol in args.symbols.clone() {
+        for notional in args.notionals_usdc.iter().copied() {
+            let client = client.clone();
+            let cfg = cfg.clone();
+            let capture_id = capture_id.clone();
+            let symbol = symbol.clone();
+            tasks.spawn(async move {
+                capture_jupiter_round_trip(&client, &cfg, &capture_id, &symbol, notional).await
+            });
+        }
+    }
+    let mut rows = Vec::new();
+    let mut errors = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        match joined.context("Jupiter quote task panicked")? {
+            Ok(mut group) => rows.append(&mut group),
+            Err(e) => errors.push(e.to_string()),
+        }
+    }
+    let mut by_symbol: std::collections::BTreeMap<String, Vec<jupiter_route_quote::v2::Row>> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        by_symbol.entry(row.symbol.clone()).or_default().push(row);
+    }
+    let ds = Dataset::new(&args.dataset);
+    let mut added = 0;
+    for (symbol, symbol_rows) in &by_symbol {
+        let stats = ds
+            .write::<jupiter_route_quote::v2::Row>(&args.venue, Some(symbol), symbol_rows)
+            .with_context(|| format!("Dataset::write symbol={symbol}"))?;
+        added += stats.rows_added;
+    }
+    println!(
+        "jupiter quote-tape: capture_id={capture_id} rows_added={added} \
+         completed_groups={} errors={:?}",
+        added / 2,
+        errors
+    );
+    Ok(())
+}
+
+async fn capture_jupiter_round_trip(
+    client: &reqwest::Client,
+    cfg: &JupiterConfig,
+    capture_id: &str,
+    symbol: &str,
+    notional_usdc: f64,
+) -> Result<Vec<jupiter_route_quote::v2::Row>> {
+    let mint = xstock_mint(symbol).expect("validated symbol");
+    let quote_group_id = format!("{capture_id}:{symbol}:{notional_usdc:.6}");
+    let buy_in = (notional_usdc * 10f64.powi(USDC_DECIMALS as i32)).round() as u128;
+    let buy_requested = Utc::now().timestamp_micros();
+    let buy = quote_details(client, cfg, USDC_MINT, mint, buy_in)
+        .await
+        .with_context(|| format!("{symbol} ${notional_usdc} buy quote"))?;
+    let buy_available = Utc::now().timestamp_micros();
+    let sell_in = buy
+        .out_amount
+        .parse::<u128>()
+        .context("parsing buy outAmount for sell leg")?;
+    let sell_requested = Utc::now().timestamp_micros();
+    let sell = quote_details(client, cfg, mint, USDC_MINT, sell_in)
+        .await
+        .with_context(|| format!("{symbol} ${notional_usdc} sell quote"))?;
+    let sell_available = Utc::now().timestamp_micros();
+
+    Ok(vec![
+        route_quote_row(
+            cfg,
+            capture_id,
+            &quote_group_id,
+            symbol,
+            0,
+            "buy",
+            notional_usdc,
+            USDC_MINT,
+            mint,
+            &buy,
+            buy_requested,
+            buy_available,
+        )?,
+        route_quote_row(
+            cfg,
+            capture_id,
+            &quote_group_id,
+            symbol,
+            1,
+            "sell",
+            notional_usdc,
+            mint,
+            USDC_MINT,
+            &sell,
+            sell_requested,
+            sell_available,
+        )?,
+    ])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn route_quote_row(
+    cfg: &JupiterConfig,
+    capture_id: &str,
+    quote_group_id: &str,
+    symbol: &str,
+    leg_index: u32,
+    side: &str,
+    notional_usdc: f64,
+    input_mint: &str,
+    output_mint: &str,
+    quote: &scryer_fetch_dexagg::jupiter::QuoteResponse,
+    requested_at_us: i64,
+    available_at_us: i64,
+) -> Result<jupiter_route_quote::v2::Row> {
+    Ok(jupiter_route_quote::v2::Row {
+        capture_id: capture_id.into(),
+        quote_group_id: quote_group_id.into(),
+        symbol: symbol.into(),
+        leg_index,
+        side: side.into(),
+        notional_usdc,
+        input_mint: input_mint.into(),
+        output_mint: output_mint.into(),
+        in_amount: quote.in_amount.clone(),
+        out_amount: quote.out_amount.clone(),
+        other_amount_threshold: quote.other_amount_threshold.clone(),
+        swap_mode: quote.swap_mode.clone(),
+        slippage_bps: cfg.slippage_bps,
+        price_impact_pct: quote.price_impact_pct.parse().context("priceImpactPct")?,
+        route_plan_json: serde_json::to_string(&quote.route_plan).context("routePlan JSON")?,
+        context_slot: quote.context_slot,
+        upstream_time_taken_s: quote.time_taken,
+        requested_at_us,
+        available_at_us,
+        meta: Meta::new(
+            jupiter_route_quote::v2::SCHEMA_VERSION,
+            available_at_us.div_euclid(1_000_000),
+            "jupiter:swap:v1:quote",
+        ),
+    })
+}
+
 #[derive(Parser, Debug)]
 pub struct GtTradesArgs {
     /// Single-tick mode. Currently the only supported mode; cadence is
@@ -162,7 +356,11 @@ pub async fn run_raydium_pool_metadata(args: RaydiumPoolMetadataArgs) -> Result<
 
     let ds = Dataset::new(&args.dataset);
     let stats = ds
-        .write::<raydium_pool_metadata::v1::PoolMetadata>(&args.venue, Some(&pm.pool_address), &[pm.clone()])
+        .write::<raydium_pool_metadata::v1::PoolMetadata>(
+            &args.venue,
+            Some(&pm.pool_address),
+            &[pm.clone()],
+        )
         .context("Dataset::write")?;
     println!(
         "raydium pool-metadata: pool={} type={} fee={} tvl={:.2} price={:.6} rows_added={} rows_deduped={}",
@@ -208,7 +406,10 @@ fn pool_metadata_to_consumer_json(pm: &raydium_pool_metadata::v1::PoolMetadata) 
     s.push_str(&format!("  \"vault_a\": {},\n", esc(&pm.vault_a)));
     s.push_str(&format!("  \"vault_b\": {},\n", esc(&pm.vault_b)));
     s.push_str(&format!("  \"authority\": {},\n", esc(&pm.authority)));
-    s.push_str(&format!("  \"snapshot_price\": {},\n", num(pm.snapshot_price)));
+    s.push_str(&format!(
+        "  \"snapshot_price\": {},\n",
+        num(pm.snapshot_price)
+    ));
     s.push_str(&format!(
         "  \"snapshot_tvl_usd\": {},\n",
         num(pm.snapshot_tvl_usd)

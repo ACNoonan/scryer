@@ -3,10 +3,11 @@
 # (`scryer-runner tick --only cex-stock-perp-tape`) under a dedicated
 # launchd plist.
 #
-# The fetcher hits ~10 CEX venues (Kraken Futures, Gate, OKX,
-# Coinbase Intl, Bitget, HTX, BingX, MEXC, KuCoin Futures, Crypto.com)
-# in parallel; per-call rate-limit-ms keeps each venue under its own
-# cap. Wall-clock per fire is dominated by the slowest venue.
+# The fetcher launches 11 CEX venue adapters concurrently and stamps
+# each returned batch with one capture_id plus local availability
+# microseconds. Per-call rate-limit-ms keeps each venue's symbol loop
+# under its own cap. Wall-clock per fire is dominated by the slowest
+# venue.
 #
 # Soak attribution: legacy plist
 # `com.adamnoonan.scryer.cex-stock-perp-tape` still loaded; both write
@@ -15,7 +16,7 @@
 # unchanged. After cutover, only the runner-driven plist remains.
 
 id = "cex-stock-perp-tape"
-description = "CEX stock-perp bid/ask tape across the canonical xStock underliers, every 60s. Phase-B per-manifest tick mode."
+description = "Decision-time CEX stock-perp bid/ask cohorts across the canonical xStock underliers, every 60s."
 schema_ids = ["cex_stock_perp_tape.v1"]
 
 [fetch]
@@ -27,7 +28,7 @@ args = [
 [criticality]
 tier = "tier-1"
 owner = "@adam"
-consumer_impact = "Multi-venue CEX perp bid/ask snapshot for xStock underliers. CEX-side input for the CEX-vs-DEX comparator panel and per-venue liquidity tracking. Stale = CEX-side research gap."
+consumer_impact = "Timed multi-venue CEX perp bid/ask cohorts for xStock underliers. Input for executable crossed-book feasibility and per-venue liquidity tracking. Stale = forward alpha-observatory gap."
 
 [freshness]
 # 2x cadence — alert if no fresh row inside 120s.

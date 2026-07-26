@@ -136,6 +136,9 @@ pub fn parse_response(
             open_interest: entry.get("openInterest").and_then(|m| m.as_f64()),
             vol_24h: entry.get("vol24h").and_then(|m| m.as_f64()),
             suspended: entry.get("suspended").and_then(|m| m.as_bool()),
+            capture_id: None,
+            capture_started_at_us: None,
+            available_at_us: None,
             meta: Meta::new(SCHEMA_VERSION, fetched_at, SOURCE_LABEL),
         });
     }

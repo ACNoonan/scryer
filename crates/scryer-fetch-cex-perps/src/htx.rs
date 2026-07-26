@@ -136,6 +136,9 @@ pub fn parse_ticker_response(
         open_interest: None,
         vol_24h: vol,
         suspended: None,
+        capture_id: None,
+        capture_started_at_us: None,
+        available_at_us: None,
         meta: Meta::new(SCHEMA_VERSION, fetched_at, SOURCE_LABEL),
     }))
 }

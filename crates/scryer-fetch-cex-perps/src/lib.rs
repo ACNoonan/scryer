@@ -38,6 +38,7 @@ pub mod kucoin_futures;
 pub mod mexc;
 pub mod okx;
 pub mod phemex;
+pub mod ws_bbo;
 
 #[derive(Debug, Error)]
 pub enum FetchError {

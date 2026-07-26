@@ -20,9 +20,9 @@ pub mod v1 {
     use arrow_schema::{DataType, Field, Schema};
     use serde::{Deserialize, Serialize};
 
-    use crate::downcast_column;
     use crate::error::FromArrowError;
     use crate::meta::Meta;
+    use crate::{downcast_column, try_downcast_column};
 
     pub const SCHEMA_VERSION: &str = "cex_stock_perp_tape.v1";
 
@@ -64,6 +64,16 @@ pub mod v1 {
         pub open_interest: Option<f64>,
         pub vol_24h: Option<f64>,
         pub suspended: Option<bool>,
+        /// Groups rows launched by one concurrent collector fire.
+        /// Null on rows captured before the decision-time observatory.
+        pub capture_id: Option<String>,
+        /// Local wall clock immediately before the capture cohort was
+        /// launched, in Unix microseconds.
+        pub capture_started_at_us: Option<i64>,
+        /// Local wall clock immediately after this observation was
+        /// returned and parsed, in Unix microseconds. This is the
+        /// earliest instant the collector could have acted on it.
+        pub available_at_us: Option<i64>,
         #[serde(flatten)]
         pub meta: Meta,
     }
@@ -99,6 +109,9 @@ pub mod v1 {
             Field::new("open_interest", DataType::Float64, true),
             Field::new("vol_24h", DataType::Float64, true),
             Field::new("suspended", DataType::Boolean, true),
+            Field::new("capture_id", DataType::LargeUtf8, true),
+            Field::new("capture_started_at_us", DataType::Int64, true),
+            Field::new("available_at_us", DataType::Int64, true),
             Field::new("_schema_version", DataType::LargeUtf8, false),
             Field::new("_fetched_at", DataType::Int64, false),
             Field::new("_source", DataType::LargeUtf8, false),
@@ -107,11 +120,9 @@ pub mod v1 {
     }
 
     pub fn to_record_batch(rows: &[Tick]) -> Result<RecordBatch, arrow_schema::ArrowError> {
-        let exchange =
-            LargeStringArray::from_iter_values(rows.iter().map(|r| r.exchange.as_str()));
-        let exchange_symbol = LargeStringArray::from_iter_values(
-            rows.iter().map(|r| r.exchange_symbol.as_str()),
-        );
+        let exchange = LargeStringArray::from_iter_values(rows.iter().map(|r| r.exchange.as_str()));
+        let exchange_symbol =
+            LargeStringArray::from_iter_values(rows.iter().map(|r| r.exchange_symbol.as_str()));
         let underlier =
             LargeStringArray::from_iter_values(rows.iter().map(|r| r.underlier_symbol.as_str()));
         let backing =
@@ -129,6 +140,9 @@ pub mod v1 {
         let oi = Float64Array::from_iter(rows.iter().map(|r| r.open_interest));
         let vol = Float64Array::from_iter(rows.iter().map(|r| r.vol_24h));
         let susp = BooleanArray::from_iter(rows.iter().map(|r| r.suspended));
+        let capture_id = LargeStringArray::from_iter(rows.iter().map(|r| r.capture_id.as_deref()));
+        let capture_started = Int64Array::from_iter(rows.iter().map(|r| r.capture_started_at_us));
+        let available = Int64Array::from_iter(rows.iter().map(|r| r.available_at_us));
         let sver =
             LargeStringArray::from_iter_values(rows.iter().map(|r| r.meta.schema_version.as_str()));
         let fa = Int64Array::from_iter_values(rows.iter().map(|r| r.meta.fetched_at));
@@ -153,6 +167,9 @@ pub mod v1 {
             Arc::new(oi),
             Arc::new(vol),
             Arc::new(susp),
+            Arc::new(capture_id),
+            Arc::new(capture_started),
+            Arc::new(available),
             Arc::new(sver),
             Arc::new(fa),
             Arc::new(src),
@@ -175,6 +192,12 @@ pub mod v1 {
             Some(arr.value(i))
         }
     }
+    fn opt_i64(arr: Option<&Int64Array>, i: usize) -> Option<i64> {
+        arr.and_then(|a| (!a.is_null(i)).then(|| a.value(i)))
+    }
+    fn opt_string(arr: Option<&LargeStringArray>, i: usize) -> Option<String> {
+        arr.and_then(|a| (!a.is_null(i)).then(|| a.value(i).to_string()))
+    }
 
     pub fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Tick>, FromArrowError> {
         let exchange = downcast_column::<LargeStringArray>(batch, "exchange")?;
@@ -194,6 +217,9 @@ pub mod v1 {
         let oi = downcast_column::<Float64Array>(batch, "open_interest")?;
         let vol = downcast_column::<Float64Array>(batch, "vol_24h")?;
         let susp = downcast_column::<BooleanArray>(batch, "suspended")?;
+        let capture_id = try_downcast_column::<LargeStringArray>(batch, "capture_id")?;
+        let capture_started = try_downcast_column::<Int64Array>(batch, "capture_started_at_us")?;
+        let available = try_downcast_column::<Int64Array>(batch, "available_at_us")?;
         let sver = downcast_column::<LargeStringArray>(batch, "_schema_version")?;
         let fa = downcast_column::<Int64Array>(batch, "_fetched_at")?;
         let src = downcast_column::<LargeStringArray>(batch, "_source")?;
@@ -225,6 +251,9 @@ pub mod v1 {
                 open_interest: opt_f64(oi, i),
                 vol_24h: opt_f64(vol, i),
                 suspended: opt_bool(susp, i),
+                capture_id: opt_string(capture_id, i),
+                capture_started_at_us: opt_i64(capture_started, i),
+                available_at_us: opt_i64(available, i),
                 meta: Meta {
                     schema_version: s.to_string(),
                     fetched_at: fa.value(i),
@@ -258,13 +287,22 @@ pub mod v1 {
                 open_interest: Some(5_000.0),
                 vol_24h: Some(20_000.0),
                 suspended: Some(false),
+                capture_id: None,
+                capture_started_at_us: None,
+                available_at_us: None,
                 meta: Meta::new(SCHEMA_VERSION, 1_777_400_100, "kraken_futures:tickers"),
             }
         }
 
         #[test]
         fn dedup_key_anchors_on_exchange_symbol_ts() {
-            let t = sample("kraken_futures", "PF_TSLAXUSD", "TSLA", "xstock_backed", 1_777_400_000);
+            let t = sample(
+                "kraken_futures",
+                "PF_TSLAXUSD",
+                "TSLA",
+                "xstock_backed",
+                1_777_400_000,
+            );
             assert_eq!(
                 t.dedup_key(),
                 "cex_stock_perp_tape:kraken_futures:PF_TSLAXUSD:1777400000"
@@ -279,9 +317,21 @@ pub mod v1 {
         #[test]
         fn round_trip_across_venues() {
             let rows = vec![
-                sample("kraken_futures", "PF_TSLAXUSD", "TSLA", "xstock_backed", 1_777_400_000),
+                sample(
+                    "kraken_futures",
+                    "PF_TSLAXUSD",
+                    "TSLA",
+                    "xstock_backed",
+                    1_777_400_000,
+                ),
                 sample("okx", "TSLA-USDT-SWAP", "TSLA", "synthetic", 1_777_400_001),
-                sample("coinbase_intl", "TSLA-PERP", "TSLA", "synthetic", 1_777_400_002),
+                sample(
+                    "coinbase_intl",
+                    "TSLA-PERP",
+                    "TSLA",
+                    "synthetic",
+                    1_777_400_002,
+                ),
                 Tick {
                     index_price: None,
                     funding_prediction: None,
@@ -291,7 +341,7 @@ pub mod v1 {
             ];
             let batch = to_record_batch(&rows).expect("encode");
             assert_eq!(batch.num_rows(), 4);
-            assert_eq!(batch.num_columns(), 21);
+            assert_eq!(batch.num_columns(), 24);
             let recovered = from_record_batch(&batch).expect("decode");
             assert_eq!(rows, recovered);
             assert_eq!(recovered[3].index_price, None);
@@ -305,6 +355,40 @@ pub mod v1 {
             let batch = to_record_batch(&[row]).expect("encode");
             let err = from_record_batch(&batch).unwrap_err();
             assert!(matches!(err, FromArrowError::SchemaVersionMismatch { .. }));
+        }
+
+        #[test]
+        fn round_trips_decision_time_fields() {
+            let row = Tick {
+                capture_id: Some("1777400000123456-00000001".to_string()),
+                capture_started_at_us: Some(1_777_400_000_123_456),
+                available_at_us: Some(1_777_400_000_223_456),
+                ..sample("gate", "SPY_USDT", "SPY", "synthetic", 1_777_400_000)
+            };
+            let recovered = from_record_batch(&to_record_batch(&[row.clone()]).unwrap()).unwrap();
+            assert_eq!(recovered, vec![row]);
+        }
+
+        #[test]
+        fn decodes_pre_observatory_batch_with_null_timing() {
+            let row = sample("gate", "SPY_USDT", "SPY", "synthetic", 1_777_400_000);
+            let current = to_record_batch(&[row.clone()]).unwrap();
+            let keep: Vec<usize> = current
+                .schema()
+                .fields()
+                .iter()
+                .enumerate()
+                .filter_map(|(i, field)| {
+                    (!matches!(
+                        field.name().as_str(),
+                        "capture_id" | "capture_started_at_us" | "available_at_us"
+                    ))
+                    .then_some(i)
+                })
+                .collect();
+            let old_batch = current.project(&keep).unwrap();
+            let recovered = from_record_batch(&old_batch).unwrap();
+            assert_eq!(recovered, vec![row]);
         }
     }
 }

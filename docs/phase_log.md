@@ -61,6 +61,7 @@ Last compacted: 2026-05-02.
 | 37 | `backed_nav_strikes.v1` | 59 | Persist canonical partitions; one-shot smoke is not enough. |
 | 45 | `cex_stock_perp_tape.v1` | 55, 57 | Complete canonical multi-month/backfill tape. |
 | 45 companion | `cex_stock_perp_ohlcv.v1` | 56, 57 | Complete canonical OHLCV backfill; Phemex OHLCV separately blocked. |
+| 45 observatory | `cex_stock_perp_tape.v1` nullable decision-time enrichment | 128 | Deploy the new `scry` binary, then verify a non-null timed cohort in canonical parquet. |
 | 49a | `pyth.v1` Benchmarks backfill | 71 | Run >=90d operator backfill and verify canonical partitions. |
 | LVR Job 2 | `swap.v1` via Helius enhanced API | 79 | Run 26h spot-check against vault-delta archive before 180d run. |
 | LVR Job 2 | `swap.v1` via Flipside import | 77 | Superseded by phase 79; keep only as access-path dead end. |
@@ -167,6 +168,9 @@ Last compacted: 2026-05-02.
 | 77-84 | 2026-05-01 | LVR pivots, Paper-4 specs, v0.2 platform methodology |
 | 126 | 2026-05-25 | `earnings.v2` session timing: Finnhub forward `hour`→`session`, Yahoo `visualization` deep-history backfill (ET time-of-day derivation), `scry equities earnings-migrate` v1→v2 cutover. Landed 6 Soothsayer names; 100% timed among reported earnings 2015+. |
 | 127 | 2026-05-25 | `yahoo_corp_actions.v1` overnight ex-dividend backfill (no new code): landed 10-name full Yahoo history (SPY→1993) for soothsayer's close→next-open dividend adjustment. Spot-checked SPY amounts + AAPL/NVDA/TSLA/MSTR split ratios. GLD/HOOD legitimately empty. |
+| 128 | 2026-07-25 | CEX stock-perp decision-time observatory code-shipped, canonical-data pending. `cex_stock_perp_tape.v1` gained nullable `capture_id` / `capture_started_at_us` / `available_at_us`; old 21-column batches decode with null timing; 11 venue adapters launch concurrently and stamp local availability on return. Tests: 6 schema timing/backward-compat tests + 62 CEX fetcher tests pass. Validation-only fire for SPY/QQQ wrote 21 rows across 11 venues to an isolated dataset; canonical activation is deliberately deferred because full `scryer deploy` would also ship unrelated dirty workspace changes. |
+| 129 | 2026-07-25 | `cex.aggregate.stock_perp_bbo.v2` WebSocket observatory code-shipped, canonical-data pending. Kraken Futures local-book snapshot/delta capture runs concurrently with Bitget ticker and OKX `bbo-tbt`; rows preserve exchange event µs, local receive µs, sequence where supplied, session ID, complete BBO, backing kind, and nullable contract metadata. Isolated 15s SPY/QQQ fire: 220 rows (Bitget 120, Kraken 88, OKX 12), zero invalid books; transport gate passed, economic inference explicitly deferred. |
+| 130 | 2026-07-25 | `solana.jupiter.route_quote.v2` executable quote ladder code-shipped, canonical-data pending. Each fixed-USDC ExactIn group preserves the buy route then quotes the exact xStock output back to USDC, with raw amounts/threshold, route JSON, price impact, context slot, upstream time, and local request/availability µs. Isolated SPYx/QQQx $100/$1k/$10k fire completed 6/6 groups; round-trip losses scaled 2.02→18.39 bps (SPYx) and 10.37→36.14 bps (QQQx). Plumbing result only. |
 
 ## Append Rule
 

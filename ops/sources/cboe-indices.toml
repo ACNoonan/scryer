@@ -41,6 +41,14 @@ command = "scry"
 args = [
     "cboe", "indices",
     "--source", "cboe:csv:runner",
+    # Retry budget widened 2026-07-25 from the 3×2s default (=6s of
+    # tolerance) to 5×10s (=50s). The observed failure mode is a
+    # transient DNS resolution failure on cdn.cboe.com at the 18:30 ET
+    # fire (2026-06-26, 07-01, 07-22, 07-25) — 6s is not enough to ride
+    # out a network flap. Each fire is a full-history idempotent re-pull,
+    # so a slower run costs nothing.
+    "--retry-max", "5",
+    "--retry-delay-secs", "10",
 ]
 
 [criticality]

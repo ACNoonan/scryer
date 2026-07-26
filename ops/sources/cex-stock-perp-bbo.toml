@@ -1,0 +1,30 @@
+# Decision-time WebSocket BBO capture. Each fire opens Kraken Futures,
+# Bitget, and OKX concurrently for 30 seconds and writes complete BBO
+# states to the v2 aggregate surface.
+
+id = "cex-stock-perp-bbo"
+description = "Concurrent backed-versus-synthetic stock-perp WebSocket BBO tape."
+schema_ids = ["cex.aggregate.stock_perp_bbo.v2"]
+
+[fetch]
+command = "scry"
+args = [
+    "cex-stock-perp", "ws-bbo",
+    "--underliers", "SPY,QQQ,AAPL,GOOGL,HOOD,MSTR,NVDA,TSLA",
+    "--duration-secs", "30",
+]
+
+[retry]
+max_attempts = 1
+timeout_secs = 75
+
+[criticality]
+tier = "tier-1"
+owner = "@adam"
+consumer_impact = "Decision-time executable-book surface for backed-versus-synthetic stock-perp hypotheses. Stale = no forward test."
+
+[freshness]
+sla_secs = 180
+
+[workflow]
+sensor = "interval(60s)"

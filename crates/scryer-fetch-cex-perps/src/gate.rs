@@ -131,6 +131,9 @@ pub fn parse_response(
             open_interest: parse_f64_str(entry.get("total_size")),
             vol_24h: parse_f64_str(entry.get("volume_24h_quote")),
             suspended: None,
+            capture_id: None,
+            capture_started_at_us: None,
+            available_at_us: None,
             meta: Meta::new(SCHEMA_VERSION, fetched_at, SOURCE_LABEL),
         });
     }

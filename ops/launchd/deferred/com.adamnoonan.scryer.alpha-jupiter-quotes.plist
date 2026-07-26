@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.alpha-jupiter-quotes</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>sleep 10; exec /Users/adamnoonan/.cache/cargo-target/debug/scryer-runner tick --only jupiter-route-quotes --manifests /Users/adamnoonan/Documents/scryer/ops/sources --dataset '/Users/adamnoonan/Library/Application Support/scryer/dataset'</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Library/Application Support/scryer</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/alpha-jupiter-quotes.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/alpha-jupiter-quotes.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/adamnoonan/.cache/cargo-target/debug:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+        <key>HOSTNAME</key>
+        <string>samachi-mac</string>
+    </dict>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>

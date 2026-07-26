@@ -17,16 +17,92 @@ use chrono::Utc;
 use clap::Parser;
 use scryer_fetch_cex_perps::{
     bingx, bitget, build_client, coinbase_intl, crypto_com, gate, htx, kraken_futures,
-    kucoin_futures, mexc, okx, phemex, PollConfig,
+    kucoin_futures, mexc, okx, phemex, ws_bbo, PollConfig,
 };
+use scryer_schema::cex_stock_perp_bbo::v2::Row as BboRow;
 use scryer_schema::cex_stock_perp_tape::v1::Tick;
-use scryer_schema::{cex_stock_perp_tape, Meta};
 use scryer_store::{venue, Dataset};
+
+#[derive(Parser, Debug)]
+pub struct WsBboArgs {
+    /// Comma-separated canonical underlier symbols.
+    #[arg(long, value_delimiter = ',', default_value = "SPY,QQQ")]
+    underliers: Vec<String>,
+    /// Wall-clock capture duration. All enabled venue streams run concurrently.
+    #[arg(long, default_value_t = 30)]
+    duration_secs: u64,
+    #[arg(long, default_value_t = false)]
+    no_kraken_futures: bool,
+    #[arg(long, default_value_t = false)]
+    no_bitget: bool,
+    #[arg(long, default_value_t = false)]
+    no_okx: bool,
+    #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
+    dataset: PathBuf,
+    #[arg(long, default_value = venue::CEX_AGGREGATE)]
+    venue: String,
+}
+
+pub async fn run_ws_bbo(args: WsBboArgs) -> Result<()> {
+    if args.underliers.is_empty() {
+        anyhow::bail!("--underliers cannot be empty");
+    }
+    if args.duration_secs == 0 {
+        anyhow::bail!("--duration-secs must be positive");
+    }
+    let started_us = Utc::now().timestamp_micros();
+    let session_id = format!("{started_us}-{:010}", std::process::id());
+    let result = ws_bbo::capture(
+        &args.underliers,
+        Duration::from_secs(args.duration_secs),
+        &session_id,
+        !args.no_kraken_futures,
+        !args.no_bitget,
+        !args.no_okx,
+    )
+    .await;
+    for error in &result.errors {
+        tracing::warn!(error, "CEX stock-perp WebSocket capture venue failed");
+    }
+
+    let mut by_underlier: BTreeMap<String, Vec<BboRow>> = BTreeMap::new();
+    let mut per_venue: BTreeMap<String, usize> = BTreeMap::new();
+    for row in result.rows {
+        *per_venue.entry(row.exchange.clone()).or_default() += 1;
+        by_underlier
+            .entry(row.underlier_symbol.clone())
+            .or_default()
+            .push(row);
+    }
+    let ds = Dataset::new(&args.dataset);
+    let mut rows_added = 0;
+    let mut rows_deduped = 0;
+    let mut partitions_written = 0;
+    for (underlier, rows) in &by_underlier {
+        let stats = ds
+            .write::<BboRow>(&args.venue, Some(underlier), rows)
+            .with_context(|| format!("Dataset::write underlier={underlier}"))?;
+        rows_added += stats.rows_added;
+        rows_deduped += stats.rows_deduped;
+        partitions_written += stats.partitions_written;
+    }
+    println!(
+        "cex-stock-perp ws-bbo: session_id={session_id} rows_added={rows_added} \
+         rows_deduped={rows_deduped} partitions_written={partitions_written} \
+         per_venue={per_venue:?} errors={:?}",
+        result.errors
+    );
+    Ok(())
+}
 
 #[derive(Parser, Debug)]
 pub struct TapeArgs {
     /// Comma-separated canonical underlier symbols.
-    #[arg(long, value_delimiter = ',', default_value = "SPY,QQQ,AAPL,GOOGL,NVDA,TSLA,HOOD,MSTR,GLD,TLT")]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "SPY,QQQ,AAPL,GOOGL,NVDA,TSLA,HOOD,MSTR,GLD,TLT"
+    )]
     underliers: Vec<String>,
     /// Disable Kraken Futures.
     #[arg(long, default_value_t = false)]
@@ -90,186 +166,56 @@ pub async fn run_tape(args: TapeArgs) -> Result<()> {
     let client = build_client(&cfg).context("building reqwest client")?;
     let now = Utc::now();
     let fetched_at = now.timestamp();
-    let underliers_upper: Vec<String> = args
-        .underliers
-        .iter()
-        .map(|s| s.to_uppercase())
-        .collect();
+    let capture_started_at_us = now.timestamp_micros();
+    let capture_id = format!("{capture_started_at_us}-{:010}", std::process::id());
+    let underliers_upper: Vec<String> = args.underliers.iter().map(|s| s.to_uppercase()).collect();
+
+    let enabled = [
+        (!args.no_kraken_futures, TapeVenue::KrakenFutures),
+        (!args.no_gate, TapeVenue::Gate),
+        (!args.no_okx, TapeVenue::Okx),
+        (!args.no_coinbase_intl, TapeVenue::CoinbaseIntl),
+        (!args.no_bitget, TapeVenue::Bitget),
+        (!args.no_kucoin_futures, TapeVenue::KucoinFutures),
+        (!args.no_htx, TapeVenue::Htx),
+        (!args.no_bingx, TapeVenue::Bingx),
+        (!args.no_mexc, TapeVenue::Mexc),
+        (!args.no_phemex, TapeVenue::Phemex),
+        (!args.no_crypto_com, TapeVenue::CryptoCom),
+    ];
+    let mut tasks = tokio::task::JoinSet::new();
+    for (_, venue) in enabled.into_iter().filter(|(on, _)| *on) {
+        let task_client = client.clone();
+        let task_cfg = cfg.clone();
+        let task_underliers = underliers_upper.clone();
+        tasks.spawn(async move {
+            let rows =
+                poll_tape_venue(venue, &task_client, &task_cfg, &task_underliers, fetched_at).await;
+            (venue, rows, Utc::now().timestamp_micros())
+        });
+    }
 
     let mut all_rows: Vec<Tick> = Vec::new();
     let mut per_venue: BTreeMap<&'static str, usize> = BTreeMap::new();
-
-    if !args.no_kraken_futures {
-        match kraken_futures::fetch_stock_perps(&client, &cfg, Some(&underliers_upper), fetched_at)
-            .await
-        {
-            Ok(rows) => {
-                tracing::info!(venue = "kraken_futures", rows = rows.len(), "decoded");
-                *per_venue.entry("kraken_futures").or_insert(0) += rows.len();
-                all_rows.extend(rows);
-            }
-            Err(e) => tracing::warn!(venue = "kraken_futures", error = %e, "fetch failed; continuing"),
+    while let Some(joined) = tasks.join_next().await {
+        let (venue, mut rows, available_at_us) =
+            joined.context("CEX stock-perp venue task panicked")?;
+        let available_at = available_at_us.div_euclid(1_000_000);
+        for row in &mut rows {
+            row.ts = available_at;
+            row.meta.fetched_at = available_at;
+            row.capture_id = Some(capture_id.clone());
+            row.capture_started_at_us = Some(capture_started_at_us);
+            row.available_at_us = Some(available_at_us);
         }
-    }
-    if !args.no_gate {
-        match gate::fetch_stock_perps(&client, &cfg, &underliers_upper, fetched_at).await {
-            Ok(rows) => {
-                tracing::info!(venue = "gate", rows = rows.len(), "decoded");
-                *per_venue.entry("gate").or_insert(0) += rows.len();
-                all_rows.extend(rows);
-            }
-            Err(e) => tracing::warn!(venue = "gate", error = %e, "fetch failed; continuing"),
-        }
-    }
-    if !args.no_okx {
-        match okx::fetch_tape(&client, &cfg, &underliers_upper, fetched_at).await {
-            Ok(rows) => {
-                tracing::info!(venue = "okx", rows = rows.len(), "decoded");
-                *per_venue.entry("okx").or_insert(0) += rows.len();
-                all_rows.extend(rows);
-            }
-            Err(e) => tracing::warn!(venue = "okx", error = %e, "fetch failed; continuing"),
-        }
-    }
-    if !args.no_coinbase_intl {
-        match coinbase_intl::fetch_tape(&client, &cfg, &underliers_upper, fetched_at).await {
-            Ok(rows) => {
-                tracing::info!(venue = "coinbase_intl", rows = rows.len(), "decoded");
-                *per_venue.entry("coinbase_intl").or_insert(0) += rows.len();
-                all_rows.extend(rows);
-            }
-            Err(e) => tracing::warn!(venue = "coinbase_intl", error = %e, "fetch failed; continuing"),
-        }
-    }
-    if !args.no_bitget {
-        match bitget::fetch_stock_perps(&client, &cfg, &underliers_upper, fetched_at).await {
-            Ok(rows) => {
-                tracing::info!(venue = "bitget", rows = rows.len(), "decoded");
-                *per_venue.entry("bitget").or_insert(0) += rows.len();
-                all_rows.extend(rows);
-            }
-            Err(e) => tracing::warn!(venue = "bitget", error = %e, "fetch failed; continuing"),
-        }
-    }
-    if !args.no_kucoin_futures {
-        match kucoin_futures::fetch_stock_perps(&client, &cfg, &underliers_upper, fetched_at).await {
-            Ok(rows) => {
-                tracing::info!(venue = "kucoin_futures", rows = rows.len(), "decoded");
-                *per_venue.entry("kucoin_futures").or_insert(0) += rows.len();
-                all_rows.extend(rows);
-            }
-            Err(e) => tracing::warn!(venue = "kucoin_futures", error = %e, "fetch failed; continuing"),
-        }
-    }
-    if !args.no_htx {
-        let mut htx_rows = 0usize;
-        for u in &underliers_upper {
-            // Try X-suffix (xstock_backed) first, then plain (synthetic).
-            for (sym, backing) in [
-                (format!("{u}X-USDT"), "xstock_backed"),
-                (format!("{u}-USDT"), "synthetic"),
-            ] {
-                match htx::fetch_one_ticker(&client, &cfg, &sym, u, backing, fetched_at).await {
-                    Ok(Some(t)) => {
-                        all_rows.push(t);
-                        htx_rows += 1;
-                    }
-                    Ok(None) => {}
-                    Err(_) => {}
-                }
-                if cfg.rate_limit_delay > Duration::ZERO {
-                    tokio::time::sleep(cfg.rate_limit_delay).await;
-                }
-            }
-        }
-        tracing::info!(venue = "htx", rows = htx_rows, "decoded");
-        *per_venue.entry("htx").or_insert(0) += htx_rows;
-    }
-    if !args.no_bingx {
-        let mut bingx_rows = 0usize;
-        for u in &underliers_upper {
-            // Try X-suffix (xstock_backed) and NCSK-prefix (synthetic).
-            for (sym, backing) in [
-                (format!("{u}X-USDT"), "xstock_backed"),
-                (format!("NCSK{u}2USD-USDT"), "synthetic"),
-            ] {
-                match bingx::fetch_one_ticker(&client, &cfg, &sym, u, backing, fetched_at).await {
-                    Ok(Some(t)) => {
-                        all_rows.push(t);
-                        bingx_rows += 1;
-                    }
-                    Ok(None) => {}
-                    Err(_) => {}
-                }
-                if cfg.rate_limit_delay > Duration::ZERO {
-                    tokio::time::sleep(cfg.rate_limit_delay).await;
-                }
-            }
-        }
-        tracing::info!(venue = "bingx", rows = bingx_rows, "decoded");
-        *per_venue.entry("bingx").or_insert(0) += bingx_rows;
-    }
-    if !args.no_mexc {
-        let mut mexc_rows = 0usize;
-        for u in &underliers_upper {
-            let sym = format!("{u}STOCK_USDT");
-            match mexc::fetch_one_ticker(&client, &cfg, &sym, u, fetched_at).await {
-                Ok(Some(t)) => {
-                    all_rows.push(t);
-                    mexc_rows += 1;
-                }
-                Ok(None) => {}
-                Err(_) => {}
-            }
-            if cfg.rate_limit_delay > Duration::ZERO {
-                tokio::time::sleep(cfg.rate_limit_delay).await;
-            }
-        }
-        tracing::info!(venue = "mexc", rows = mexc_rows, "decoded");
-        *per_venue.entry("mexc").or_insert(0) += mexc_rows;
-    }
-    if !args.no_phemex {
-        let mut phemex_rows = 0usize;
-        for u in &underliers_upper {
-            // Try X-suffix (xstock_backed) and plain (synthetic).
-            for (sym, backing) in [
-                (format!("{u}XUSDT"), "xstock_backed"),
-                (format!("{u}USDT"), "synthetic"),
-            ] {
-                match phemex::fetch_one_ticker(&client, &cfg, &sym, u, backing, fetched_at).await {
-                    Ok(Some(t)) => {
-                        all_rows.push(t);
-                        phemex_rows += 1;
-                    }
-                    Ok(None) => {}
-                    Err(_) => {}
-                }
-                if cfg.rate_limit_delay > Duration::ZERO {
-                    tokio::time::sleep(cfg.rate_limit_delay).await;
-                }
-            }
-        }
-        tracing::info!(venue = "phemex", rows = phemex_rows, "decoded");
-        *per_venue.entry("phemex").or_insert(0) += phemex_rows;
-    }
-    if !args.no_crypto_com {
-        let mut cc_rows = 0usize;
-        for u in &underliers_upper {
-            let sym = format!("{u}USD-PERP");
-            match crypto_com::fetch_one_ticker(&client, &cfg, &sym, u, fetched_at).await {
-                Ok(Some(t)) => {
-                    all_rows.push(t);
-                    cc_rows += 1;
-                }
-                Ok(None) => {}
-                Err(_) => {}
-            }
-            if cfg.rate_limit_delay > Duration::ZERO {
-                tokio::time::sleep(cfg.rate_limit_delay).await;
-            }
-        }
-        tracing::info!(venue = "crypto_com", rows = cc_rows, "decoded");
-        *per_venue.entry("crypto_com").or_insert(0) += cc_rows;
+        tracing::info!(
+            venue = venue.name(),
+            rows = rows.len(),
+            available_at_us,
+            "decoded"
+        );
+        per_venue.insert(venue.name(), rows.len());
+        all_rows.extend(rows);
     }
 
     if all_rows.is_empty() {
@@ -277,12 +223,14 @@ pub async fn run_tape(args: TapeArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Stamp every row's meta.fetched_at to the snapshot time and
-    // partition-write by underlier_symbol.
-    let _ = Meta::new(cex_stock_perp_tape::v1::SCHEMA_VERSION, fetched_at, "");
+    // Rows already carry their per-venue local-availability time.
+    // Partition-write by underlier_symbol.
     let mut by_underlier: BTreeMap<String, Vec<Tick>> = BTreeMap::new();
     for r in all_rows {
-        by_underlier.entry(r.underlier_symbol.clone()).or_default().push(r);
+        by_underlier
+            .entry(r.underlier_symbol.clone())
+            .or_default()
+            .push(r);
     }
     let ds = Dataset::new(&args.dataset);
     let mut total_added = 0usize;
@@ -302,17 +250,154 @@ pub async fn run_tape(args: TapeArgs) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum TapeVenue {
+    KrakenFutures,
+    Gate,
+    Okx,
+    CoinbaseIntl,
+    Bitget,
+    KucoinFutures,
+    Htx,
+    Bingx,
+    Mexc,
+    Phemex,
+    CryptoCom,
+}
+
+impl TapeVenue {
+    fn name(self) -> &'static str {
+        match self {
+            Self::KrakenFutures => "kraken_futures",
+            Self::Gate => "gate",
+            Self::Okx => "okx",
+            Self::CoinbaseIntl => "coinbase_intl",
+            Self::Bitget => "bitget",
+            Self::KucoinFutures => "kucoin_futures",
+            Self::Htx => "htx",
+            Self::Bingx => "bingx",
+            Self::Mexc => "mexc",
+            Self::Phemex => "phemex",
+            Self::CryptoCom => "crypto_com",
+        }
+    }
+}
+
+async fn poll_tape_venue(
+    venue: TapeVenue,
+    client: &reqwest::Client,
+    cfg: &PollConfig,
+    underliers: &[String],
+    fetched_at: i64,
+) -> Vec<Tick> {
+    let result = match venue {
+        TapeVenue::KrakenFutures => {
+            kraken_futures::fetch_stock_perps(client, cfg, Some(underliers), fetched_at).await
+        }
+        TapeVenue::Gate => gate::fetch_stock_perps(client, cfg, underliers, fetched_at).await,
+        TapeVenue::Okx => okx::fetch_tape(client, cfg, underliers, fetched_at).await,
+        TapeVenue::CoinbaseIntl => {
+            coinbase_intl::fetch_tape(client, cfg, underliers, fetched_at).await
+        }
+        TapeVenue::Bitget => bitget::fetch_stock_perps(client, cfg, underliers, fetched_at).await,
+        TapeVenue::KucoinFutures => {
+            kucoin_futures::fetch_stock_perps(client, cfg, underliers, fetched_at).await
+        }
+        TapeVenue::Htx
+        | TapeVenue::Bingx
+        | TapeVenue::Mexc
+        | TapeVenue::Phemex
+        | TapeVenue::CryptoCom => {
+            return poll_symbol_loop(venue, client, cfg, underliers, fetched_at).await
+        }
+    };
+    match result {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(venue = venue.name(), error = %e, "fetch failed; continuing");
+            Vec::new()
+        }
+    }
+}
+
+async fn poll_symbol_loop(
+    venue: TapeVenue,
+    client: &reqwest::Client,
+    cfg: &PollConfig,
+    underliers: &[String],
+    fetched_at: i64,
+) -> Vec<Tick> {
+    let mut rows = Vec::new();
+    for u in underliers {
+        let symbols: Vec<(String, &'static str)> = match venue {
+            TapeVenue::Htx => vec![
+                (format!("{u}X-USDT"), "xstock_backed"),
+                (format!("{u}-USDT"), "synthetic"),
+            ],
+            TapeVenue::Bingx => vec![
+                (format!("{u}X-USDT"), "xstock_backed"),
+                (format!("NCSK{u}2USD-USDT"), "synthetic"),
+            ],
+            TapeVenue::Mexc => vec![(format!("{u}STOCK_USDT"), "synthetic")],
+            TapeVenue::Phemex => vec![
+                (format!("{u}XUSDT"), "xstock_backed"),
+                (format!("{u}USDT"), "synthetic"),
+            ],
+            TapeVenue::CryptoCom => vec![(format!("{u}USD-PERP"), "synthetic")],
+            _ => unreachable!("aggregate venue sent to symbol loop"),
+        };
+        for (symbol, backing) in symbols {
+            let row = match venue {
+                TapeVenue::Htx => {
+                    htx::fetch_one_ticker(client, cfg, &symbol, u, backing, fetched_at).await
+                }
+                TapeVenue::Bingx => {
+                    bingx::fetch_one_ticker(client, cfg, &symbol, u, backing, fetched_at).await
+                }
+                TapeVenue::Mexc => {
+                    mexc::fetch_one_ticker(client, cfg, &symbol, u, fetched_at).await
+                }
+                TapeVenue::Phemex => {
+                    phemex::fetch_one_ticker(client, cfg, &symbol, u, backing, fetched_at).await
+                }
+                TapeVenue::CryptoCom => {
+                    crypto_com::fetch_one_ticker(client, cfg, &symbol, u, fetched_at).await
+                }
+                _ => unreachable!("aggregate venue sent to symbol loop"),
+            };
+            match row {
+                Ok(Some(tick)) => rows.push(tick),
+                Ok(None) => {}
+                Err(e) => tracing::debug!(
+                    venue = venue.name(),
+                    exchange_symbol = symbol,
+                    error = %e,
+                    "symbol unavailable"
+                ),
+            }
+            if cfg.rate_limit_delay > Duration::ZERO {
+                tokio::time::sleep(cfg.rate_limit_delay).await;
+            }
+        }
+    }
+    rows
+}
+
 // ============================================================
 // 1m OHLCV companion (item 45 §1.2 / Phase 56)
 // ============================================================
 
-use scryer_schema::cex_stock_perp_ohlcv::v1::Bar as OhlcvBar;
 use scryer_schema::cex_stock_perp_ohlcv;
+use scryer_schema::cex_stock_perp_ohlcv::v1::Bar as OhlcvBar;
 
 #[derive(Parser, Debug)]
 pub struct OhlcvArgs {
     /// Comma-separated canonical underlier symbols.
-    #[arg(long, value_delimiter = ',', default_value = "SPY,QQQ,AAPL,GOOGL,NVDA,TSLA,HOOD,MSTR,GLD,TLT")]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "SPY,QQQ,AAPL,GOOGL,NVDA,TSLA,HOOD,MSTR,GLD,TLT"
+    )]
     underliers: Vec<String>,
     /// Disable Kraken Futures.
     #[arg(long, default_value_t = false)]
@@ -384,11 +469,7 @@ pub async fn run_ohlcv(args: OhlcvArgs) -> Result<()> {
     let now = Utc::now();
     let fetched_at = now.timestamp();
     let from_unix = fetched_at - args.lookback_minutes * 60;
-    let underliers_upper: Vec<String> = args
-        .underliers
-        .iter()
-        .map(|s| s.to_uppercase())
-        .collect();
+    let underliers_upper: Vec<String> = args.underliers.iter().map(|s| s.to_uppercase()).collect();
 
     let mut all_rows: Vec<OhlcvBar> = Vec::new();
     let mut per_venue: BTreeMap<&'static str, usize> = BTreeMap::new();
@@ -410,13 +491,19 @@ pub async fn run_ohlcv(args: OhlcvArgs) -> Result<()> {
                     *per_venue.entry("kraken_futures").or_insert(0) += rows.len();
                     all_rows.extend(rows);
                 }
-                Err(e) => tracing::warn!(symbol = %exchange_symbol, error = %e, "kraken_futures ohlcv skipped"),
+                Err(e) => {
+                    tracing::warn!(symbol = %exchange_symbol, error = %e, "kraken_futures ohlcv skipped")
+                }
             }
             if cfg.rate_limit_delay > Duration::ZERO {
                 tokio::time::sleep(cfg.rate_limit_delay).await;
             }
         }
-        tracing::info!(venue = "kraken_futures", rows = per_venue.get("kraken_futures").copied().unwrap_or(0), "decoded");
+        tracing::info!(
+            venue = "kraken_futures",
+            rows = per_venue.get("kraken_futures").copied().unwrap_or(0),
+            "decoded"
+        );
     }
 
     if !args.no_gate {
@@ -449,7 +536,11 @@ pub async fn run_ohlcv(args: OhlcvArgs) -> Result<()> {
                 }
             }
         }
-        tracing::info!(venue = "gate", rows = per_venue.get("gate").copied().unwrap_or(0), "decoded");
+        tracing::info!(
+            venue = "gate",
+            rows = per_venue.get("gate").copied().unwrap_or(0),
+            "decoded"
+        );
     }
 
     if !args.no_okx {
@@ -466,7 +557,11 @@ pub async fn run_ohlcv(args: OhlcvArgs) -> Result<()> {
                 tokio::time::sleep(cfg.rate_limit_delay).await;
             }
         }
-        tracing::info!(venue = "okx", rows = per_venue.get("okx").copied().unwrap_or(0), "decoded");
+        tracing::info!(
+            venue = "okx",
+            rows = per_venue.get("okx").copied().unwrap_or(0),
+            "decoded"
+        );
     }
 
     if !args.no_coinbase_intl {
@@ -487,13 +582,19 @@ pub async fn run_ohlcv(args: OhlcvArgs) -> Result<()> {
                     *per_venue.entry("coinbase_intl").or_insert(0) += rows.len();
                     all_rows.extend(rows);
                 }
-                Err(e) => tracing::warn!(symbol = %exchange_symbol, error = %e, "coinbase_intl ohlcv skipped"),
+                Err(e) => {
+                    tracing::warn!(symbol = %exchange_symbol, error = %e, "coinbase_intl ohlcv skipped")
+                }
             }
             if cfg.rate_limit_delay > Duration::ZERO {
                 tokio::time::sleep(cfg.rate_limit_delay).await;
             }
         }
-        tracing::info!(venue = "coinbase_intl", rows = per_venue.get("coinbase_intl").copied().unwrap_or(0), "decoded");
+        tracing::info!(
+            venue = "coinbase_intl",
+            rows = per_venue.get("coinbase_intl").copied().unwrap_or(0),
+            "decoded"
+        );
     }
 
     if !args.no_bitget {
@@ -510,20 +611,18 @@ pub async fn run_ohlcv(args: OhlcvArgs) -> Result<()> {
                 tokio::time::sleep(cfg.rate_limit_delay).await;
             }
         }
-        tracing::info!(venue = "bitget", rows = per_venue.get("bitget").copied().unwrap_or(0), "decoded");
+        tracing::info!(
+            venue = "bitget",
+            rows = per_venue.get("bitget").copied().unwrap_or(0),
+            "decoded"
+        );
     }
 
     if !args.no_kucoin_futures {
         for u in &underliers_upper {
             let sym = format!("{u}USDTM");
             match kucoin_futures::fetch_ohlcv(
-                &client,
-                &cfg,
-                &sym,
-                u,
-                from_unix,
-                fetched_at,
-                fetched_at,
+                &client, &cfg, &sym, u, from_unix, fetched_at, fetched_at,
             )
             .await
             {
@@ -537,7 +636,11 @@ pub async fn run_ohlcv(args: OhlcvArgs) -> Result<()> {
                 tokio::time::sleep(cfg.rate_limit_delay).await;
             }
         }
-        tracing::info!(venue = "kucoin_futures", rows = per_venue.get("kucoin_futures").copied().unwrap_or(0), "decoded");
+        tracing::info!(
+            venue = "kucoin_futures",
+            rows = per_venue.get("kucoin_futures").copied().unwrap_or(0),
+            "decoded"
+        );
     }
 
     if !args.no_htx {
@@ -546,16 +649,8 @@ pub async fn run_ohlcv(args: OhlcvArgs) -> Result<()> {
                 (format!("{u}X-USDT"), "xstock_backed"),
                 (format!("{u}-USDT"), "synthetic"),
             ] {
-                match htx::fetch_ohlcv(
-                    &client,
-                    &cfg,
-                    &sym,
-                    u,
-                    backing,
-                    args.gate_limit,
-                    fetched_at,
-                )
-                .await
+                match htx::fetch_ohlcv(&client, &cfg, &sym, u, backing, args.gate_limit, fetched_at)
+                    .await
                 {
                     Ok(rows) if !rows.is_empty() => {
                         *per_venue.entry("htx").or_insert(0) += rows.len();
@@ -568,7 +663,11 @@ pub async fn run_ohlcv(args: OhlcvArgs) -> Result<()> {
                 }
             }
         }
-        tracing::info!(venue = "htx", rows = per_venue.get("htx").copied().unwrap_or(0), "decoded");
+        tracing::info!(
+            venue = "htx",
+            rows = per_venue.get("htx").copied().unwrap_or(0),
+            "decoded"
+        );
     }
 
     if !args.no_bingx {
@@ -599,7 +698,11 @@ pub async fn run_ohlcv(args: OhlcvArgs) -> Result<()> {
                 }
             }
         }
-        tracing::info!(venue = "bingx", rows = per_venue.get("bingx").copied().unwrap_or(0), "decoded");
+        tracing::info!(
+            venue = "bingx",
+            rows = per_venue.get("bingx").copied().unwrap_or(0),
+            "decoded"
+        );
     }
 
     if !args.no_mexc {
@@ -616,13 +719,18 @@ pub async fn run_ohlcv(args: OhlcvArgs) -> Result<()> {
                 tokio::time::sleep(cfg.rate_limit_delay).await;
             }
         }
-        tracing::info!(venue = "mexc", rows = per_venue.get("mexc").copied().unwrap_or(0), "decoded");
+        tracing::info!(
+            venue = "mexc",
+            rows = per_venue.get("mexc").copied().unwrap_or(0),
+            "decoded"
+        );
     }
 
     if !args.no_crypto_com {
         for u in &underliers_upper {
             let sym = format!("{u}USD-PERP");
-            match crypto_com::fetch_ohlcv(&client, &cfg, &sym, u, args.gate_limit, fetched_at).await {
+            match crypto_com::fetch_ohlcv(&client, &cfg, &sym, u, args.gate_limit, fetched_at).await
+            {
                 Ok(rows) => {
                     *per_venue.entry("crypto_com").or_insert(0) += rows.len();
                     all_rows.extend(rows);
@@ -633,7 +741,11 @@ pub async fn run_ohlcv(args: OhlcvArgs) -> Result<()> {
                 tokio::time::sleep(cfg.rate_limit_delay).await;
             }
         }
-        tracing::info!(venue = "crypto_com", rows = per_venue.get("crypto_com").copied().unwrap_or(0), "decoded");
+        tracing::info!(
+            venue = "crypto_com",
+            rows = per_venue.get("crypto_com").copied().unwrap_or(0),
+            "decoded"
+        );
     }
 
     if all_rows.is_empty() {
@@ -643,7 +755,10 @@ pub async fn run_ohlcv(args: OhlcvArgs) -> Result<()> {
 
     let mut by_underlier: BTreeMap<String, Vec<OhlcvBar>> = BTreeMap::new();
     for r in all_rows {
-        by_underlier.entry(r.underlier_symbol.clone()).or_default().push(r);
+        by_underlier
+            .entry(r.underlier_symbol.clone())
+            .or_default()
+            .push(r);
     }
     let ds = Dataset::new(&args.dataset);
     let mut total_added = 0usize;
@@ -684,7 +799,11 @@ pub struct BackfillArgs {
     #[arg(long, default_value = "kraken_futures")]
     venue: String,
     /// Comma-separated canonical underlier symbols.
-    #[arg(long, value_delimiter = ',', default_value = "SPY,QQQ,AAPL,GOOGL,NVDA,TSLA,HOOD,MSTR,GLD")]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "SPY,QQQ,AAPL,GOOGL,NVDA,TSLA,HOOD,MSTR,GLD"
+    )]
     underliers: Vec<String>,
     /// Window start (`YYYY-MM-DD` UTC).
     #[arg(long)]
@@ -736,8 +855,7 @@ pub async fn run_backfill(args: BackfillArgs) -> Result<()> {
     let client = build_client(&cfg).context("building reqwest client")?;
     let now = Utc::now();
     let fetched_at = now.timestamp();
-    let underliers_upper: Vec<String> =
-        args.underliers.iter().map(|s| s.to_uppercase()).collect();
+    let underliers_upper: Vec<String> = args.underliers.iter().map(|s| s.to_uppercase()).collect();
 
     let mut all_rows: Vec<OhlcvBar> = Vec::new();
     let mut per_underlier: BTreeMap<String, usize> = BTreeMap::new();
@@ -793,7 +911,10 @@ pub async fn run_backfill(args: BackfillArgs) -> Result<()> {
 
     let mut by_underlier: BTreeMap<String, Vec<OhlcvBar>> = BTreeMap::new();
     for r in all_rows {
-        by_underlier.entry(r.underlier_symbol.clone()).or_default().push(r);
+        by_underlier
+            .entry(r.underlier_symbol.clone())
+            .or_default()
+            .push(r);
     }
     let ds = Dataset::new(&args.dataset);
     let mut total_added = 0usize;

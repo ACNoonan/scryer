@@ -99,6 +99,9 @@ pub fn parse_ticker_response(
         open_interest: parse_str_f64(r.get("oi")),
         vol_24h: parse_str_f64(r.get("vv")),
         suspended: None,
+        capture_id: None,
+        capture_started_at_us: None,
+        available_at_us: None,
         meta: Meta::new(SCHEMA_VERSION, fetched_at, SOURCE_LABEL),
     }))
 }

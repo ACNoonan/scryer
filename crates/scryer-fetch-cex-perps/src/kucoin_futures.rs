@@ -100,6 +100,9 @@ pub fn parse_tickers_response(
             open_interest: entry.get("openInterest").and_then(|x| x.as_str()).and_then(|s| s.parse::<f64>().ok()),
             vol_24h: entry.get("volumeOf24h").and_then(|x| x.as_f64()),
             suspended: None,
+            capture_id: None,
+            capture_started_at_us: None,
+            available_at_us: None,
             meta: Meta::new(SCHEMA_VERSION, fetched_at, SOURCE_LABEL),
         });
     }

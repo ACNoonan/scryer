@@ -421,9 +421,12 @@ pub fn parse_tape_tick(
         funding_rate: None,
         funding_prediction: None,
         open_interest: None,
-        vol_24h,
-        suspended: None,
-        meta: scryer_schema::Meta::new(TAPE_SCHEMA_VERSION, fetched_at, TAPE_SOURCE_LABEL),
+            vol_24h,
+            suspended: None,
+            capture_id: None,
+            capture_started_at_us: None,
+            available_at_us: None,
+            meta: scryer_schema::Meta::new(TAPE_SCHEMA_VERSION, fetched_at, TAPE_SOURCE_LABEL),
     }))
 }
 

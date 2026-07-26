@@ -1,0 +1,26 @@
+id = "jupiter-route-quotes"
+description = "Executable fixed-notional Jupiter xStock route-quote ladder."
+schema_ids = ["solana.jupiter.route_quote.v2"]
+
+[fetch]
+command = "scry"
+args = [
+    "dexagg", "jupiter-quote-tape",
+    "--symbols", "SPYx,QQQx,AAPLx,GOOGLx,HOODx,MSTRx,NVDAx,TSLAx",
+    "--notionals-usdc", "100,1000,10000",
+]
+
+[retry]
+max_attempts = 1
+timeout_secs = 45
+
+[criticality]
+tier = "tier-1"
+owner = "@adam"
+consumer_impact = "Executable Solana route, capacity, and price surface for the Jupiter-versus-CEX forward basis test."
+
+[freshness]
+sla_secs = 180
+
+[workflow]
+sensor = "interval(60s)"

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adamnoonan.scryer.alpha-cex-bbo</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adamnoonan/.cache/cargo-target/debug/scryer-runner</string>
+        <string>tick</string>
+        <string>--only</string>
+        <string>cex-stock-perp-bbo</string>
+        <string>--manifests</string>
+        <string>/Users/adamnoonan/Documents/scryer/ops/sources</string>
+        <string>--dataset</string>
+        <string>/Users/adamnoonan/Library/Application Support/scryer/dataset</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/adamnoonan/Documents/scryer</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/alpha-cex-bbo.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adamnoonan/Library/Logs/scryer/alpha-cex-bbo.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/adamnoonan/.cache/cargo-target/debug:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+        <key>HOSTNAME</key>
+        <string>samachi-mac</string>
+    </dict>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>
