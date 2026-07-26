@@ -62,6 +62,9 @@ Compact index of locked architectural decisions. It keeps operational invariants
 | Blue Ocean ATS overnight 1m bars | 2026-05-10 | New `bo_intraday_1m.v1` schema via Databento `OCEA.MEMOIR`. Same arrow shape as `cme_intraday_1m.v1`; separate schema id keeps the venue + Sun-Thu 8 PM – 4 AM ET overnight schedule semantics distinct. Operator backfill covers 2025-08-25 (Databento's earliest) → cursor for the 10-symbol Soothsayer panel. ~$0.01 in credits per backfill. Pairs with Pyth Lazer forward tape for full overnight coverage. |
 | Yahoo corp-actions overnight backfill | 2026-05-25 | `yahoo_corp_actions.v1` (locked phase 61) is the ex-dividend source for soothsayer's overnight close→next-open calibration — without it an ex-div morning reads as a systematic down-gap, biasing the lower band. One-shot backfill landed for the 10 overnight-panel names (SPY/QQQ/AAPL/GOOGL/NVDA/TSLA/MSTR/HOOD/GLD/TLT) over full Yahoo history (SPY→1993, deeper than the 2014 floor needed). No new code; existing `scry equities corp-actions` + Yahoo chart `events=div|split` (UTC ex-date = correct date, spot-checked). Consumer column mapping (v1 names predate the request): `ex_date`=`event_date`, `cash_amount`=`dividend_amount`, `action_type`=`event_type` (`split` rows separable + excluded from the dividend adjustment). GLD + HOOD legitimately have zero rows (no distributions, no splits in window) — not a coverage gap. Backfill-only, no runner: corp-action history is static, so re-run `corp-actions` to extend rather than scheduling a feed. |
 | Earnings session timing (`earnings.v2`) | 2026-05-25 | `earnings.v2` adds `session` (closed enum `bmo`/`amc`/`dmh`/`unknown`, relative to `earnings_date` in **US/Eastern**) + nullable `session_confirmed` (true once reported). Same `_dedup_key` as v1 (`earnings:{symbol}:{date}`) — timing is an attribute, not identity. **Two upstreams by necessity:** Finnhub `/calendar/earnings` supplies forward `hour` (verified: free tier returns *zero* history), so the daily runner covers the forward window only; the one-shot `scry equities earnings-backfill` pulls deep history from Yahoo's `v1/finance/visualization` `earnings` entity (cookie+crumb gate, reuses the options-fetcher dance). Yahoo tags rows `TAS` not BMO/AMC, so session is **derived from the ET time-of-day** when the type is non-explicit (≥16:00→amc, <09:30→bmo, 00:00/12:00 placeholders→unknown). Cutover via `scry equities earnings-migrate` lifts v1 rows into v2 as `session=unknown`, relying on the store's existing-row-wins dedup so only uncovered dates are filled — **migration must run after backfill+runner**. v1 partitions stay frozen + readable. Coverage on land (6 Soothsayer names): 100% timed among reported earnings 2015+; pre-2015 has dates but unknown timing (Yahoo supplies no times that far back). |
+| CEX stock-perp decision-time observatory | 2026-07-25 | Extend `cex_stock_perp_tape.v1` append-only with nullable capture-cohort and local-availability microsecond timestamps. Poll venues concurrently; never represent sequential REST observations as simultaneous. Historical untimed rows remain valid for descriptive work but are ineligible for executable cross-venue tests. |
+| CLMM pool identity split out of pool state | 2026-07-26 | New `clmm_pool_registry.v1`, separate from `clmm_pool_state.v1` rather than added as columns to it. State is per-slot and must stay narrow — repeating two 44-char mints across 2.8M rows to carry immutable facts is the wrong shape. But omitting them entirely left the state tape unit-less and therefore unusable: without mint decimals, `liquidity` and `sqrt_price_x64` are raw integers no consumer can turn into a price. The registry is the join target that restores units. Kept as a **time series keyed `(pool, UTC day)`, not a static map**, because fee tier is governance-mutable (Whirlpool `set_fee_rate`; Raydium `trade_fee_rate` in a shared mutable `amm_config`) — consumers join as-of, never newest-row. Fee stored as parts-per-million unconverted, which is natively the same unit in both programs. Two RPC rounds because each program inlines half the fields and hides the other half; round 2 covers only the union of Whirlpool mints and Raydium configs. Anti-rule: do not fold these columns back into `clmm_pool_state.v1` — that would re-inflate the per-slot row for no gain and break the append-only guarantee. |
+| CEX stock-perp WebSocket BBO | 2026-07-25 | `cex.aggregate.stock_perp_bbo.v2` stores event-time + local-receive-time top-of-book updates from Kraken Futures, Bitget, and OKX. Sequence IDs are preserved where exposed; REST cohorts remain a separate schema. |
 
 ## Core Architecture
 
@@ -367,3 +370,64 @@ Add new decisions as short dated sections below this line. Keep old detail out o
   - Do not subscribe to all symbols in a single SubscribeRequest. The protocol response keys updates by `priceFeedId` only; without per-symbol subscription_id we cannot recover the human-readable symbol without a separate symbol-catalog API call.
   - Do not raise the channel cadence to `fixed_rate@50ms` or `real_time` without a methodology amendment — at the 26-feed default panel (3 crypto control + 10 equity underliers + 13 stable xStock `*X/USD`) `fixed_rate@200ms` already produces ~130 rows/sec sustained; `fixed_rate@50ms` would quadruple that and strain the 60s-cycle parquet write pattern. Higher cadences are research-grade, not steady-state.
   - macOS launchd `StartInterval=N` semantic is `(previous_job_exit + N seconds)`, not `(previous_job_start + N seconds)`. Empirically observed 2026-05-11: with `StartInterval=60` and per-fire wall-clock W, effective cadence is `(W + 60)`s, not 60s. To achieve a true 60s cadence on long-running fires, run the plist at a short `StartInterval` (10s for this manifest) and let the in-binary sensor `interval(60s)` enforce the manifest's actual fire cadence — most launchd ticks evaluate the sensor and `Hold` cheaply, with `skip-if-running` blocking the next few launchd ticks during an in-flight fire, then the first poll after the job exits passes both the running-check and the 60s-elapsed-check and fires. The shared multi-manifest `runner-tick.plist` already follows this pattern; per-manifest plists must too whenever their fire wall-clock approaches or exceeds half the manifest cadence. Companion budget: keep `--duration-secs ≤ 30` for the pyth-lazer manifest so total wall-clock (subscribe-drain + per-feed parquet merge-dedup, dominated by the 26-feed panel and end-of-UTC-day partition sizes) stays under ~45s, leaving ample skip-if-running headroom.
+
+### CEX Stock-Perp Decision-Time Observatory — 2026-07-25
+
+- Keep `cex_stock_perp_tape.v1`; this is an append-only nullable enrichment, not a semantic replacement of any existing column. Add `capture_id`, `capture_started_at_us`, and `available_at_us`. Old parquet remains readable with all three null.
+- `capture_id` groups one runner fire. `capture_started_at_us` is taken before any venue future begins. `available_at_us` is the local wall-clock immediately after the adapter has returned and parsed the row; it is the earliest instant the collector could have acted on that observation.
+- Venue adapters launch concurrently. Symbols within a venue may remain sequential where provider rate limits require it. A consumer must use the row-level `available_at_us`, not `ts`, to measure cross-venue skew.
+- REST is not an atomic market snapshot. The observatory calls a pair executable only after both rows were locally available and applies an explicit maximum-skew threshold. Rows lacking `capture_id` or `available_at_us` are descriptive-only and must not enter the executable crossed-book backtest.
+- `ts` and the existing dedup key remain unchanged for backward compatibility. New rows set `ts = floor(available_at_us / 1_000_000)` before storage; at the locked 60s cadence this remains unique per `(exchange, exchange_symbol)`.
+- Exchange-native event timestamps are not normalized in this phase because several venues do not expose one on the quote surface. `available_at_us` measures collector decision time, not quote age inside the matching engine. A streaming/WebSocket expansion requires a new methodology entry and should preserve both exchange-event and local-receive timestamps.
+- Initial decision rule belongs in the consumer: opposite-side top-of-book only, observed sizes required, explicit taker fees and slippage haircut, no use of mark/index/last as executable prices. This lock is about identifiable data, not a claim that crossed books are alpha.
+
+### CEX Stock-Perp WebSocket BBO — 2026-07-25
+
+- Schema id: `cex.aggregate.stock_perp_bbo.v2`; venue
+  `cex.aggregate`; path
+  `dataset/cex.aggregate/stock_perp_bbo/v2/underlier={SYM}/...`.
+  Source `aggregate` is intentional because one subscriber invocation
+  multiplexes multiple exchanges into a common row contract.
+- Initial venues are the minimum backed/synthetic triangle: Kraken Futures
+  (`book`, xStock-backed), Bitget (`ticker`, synthetic), and OKX (`bbo-tbt`,
+  synthetic). Adding venues is append-only when they satisfy the same row
+  semantics.
+- One row represents the complete actionable level-one book immediately
+  after an upstream message is applied. Kraken deltas are applied to a
+  sequence-checked local book before emitting. Bitget and OKX deliver BBO
+  snapshots directly.
+- Preserve both `event_timestamp_us` (exchange clock) and
+  `received_timestamp_us` (local clock), plus nullable `sequence_id`.
+  Consumers use local receive time for decision chronology and exchange time
+  for age/continuity diagnostics.
+- `session_id` identifies one WebSocket connection cycle. `update_kind` is a
+  closed producer vocabulary `snapshot|update`. Contract multiplier, tick
+  size, lot size, and trading state are nullable until an instrument-metadata
+  join is implemented; absence blocks capacity claims but not price/latency
+  diagnostics.
+- Cadence uses the existing cycling-fire model: connect, subscribe, drain for
+  a bounded duration, write parquet, exit. Reconnect gaps are explicit and
+  never forward-filled.
+- Dedup uses exchange, symbol, event timestamp, optional sequence, and BBO
+  value bits. It is stable for replayed upstream messages without pretending
+  messages lacking a sequence are globally ordered.
+
+### Jupiter Executable Route-Quote Tape — 2026-07-25
+
+- Schema id: `solana.jupiter.route_quote.v2`; venue/data type
+  `jupiter/route_quotes/v2`, partitioned by xStock symbol and UTC day.
+- Each quote group begins with a fixed-USDC `ExactIn` quote
+  (`$100,$1,000,$10,000` by default), then immediately quotes the exact
+  returned xStock amount back to USDC. This measures an executable
+  round-trip capacity curve, not a mid-price approximation.
+- Preserve raw integer `inAmount`, `outAmount`, and
+  `otherAmountThreshold` as strings; also preserve `swapMode`,
+  `slippageBps`, `priceImpactPct`, complete `routePlan` JSON,
+  `contextSlot`, and upstream `timeTaken`.
+- Stamp local request and availability microseconds on each leg. The legs are
+  sequential and must never be treated as atomic.
+- Dedup on quote-group ID plus leg index. Every fire receives a fresh capture
+  ID because Jupiter routes are ephemeral observations.
+- The initial SPYx/QQQx ladder is plumbing-only. It completed all six groups
+  and showed notional-dependent route splitting, but supports no frequency or
+  alpha claim.

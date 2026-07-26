@@ -1,0 +1,75 @@
+# Daily forward-poll for `bo_intraday_1m.v1` — Blue Ocean ATS overnight
+# 1-minute equity bars (Databento `OCEA.MEMOIR`) over the 10-symbol
+# panel. Sun-Thu 8 PM – 4 AM ET; there is no Friday or Saturday night
+# session, so UTC Sat/Sun partitions are legitimately absent and their
+# absence is not a coverage gap.
+#
+# Why this manifest exists (2026-07-26). Blue Ocean was operator-backfill
+# only — shipped 2026-05-10, never given a runner — and it simply stopped
+# at 2026-05-08 when nobody re-ran it. It went unnoticed for 79 days
+# because it had no manifest, and a source with no manifest is invisible
+# to the freshness watchdog (see wishlist item 58). Making it
+# runner-managed is the entire point of this file; the backfill that
+# recovered 2026-05-09 → 2026-07-24 (208,086 rows, 52 sessions) is a
+# one-time repair, not a pattern to repeat by hand.
+#
+# `--end-safety-margin-secs 111600` (31h). This is the tune that matters
+# and it is NOT the same as the GLBX/CME one. Measured 2026-07-26:
+# at 05:07Z the OCEA.MEMOIR published horizon was 2026-07-25T00:00:00Z,
+# i.e. `floor_day(now) - 1 day` — roughly T+29h and **day-granular**,
+# far behind GLBX.MDP3's ~8h delayed tier. Copying the cme-intraday-1m
+# value of 36000s (10h) fails outright with a 422 from the Databento
+# range API (observed, all 10 symbols). Paired with the `daily(07:00Z)`
+# sensor below, 31h puts `end` exactly at `(D-1)T00:00Z`, on the horizon
+# rather than past it. If the fire time moves, this margin must move
+# with it: the constraint is `fire_time - margin <= floor_day(fire) - 1d`.
+#
+# Fires at 07:00Z rather than cme-intraday-1m's 06:00Z purely to avoid
+# two Databento range batches landing in the same minute.
+#
+# `--lookback-days 4` re-covers the prior four days on every fire, so a
+# missed fire, a machine sleep, or a horizon that slips by a day all
+# self-heal on the next tick without operator action. Databento's range
+# API is idempotent and the store dedups on `(symbol, ts)`.
+#
+# Provider env: requires `DATABENTO_API_KEY` in the deployed
+# `~/Library/Application Support/scryer/.env`. `scry` resolves this via
+# `dotenvy` **relative to the working directory**, so any launchd job
+# running this must set `WorkingDirectory` to the scryer support dir —
+# pointing it elsewhere silently disables the key and the fetch reports
+# success while writing nothing.
+#
+# Cost: the 79-day, 10-symbol repair pull cost well under $0.01 against
+# the signup credit. A 4-day daily incremental is a small fraction of
+# that. Budget cap below is deliberately loose.
+
+id = "blue-ocean-intraday-1m"
+description = "Daily Databento OCEA.MEMOIR forward-poll for Blue Ocean ATS overnight 1m equity bars across the 10-symbol overnight panel. 4-day rolling lookback for dedup-safe self-healing."
+schema_ids = ["bo_intraday_1m.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "databento", "ocea1m",
+    "--lookback-days", "4",
+    "--end-safety-margin-secs", "111600",
+    "--source", "databento:ocea-memoir:runner",
+]
+
+[criticality]
+tier = "tier-2"
+owner = "@adam"
+consumer_impact = "Overnight cash-equity leg for quant-work branch A2 (factor-adjusted weekend residual), which needs it to separate xStock weekend moves confirmed by overnight equities from genuine residual. `cme/intraday_1m` covers the ES/NQ futures leg only and is not a substitute — different instrument. Tier-2 because A2 is currently shelved: stale here blocks a future re-open rather than a live consumer. It is precisely that 'nobody is watching it right now' status that let the source die unnoticed for 79 days, so it is manifested rather than left to manual re-runs."
+
+[freshness]
+# 25h ceiling: daily cadence + 1h grace, matching cme-intraday-1m.
+# Note this measures whether the FETCH RAN, not how recent the newest
+# row is — a known gap tracked as wishlist item 58.
+sla_secs = 90000
+
+[budget]
+# 10 symbols × 1 Databento range call each. Loose cap.
+max_requests_per_run = 40
+
+[workflow]
+sensor = "daily(07:00Z)"

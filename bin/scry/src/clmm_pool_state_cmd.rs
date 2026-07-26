@@ -152,7 +152,7 @@ pub async fn run_clmm_pool_state(args: ClmmPoolStateArgs) -> Result<()> {
     Ok(())
 }
 
-fn load_pools_from_file(path: &std::path::Path) -> Result<Vec<PoolTarget>> {
+pub(crate) fn load_pools_from_file(path: &std::path::Path) -> Result<Vec<PoolTarget>> {
     let body = std::fs::read_to_string(path)
         .with_context(|| format!("reading pools-file {}", path.display()))?;
     let mut out = Vec::new();
@@ -189,7 +189,7 @@ fn load_pools_from_file(path: &std::path::Path) -> Result<Vec<PoolTarget>> {
 /// Discover CLMM pools across the 8 xStock mints via GeckoTerminal,
 /// filter to Whirlpool + Raydium-CLMM, deduplicate, and apply the
 /// reserve / max-pool caps.
-async fn discover_clmm_pools(
+pub(crate) async fn discover_clmm_pools(
     client: &reqwest::Client,
     min_reserve_usd: f64,
     max_pools: usize,

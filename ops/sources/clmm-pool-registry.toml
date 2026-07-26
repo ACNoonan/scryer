@@ -1,0 +1,59 @@
+# Daily identity refresh for `clmm_pool_registry.v1` — the join target
+# that gives `clmm_pool_state.v1` units. Wishlist item 59.
+#
+# NOT YET DEPLOYED. The installed `bin/scry` predates the
+# `solana clmm-pool-registry` subcommand, so copying this into
+# `~/Library/Application Support/scryer/manifests/` before rebuilding
+# and installing `scry` would produce a manifest that fires and fails
+# every day. That is precisely the silent-rot failure mode item 58
+# exists to stop, so the file stays in the repo until the binary is
+# installed. Deploy = `cp` into the manifests dir; nothing else.
+#
+# Why daily for near-static data. Mints and decimals genuinely cannot
+# change for a live pool, but the fee tier can — Whirlpool exposes
+# `set_fee_rate` and Raydium's `trade_fee_rate` lives in a mutable
+# `amm_config` shared across pools. The schema is keyed
+# `(pool, UTC day)` for exactly that reason, so a daily fire is what
+# turns a governance change into a visible new row instead of letting
+# first-writer-wins dedup swallow it. Consumers join as-of.
+#
+# Cost of a fire is two `getMultipleAccounts` rounds — ~40 pool
+# accounts, then ~20 mint/config accounts — against the local proxy.
+# Re-running within a day is free: verified 0 added / 40 deduped.
+#
+# Pinned to the same `--pools-file` as `clmm-pool-state` so the two
+# cannot drift onto different pool sets. If that file is regenerated
+# (item 60 widens it to SOL/USDC and majors), both pick the change up
+# on their next fire with no manifest edit.
+
+id = "clmm-pool-registry"
+description = "Daily CLMM pool identity refresh — token mints, decimals, trade fee tier, tick spacing. The units join for clmm_pool_state.v1."
+schema_ids = ["clmm_pool_registry.v1"]
+
+[fetch]
+command = "scry"
+args = [
+    "solana", "clmm-pool-registry",
+    "--pools-file", "/Users/adamnoonan/Documents/scryer/ops/sources/data/clmm-pools.txt",
+    "--source", "rpc:getMultipleAccounts:clmm-pool-registry:runner",
+]
+
+[retry]
+max_attempts = 2
+timeout_secs = 120
+
+[criticality]
+tier = "tier-1"
+owner = "@adam"
+consumer_impact = "Without this, `clmm_pool_state.v1` is 2.8M rows of unit-less integers — `liquidity` and `sqrt_price_x64` cannot be turned into a price or a notional by any consumer. Blocking dependency for quant-work LVR-02, whose claim needs decimals to give `L` and `P` units and needs the mint pair to attach an external volatility reference. Stale here does not break a running collector; it means a newly-added pool has no identity and is silently unusable."
+
+[freshness]
+# 25h: daily cadence + 1h grace, matching the other daily manifests.
+sla_secs = 90000
+
+[budget]
+# Two rounds, chunked at the RPC cap of 100 pubkeys per call.
+max_requests_per_run = 10
+
+[workflow]
+sensor = "daily(08:00Z)"

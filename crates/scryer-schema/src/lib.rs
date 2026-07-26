@@ -24,9 +24,11 @@ pub mod backed_nav_strikes;
 pub mod bo_intraday_1m;
 pub mod cboe_indices;
 pub mod cex_perp_funding_multi;
+pub mod cex_stock_perp_bbo;
 pub mod cex_stock_perp_ohlcv;
 pub mod cex_stock_perp_tape;
 pub mod chainlink_data_streams;
+pub mod clmm_pool_registry;
 pub mod clmm_pool_state;
 pub mod cme_intraday_1m;
 pub mod dead_letter;
@@ -39,15 +41,16 @@ pub mod edgar_8k;
 pub mod error;
 pub mod evm_liquidation;
 pub mod fluid_vault_config;
-pub mod freshness_check;
 pub mod fred_macro;
 pub mod fred_macro_extended;
+pub mod freshness_check;
 pub mod geckoterminal;
 pub mod geckoterminal_ohlcv;
 pub mod jito_bundle_tape;
 pub mod jito_bundles;
 pub mod jito_tip_floor;
 pub mod jupiter_lend_liquidation;
+pub mod jupiter_route_quote;
 pub mod kamino_liquidation;
 pub mod kamino_obligation;
 pub mod kamino_obligation_position;
@@ -119,6 +122,7 @@ pub const KNOWN_V1_SCHEMAS: &[&str] = &[
     "jupiter_lend_liquidation.v1",
     "fluid_vault_config.v1",
     "dex_xstock_swaps.v1",
+    "clmm_pool_registry.v1",
     "clmm_pool_state.v1",
     "dlmm_pool_state.v1",
     "raydium_pool_metadata.v1",

@@ -17,6 +17,7 @@
 //! (`scryer-store`) handles partition layout + dedup at write time.
 
 pub mod chainlink;
+pub mod clmm_pool_registry;
 pub mod clmm_pool_state;
 pub mod dex_xstock_swaps;
 pub mod dlmm_pool_state;

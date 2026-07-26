@@ -710,6 +710,83 @@ its own thing further down; `clmm_pool_state.v1` and
 `dlmm_pool_state.v1` are the per-slot CLMM/DLMM tick/bin-state
 captures spec'd here.
 
+## clmm_pool_registry.v1
+
+**Status.** shipped 2026-07-26 (wishlist item 59). Code + canonical
+data: 40 rows across 2 `dex=` partitions on first fire.
+
+**Why.** `clmm_pool_state.v1` deliberately omits identity — at 60s
+cadence over 40 pools, repeating two 44-char mints per row would be
+millions of redundant copies. The consequence, found 2026-07-26, is
+that the 2.8M-row state tape is uninterpretable alone: without mint
+decimals, `liquidity` and `sqrt_price_x64` are raw integers with no
+units, so no consumer can derive a price or a notional. This is the
+join target that restores units. Blocking consumer: quant-work LVR-02.
+
+**Source.** `getMultipleAccounts` in two rounds over the proxy. Each
+program inlines half of what is needed and hides the other half:
+
+| | mints | decimals | tick spacing | trade fee |
+|---|---|---|---|---|
+| Raydium CLMM | pool | **pool** | pool | `amm_config` |
+| Orca Whirlpool | pool | SPL mint accts | pool | **pool** |
+
+Round 1 reads pool accounts; round 2 reads only the union of Whirlpool
+mints and Raydium `amm_config`s, and is skipped when that union is
+empty.
+
+**Grain and mutability.** One row per `(pool, UTC day)`, NOT one row
+per pool. Mints and decimals cannot change for a live pool, but the fee
+tier can: Whirlpool exposes `set_fee_rate`, and Raydium's
+`trade_fee_rate` lives in a mutable `amm_config` shared across pools.
+Daily grain makes a governance change visible instead of letting
+first-writer-wins dedup swallow it. **Consumers must join as-of their
+observation timestamp, not take the newest row.** Re-running within a
+UTC day is idempotent (verified: second fire = 0 added, 40 deduped).
+
+**Fee units.** `trade_fee_rate_ppm` is parts-per-million of notional,
+the native denominator for BOTH programs — Whirlpool's `fee_rate` is
+hundredths of a basis point and Raydium's `trade_fee_rate` is
+millionths, which are the same unit. 3000 ppm = 0.30%. Stored
+unconverted; consumers divide by 1e6. Nullable, because a failed
+`amm_config` read should degrade the row rather than drop it — mints
+plus decimals alone still give the state tape units.
+
+**Decode validation (2026-07-26).** Account offsets are hand-coded, so
+they were checked against live data rather than only unit tests: USDC
+resolves to `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` at 6
+decimals, wrapped SOL to `So11111111111111111111111111111111111111112`
+at 9, every xStock mint at 8. Fee tiers came back as canonical Orca and
+Raydium values, and tick spacing paired with fee tier exactly as the
+programs define it (Orca 2↔200, 4↔400, 16↔1600, 64↔3000, 128↔10000;
+Raydium 60↔2500, 120↔20000) — a relationship not encoded anywhere in
+the decoder. Joined against `clmm_pool_state.v1`, SPYx pools price at
+744.56–746.30 across their four fee tiers, monotone decreasing in fee,
+and agree with an independent Jupiter/CEX observation of 746.08 the
+same night.
+
+```
+pool_pubkey            string
+dex_program            string   orca_whirlpools | raydium_clmm
+token_mint_0           string
+token_mint_1           string
+token_decimals_0       i32
+token_decimals_1       i32
+trade_fee_rate_ppm     i64?     parts-per-million of notional
+tick_spacing           i32
+amm_config             string?  raydium only; provenance for the fee
+observed_at            i64      unix seconds, fetch time (accounts
+                                carry no timestamp)
+_schema_version        string
+_fetched_at            i64
+_source                string
+_dedup_key             string   clmm_pool_registry:{pool}:{utc_day}
+```
+
+**Partitioning.** `solana_dex/clmm_pool_registry/v1/dex={program}/year=Y/month=M/day=D.parquet`
+— parallel to `clmm_pool_state.v1` so the two join without a path
+translation.
+
 ## clmm_pool_state.v1
 
 **Status.** proposed — methodology entry locked
@@ -1681,7 +1758,17 @@ funding_prediction   f64 nullable
 open_interest        f64 nullable
 vol_24h              f64 nullable
 suspended            bool nullable
+capture_id           string nullable // one concurrent collector fire
+capture_started_at_us i64 nullable    // before venue futures launch
+available_at_us      i64 nullable     // locally available after parse
 ```
+
+The three capture-timing fields were appended 2026-07-25 for the
+decision-time observatory. Historical rows decode with nulls and remain
+descriptive-only. A cross-venue executable test must require non-null
+`capture_id` and `available_at_us`, join within one capture, and disclose
+its maximum accepted availability skew. `available_at_us` is a local
+collector timestamp, not an exchange-native event timestamp.
 
 **Dedup.** `_dedup_key = exchange + ':' + exchange_symbol + ':' + ts`.
 
@@ -1698,6 +1785,8 @@ SPY,QQQ,AAPL,GOOGL,NVDA,TSLA,HOOD,MSTR,GLD,TLT [--exchanges ...]
 [--cadence-secs 60]`.
 
 **Caveats.**
+- REST captures are concurrent cohorts, not atomic snapshots. `ts`
+  predates the observatory and is not sufficient evidence of simultaneity.
 - TLT is single-venue (Gate.io only).
 - xStock-backed vs synthetic is labelled from venue conventions, not
   empirically verified on-chain.
@@ -1706,6 +1795,106 @@ SPY,QQQ,AAPL,GOOGL,NVDA,TSLA,HOOD,MSTR,GLD,TLT [--exchanges ...]
   yet in schema; add only if the panel ages show a need.
 - NCSK-prefix BingX perps need a methodology entry to nail down the
   issuer.
+
+---
+
+## cex.aggregate.stock_perp_bbo.v2
+
+**Status.** code-shipped, canonical-data pending — Phase 129
+(2026-07-25). Concurrent WebSocket BBO tape for the minimum
+decision-time triangle: Kraken Futures backed xStock books plus Bitget
+and OKX synthetic books. Separate from the slower REST snapshot tape.
+
+```
+exchange               string
+exchange_symbol        string
+underlier_symbol       string
+backing_kind           string  // 'backed_xstock' | 'synthetic'
+session_id             string
+event_timestamp_us     i64
+received_timestamp_us  i64
+sequence_id            i64 nullable
+update_kind            string  // 'snapshot' | 'update'
+bid                     f64
+ask                     f64
+bid_size                f64
+ask_size                f64
+contract_multiplier     f64 nullable
+tick_size               f64 nullable
+lot_size                f64 nullable
+trading_state           string nullable
+```
+
+Kraken snapshots and deltas are applied to a local book before a row is
+emitted. Bitget ticker and OKX `bbo-tbt` messages are complete BBO
+snapshots. `event_timestamp_us` is exchange-native;
+`received_timestamp_us` is stamped locally after frame receipt. Clock
+offset therefore remains visible and can make raw transit estimates
+negative.
+
+**Dedup.** Exchange + raw symbol + event timestamp + nullable sequence
+ID + exact BBO price/size bits. This preserves distinct within-timestamp
+book states without manufacturing an ordering field where upstream has
+none.
+
+**Storage.** `dataset/cex.aggregate/stock_perp_bbo/v2/
+underlier={SYM}/year=Y/month=M/day=D.parquet`.
+
+**CLI.** `scry cex-stock-perp ws-bbo --underliers SPY,QQQ
+--duration-secs 30`.
+
+**Validation fire.** An isolated 15-second SPY/QQQ capture wrote 220
+valid rows: Bitget 120, Kraken Futures 88, OKX 12. No crossed, zero-price,
+or zero-size books. The sample is transport validation only, not an
+economic result: Kraken SPY emitted one row while Kraken QQQ emitted 87,
+and synthetic feeds largely repeated tight snapshots.
+
+---
+
+## solana.jupiter.route_quote.v2
+
+**Status.** code-shipped, canonical-data pending — Phase 130
+(2026-07-25). Executable Jupiter fixed-notional route ladder for xStocks.
+
+```
+capture_id             string
+quote_group_id         string
+symbol                 string
+leg_index              u32
+side                   string
+notional_usdc          f64
+input_mint             string
+output_mint            string
+in_amount              string
+out_amount             string
+other_amount_threshold string
+swap_mode              string
+slippage_bps           u32
+price_impact_pct       f64
+route_plan_json        string
+context_slot           u64 nullable
+upstream_time_taken_s  f64 nullable
+requested_at_us        i64
+available_at_us        i64
+```
+
+Leg zero spends the fixed USDC notional; leg one sells the exact xStock
+amount returned by leg zero. Raw integer amounts remain strings to avoid
+precision loss.
+
+**Dedup.** `quote_group_id + leg_index`.
+
+**Storage.** `dataset/jupiter/route_quotes/v2/symbol={SYM}/year=Y/
+month=M/day=D.parquet`.
+
+**CLI.** `scry dexagg jupiter-quote-tape --symbols SPYx,QQQx
+--notionals-usdc 100,1000,10000`.
+
+**Validation fire.** Twelve rows / six complete groups, no errors.
+Observed buy-to-sell round-trip loss was 2.02/5.27/18.39 bps for SPYx
+and 10.37/19.62/36.14 bps for QQQx at $100/$1k/$10k. Both $10k routes
+used three legs in each direction; smaller routes used one. One fire is
+transport validation, not a distributional result.
 
 ---
 

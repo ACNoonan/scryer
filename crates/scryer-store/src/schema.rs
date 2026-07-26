@@ -22,15 +22,19 @@
 use arrow_array::RecordBatch;
 use arrow_schema::ArrowError;
 use scryer_schema::{
-    backed, backed_nav_strikes, bo_intraday_1m, cboe_indices, cex_perp_funding_multi, cex_stock_perp_ohlcv, cex_stock_perp_tape, chainlink_data_streams, clmm_pool_state, cme_intraday_1m, dead_letter, deribit_iv, dex_xstock_swaps, dlmm_pool_state, drift_liquidation, earnings, edgar_8k, evm_liquidation, fluid_vault_config, freshness_check, fred_macro, fred_macro_extended, geckoterminal, geckoterminal_ohlcv,
-    jito_bundle_tape, jito_bundles, jito_tip_floor, jupiter_lend_liquidation,
-    kamino_liquidation, kamino_obligation,
-    kamino_obligation_position, kamino_reserve, kamino_scope, kraken_funding, loopscale_loan,
-    loopscale_loan_collateral, mango_v4_liquidation, mango_v4_oracle_config, marginfi_liquidation, marginfi_reserve,
-    nasdaq_halts, nasdaq_halts_intraday,
-    oracle_context, oracle_pyth_lazer_tape, oracle_soothsayer_v6_band_tape,
-    pool_snapshot, pyth, pyth_poster_post, pyth_poster_tx, pyth_publisher,
-    raydium_pool_metadata, redstone, single_stock_iv, solana_priority_fees, swap, trade, v5_tape, validator_client, workflow_run, workflow_run_summary, xstock_holders, yahoo, yahoo_corp_actions, FromArrowError,
+    backed, backed_nav_strikes, bo_intraday_1m, cboe_indices, cex_perp_funding_multi,
+    cex_stock_perp_bbo, cex_stock_perp_ohlcv, cex_stock_perp_tape, chainlink_data_streams,
+    clmm_pool_registry, clmm_pool_state, cme_intraday_1m, dead_letter, deribit_iv, dex_xstock_swaps, dlmm_pool_state,
+    drift_liquidation, earnings, edgar_8k, evm_liquidation, fluid_vault_config, fred_macro,
+    fred_macro_extended, freshness_check, geckoterminal, geckoterminal_ohlcv, jito_bundle_tape,
+    jito_bundles, jito_tip_floor, jupiter_lend_liquidation, jupiter_route_quote,
+    kamino_liquidation, kamino_obligation, kamino_obligation_position, kamino_reserve,
+    kamino_scope, kraken_funding, loopscale_loan, loopscale_loan_collateral, mango_v4_liquidation,
+    mango_v4_oracle_config, marginfi_liquidation, marginfi_reserve, nasdaq_halts,
+    nasdaq_halts_intraday, oracle_context, oracle_pyth_lazer_tape, oracle_soothsayer_v6_band_tape,
+    pool_snapshot, pyth, pyth_poster_post, pyth_poster_tx, pyth_publisher, raydium_pool_metadata,
+    redstone, single_stock_iv, solana_priority_fees, swap, trade, v5_tape, validator_client,
+    workflow_run, workflow_run_summary, xstock_holders, yahoo, yahoo_corp_actions, FromArrowError,
 };
 
 /// Time granularity of a dataset's partitioning. Each schema picks
@@ -410,6 +414,30 @@ impl DatasetSchema for jito_bundle_tape::v1::BundleLanding {
     }
 }
 
+impl DatasetSchema for clmm_pool_registry::v1::PoolRegistry {
+    const DATA_TYPE: &'static str = "clmm_pool_registry";
+    /// Partition by `dex_program`, matching `clmm_pool_state.v1` so the
+    /// two sit under parallel paths and join without a path translation.
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("dex");
+    /// Daily, not yearly. The registry is near-static but its fee tier
+    /// is governance-mutable, so a day is the grain at which a change
+    /// becomes visible; see the schema module docs.
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.observed_at
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        clmm_pool_registry::v1::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        clmm_pool_registry::v1::from_record_batch(batch)
+    }
+}
+
 impl DatasetSchema for clmm_pool_state::v1::PoolState {
     const DATA_TYPE: &'static str = "clmm_pool_state";
     /// Partition by `dex_program` per the schema doc — Whirlpool and
@@ -589,6 +617,46 @@ impl DatasetSchema for cex_stock_perp_tape::v1::Tick {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         cex_stock_perp_tape::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for cex_stock_perp_bbo::v2::Row {
+    const DATA_TYPE: &'static str = "stock_perp_bbo";
+    const SCHEMA_MAJOR: u32 = 2;
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("underlier");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.received_timestamp_us.div_euclid(1_000_000)
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        cex_stock_perp_bbo::v2::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        cex_stock_perp_bbo::v2::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for jupiter_route_quote::v2::Row {
+    const DATA_TYPE: &'static str = "route_quotes";
+    const SCHEMA_MAJOR: u32 = 2;
+    const PARTITION_KEY_PREFIX: Option<&'static str> = Some("symbol");
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Daily;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.available_at_us.div_euclid(1_000_000)
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        jupiter_route_quote::v2::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        jupiter_route_quote::v2::from_record_batch(batch)
     }
 }
 

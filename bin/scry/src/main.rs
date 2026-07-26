@@ -20,11 +20,12 @@ mod analytics_cmd;
 mod backed_cmd;
 mod cboe_cmd;
 mod cex_funding_cmd;
-mod dataset_default;
 mod cex_stock_perp_cmd;
 mod chainlink_reports_cmd;
+mod clmm_pool_registry_cmd;
 mod clmm_pool_state_cmd;
 mod databento_cmd;
+mod dataset_default;
 mod deribit_cmd;
 mod dex_xstock_swaps_cmd;
 mod dexagg_cmd;
@@ -426,6 +427,9 @@ struct CexStockPerpCmd {
 
 #[derive(Subcommand, Debug)]
 enum CexStockPerpTarget {
+    /// Concurrent decision-time BBO capture from Kraken Futures,
+    /// Bitget, and OKX WebSocket feeds.
+    WsBbo(cex_stock_perp_cmd::WsBboArgs),
     /// Single-tick poll across the configured venues for the
     /// configured xStock underlier set. Schedule via launchd at
     /// the desired cadence (typical: 60s).
@@ -546,6 +550,8 @@ enum PythTarget {
 
 #[derive(Subcommand, Debug)]
 enum DexaggTarget {
+    /// Executable Jupiter two-leg route-quote ladder for fixed USDC notionals.
+    JupiterQuoteTape(dexagg_cmd::JupiterQuoteTapeArgs),
     /// GeckoTerminal pool-trades poll (free-tier returns latest ~300
     /// trades). Schedule via launchd / cron (typical: 15m). Idempotent
     /// — re-runs within the trade-coverage window dedup cleanly on
@@ -717,6 +723,8 @@ enum SolanaTarget {
     /// methodology phase 80. Pool set discovered live via
     /// GeckoTerminal unless `--pools-file` is provided.
     ClmmPoolState(clmm_pool_state_cmd::ClmmPoolStateArgs),
+    /// Near-static pool identity — mints, decimals, fee tier, tick spacing. Gives `clmm_pool_state.v1` units (wishlist 59)
+    ClmmPoolRegistry(clmm_pool_registry_cmd::ClmmPoolRegistryArgs),
     /// Single-tick Meteora DLMM pool-state poll for
     /// `dlmm_pool_state.v1`. Two-pass fetch: (1)
     /// `getMultipleAccounts(pools)` for each pool's `LbPair` →
@@ -803,15 +811,10 @@ async fn main() -> Result<()> {
             SolanaTarget::ChainlinkReports(a) => {
                 chainlink_reports_cmd::run_chainlink_reports(a).await
             }
-            SolanaTarget::ValidatorClient(a) => {
-                validator_client_cmd::run_validator_client(a).await
-            }
-            SolanaTarget::ClmmPoolState(a) => {
-                clmm_pool_state_cmd::run_clmm_pool_state(a).await
-            }
-            SolanaTarget::DlmmPoolState(a) => {
-                dlmm_pool_state_cmd::run_dlmm_pool_state(a).await
-            }
+            SolanaTarget::ValidatorClient(a) => validator_client_cmd::run_validator_client(a).await,
+            SolanaTarget::ClmmPoolState(a) => clmm_pool_state_cmd::run_clmm_pool_state(a).await,
+            SolanaTarget::ClmmPoolRegistry(a) => clmm_pool_registry_cmd::run_clmm_pool_registry(a).await,
+            SolanaTarget::DlmmPoolState(a) => dlmm_pool_state_cmd::run_dlmm_pool_state(a).await,
             SolanaTarget::SoothsayerBandTape(a) => {
                 soothsayer_band_tape_cmd::run_soothsayer_band_tape(a).await
             }
@@ -827,6 +830,7 @@ async fn main() -> Result<()> {
             PythLazerTarget::Subscribe(a) => pyth_lazer_cmd::run_subscribe_cmd(a).await,
         },
         Command::Dexagg(c) => match c.target {
+            DexaggTarget::JupiterQuoteTape(a) => dexagg_cmd::run_jupiter_quote_tape(a).await,
             DexaggTarget::GtTrades(a) => dexagg_cmd::run_gt_trades(a).await,
             DexaggTarget::RaydiumPoolMetadata(a) => dexagg_cmd::run_raydium_pool_metadata(a).await,
             DexaggTarget::GtOhlcv(a) => dexagg_cmd::run_gt_ohlcv(a).await,
@@ -873,6 +877,7 @@ async fn main() -> Result<()> {
             EquityOptionsTarget::IvSnapshot(a) => equity_options_cmd::run_iv_snapshot(a).await,
         },
         Command::CexStockPerp(c) => match c.target {
+            CexStockPerpTarget::WsBbo(a) => cex_stock_perp_cmd::run_ws_bbo(a).await,
             CexStockPerpTarget::Tape(a) => cex_stock_perp_cmd::run_tape(a).await,
             CexStockPerpTarget::Ohlcv(a) => cex_stock_perp_cmd::run_ohlcv(a).await,
             CexStockPerpTarget::Backfill(a) => cex_stock_perp_cmd::run_backfill(a).await,
