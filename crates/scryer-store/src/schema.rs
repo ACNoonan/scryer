@@ -43,6 +43,13 @@ use scryer_schema::{
 /// produces multi-GB files that strain memory at write/merge time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PartitionGranularity {
+    /// `year=YYYY/month=MM/day=DD/hour=HH.parquet`. Used by high-volume
+    /// tapes whose daily partition would exceed ~500 MiB, where the
+    /// store's read-modify-write cycle would otherwise rewrite a
+    /// multi-GB file on every tick. See the "High-Volume Tape Partition
+    /// Granularity" methodology entry (2026-08-03) for the ceiling and
+    /// the dedup-key precondition.
+    Hourly,
     /// `year=YYYY/month=MM/day=DD.parquet`. Used by event-stream data
     /// (swaps, trades, oracle tapes) where each day has 1k+ rows.
     Daily,
@@ -60,6 +67,7 @@ pub enum PartitionGranularity {
 /// segment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PartitionTime {
+    Hourly(crate::partition::UtcHour),
     Daily(crate::partition::UtcDay),
     Monthly { year: i32, month: u32 },
     Yearly(i32),
@@ -68,6 +76,7 @@ pub enum PartitionTime {
 impl PartitionTime {
     pub fn granularity(&self) -> PartitionGranularity {
         match self {
+            Self::Hourly(_) => PartitionGranularity::Hourly,
             Self::Daily(_) => PartitionGranularity::Daily,
             Self::Monthly { .. } => PartitionGranularity::Monthly,
             Self::Yearly(_) => PartitionGranularity::Yearly,
@@ -78,6 +87,12 @@ impl PartitionTime {
 impl From<crate::partition::UtcDay> for PartitionTime {
     fn from(d: crate::partition::UtcDay) -> Self {
         Self::Daily(d)
+    }
+}
+
+impl From<crate::partition::UtcHour> for PartitionTime {
+    fn from(h: crate::partition::UtcHour) -> Self {
+        Self::Hourly(h)
     }
 }
 
@@ -411,6 +426,26 @@ impl DatasetSchema for jito_bundle_tape::v1::BundleLanding {
     }
     fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
         jito_bundle_tape::v1::from_record_batch(batch)
+    }
+}
+
+impl DatasetSchema for jito_bundle_tape::v2::BundleLanding {
+    const DATA_TYPE: &'static str = "bundle_tape";
+    const SCHEMA_MAJOR: u32 = 2;
+    const PARTITION_KEY_PREFIX: Option<&'static str> = None;
+    const PARTITION_GRANULARITY: PartitionGranularity = PartitionGranularity::Hourly;
+
+    fn ts_unix_seconds(&self) -> i64 {
+        self.block_time
+    }
+    fn dedup_key(&self) -> String {
+        self.dedup_key()
+    }
+    fn to_record_batch(rows: &[Self]) -> Result<RecordBatch, ArrowError> {
+        jito_bundle_tape::v2::to_record_batch(rows)
+    }
+    fn from_record_batch(batch: &RecordBatch) -> Result<Vec<Self>, FromArrowError> {
+        jito_bundle_tape::v2::from_record_batch(batch)
     }
 }
 

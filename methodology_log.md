@@ -65,6 +65,7 @@ Compact index of locked architectural decisions. It keeps operational invariants
 | CEX stock-perp decision-time observatory | 2026-07-25 | Extend `cex_stock_perp_tape.v1` append-only with nullable capture-cohort and local-availability microsecond timestamps. Poll venues concurrently; never represent sequential REST observations as simultaneous. Historical untimed rows remain valid for descriptive work but are ineligible for executable cross-venue tests. |
 | CLMM pool identity split out of pool state | 2026-07-26 | New `clmm_pool_registry.v1`, separate from `clmm_pool_state.v1` rather than added as columns to it. State is per-slot and must stay narrow — repeating two 44-char mints across 2.8M rows to carry immutable facts is the wrong shape. But omitting them entirely left the state tape unit-less and therefore unusable: without mint decimals, `liquidity` and `sqrt_price_x64` are raw integers no consumer can turn into a price. The registry is the join target that restores units. Kept as a **time series keyed `(pool, UTC day)`, not a static map**, because fee tier is governance-mutable (Whirlpool `set_fee_rate`; Raydium `trade_fee_rate` in a shared mutable `amm_config`) — consumers join as-of, never newest-row. Fee stored as parts-per-million unconverted, which is natively the same unit in both programs. Two RPC rounds because each program inlines half the fields and hides the other half; round 2 covers only the union of Whirlpool mints and Raydium configs. Anti-rule: do not fold these columns back into `clmm_pool_state.v1` — that would re-inflate the per-slot row for no gain and break the append-only guarantee. |
 | CEX stock-perp WebSocket BBO | 2026-07-25 | `cex.aggregate.stock_perp_bbo.v2` stores event-time + local-receive-time top-of-book updates from Kraken Futures, Bitget, and OKX. Sequence IDs are preserved where exposed; REST cohorts remain a separate schema. |
+| High-volume tape partition granularity | 2026-08-03 | Daily partitions >~500 MiB move to an hourly leaf; granularity is fixed per `v<n>` root and changes only at a namespace-migration boundary. |
 
 ## Core Architecture
 
@@ -431,3 +432,58 @@ Add new decisions as short dated sections below this line. Keep old detail out o
 - The initial SPYx/QQQx ladder is plumbing-only. It completed all six groups
   and showed notional-dependent route splitting, but supports no frequency or
   alpha claim.
+
+### High-Volume Tape Partition Granularity — 2026-08-03
+
+- Amends "v2 Dataset Path Layout — 2026-05-02". A v2 schema MAY use an hourly
+  leaf, `dataset/<domain>.<source>/<record_type>/v<n>/year=Y/month=M/day=D/hour=H.parquet`,
+  when its steady-state daily partition would exceed ~500 MiB. Daily remains the
+  default and the only layout for every schema not named here.
+- Trigger, measured 2026-08-03 on `jito_bundle_tape.v1`: day partitions reach
+  2.2 GiB / 4.73M rows. Because `Dataset::write` is read-modify-write over the
+  whole partition, each fire rewrites the entire day file. Fire rate measured
+  from seven days of runner logs is **~410/day** (400–423), *not* the 1440 the
+  60s `StartInterval` implies — a 200-slot walk takes p50 151s / p90 268s, so
+  the timer is missed by 3–4x. That gives **~650 GiB/day of write
+  amplification**, ~240 TB/yr, a material fraction of a consumer NVMe's
+  600–1200 TBW rating for a single tape. Hourly cuts it ~16x to ~40 GiB/day.
+  Secondary cost: peak memory footprint of one RMW cycle is **7.79 GiB** (read →
+  `Vec<BundleLanding>` alone is 3.32 GiB resident; the Arrow `RecordBatch`
+  roughly doubles it), and CPU per fire is ~5.8s just to build the batch.
+  (An earlier draft of this entry stated ~1440 fires/day and ~2 TiB/day; that
+  extrapolated from the configured interval rather than the observed one.)
+- Granularity is a property of the partition path only. It does not change
+  `_dedup_key`, the column set, or `_schema_version`, and is therefore **not**
+  grounds for a `SCHEMA_MAJOR` bump on its own.
+- Hourly is safe for slot-keyed tapes specifically because the dedup key carries
+  the slot (`jito_bundle_tape:{slot}:{signature}`) and a slot maps to exactly one
+  instant — so two rows sharing a key can never fall in different hour
+  partitions. A schema whose dedup key is not time-derivable may not move to
+  hourly without re-checking this.
+- **Mixed granularity within one `v<n>/` root is prohibited.** Verified
+  2026-08-03: DuckDB rejects a mixed root outright with `Binder Error: Hive
+  partition mismatch`, and `union_by_name=true` does not rescue it. Each root
+  carries exactly one layout for its lifetime.
+- Consequently a granularity change lands only at a namespace-migration
+  boundary, following the `earnings.v1→v2` precedent: the new root is written
+  hourly, the old root stays frozen and readable, consumers union across the two.
+- First instance: `jito_bundle_tape.v1` (daily; frozen at cutover) →
+  `solana.jito.bundle_tape.v2` at
+  `dataset/solana.jito/bundle_tape/v2/year=Y/month=M/day=D/hour=H.parquet`.
+- Consumer notes:
+  - v1 roots expose hive columns `year`, `month` only — `day=DD.parquet` is a
+    filename, not a directory, so `day` is not and never was a queryable column
+    there. v2 hourly roots expose `year`, `month`, `day`.
+  - **No local consumer reads the jito tape**, so this cutover needs no consumer
+    change. Verified 2026-08-03: `soothsayer/scripts/check_scryer_freshness.py`
+    reads only `internal.scryer/workflow_run/v2` (manifests `equities-daily`,
+    `earnings`, `cme-intraday-1m`, `cboe-indices`); `ops/coverage_gap_detector.py`
+    scans only `soothsayer_v5/tape`, `pyth`, `kamino_scope`, `cex_stock_perp`,
+    `redstone`. The portal is layout-agnostic below `v{N}` (`WalkDir` +
+    `**/*.parquet`, one DuckDB glob per `(venue, data_type, version)` root).
+  - Both scripts are nonetheless landmines for any **future** hourly migration:
+    `check_scryer_freshness.py` constructs the daily leaf literally
+    (`day={:02d}.parquet`) and would silently report staleness rather than error
+    if its schema moved to hourly; `coverage_gap_detector.py` would survive, its
+    `year=/month=/day=` regex being unanchored. Check both before moving any
+    schema they do read.

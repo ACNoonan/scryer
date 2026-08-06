@@ -82,17 +82,65 @@ pub struct JitoBundleTapeArgs {
 
     #[arg(long, env = "SCRYER_DATASET", default_value_os_t = crate::dataset_default::default_dataset_root())]
     dataset: PathBuf,
-    #[arg(long, default_value = venue::JITO)]
-    venue: String,
+    /// Dataset venue. Defaults to `jito` (the frozen v1 daily root), or
+    /// `solana.jito` (the hourly v2 root) when `--emit-v2` is set.
+    #[arg(long)]
+    venue: Option<String>,
+
+    /// Write `solana.jito.bundle_tape.v2` rows into the hourly-
+    /// partitioned v2 root instead of the `jito_bundle_tape.v1` daily
+    /// root. Off by default so the live launchd tick keeps writing v1
+    /// until its plist opts in; dropping the flag is the rollback.
+    #[arg(long)]
+    emit_v2: bool,
+}
+
+/// Field-for-field lift of a v1 row into the v2 namespace. The two row
+/// shapes are identical by construction (see the `v2` module doc); the
+/// only difference is the `_schema_version` inside `meta`, which
+/// `fetch_window` already stamped from the `--emit-v2`-selected constant.
+fn lift_to_v2(r: &BundleLanding) -> jito_bundle_tape::v2::BundleLanding {
+    jito_bundle_tape::v2::BundleLanding {
+        slot: r.slot,
+        block_time: r.block_time,
+        bundle_id: r.bundle_id.clone(),
+        lead_tx_sig: r.lead_tx_sig.clone(),
+        tx_sigs: r.tx_sigs.clone(),
+        tip_lamports: r.tip_lamports,
+        tip_account: r.tip_account.clone(),
+        leader_pubkey: r.leader_pubkey.clone(),
+        meta: r.meta.clone(),
+    }
 }
 
 pub async fn run_jito_bundle_tape(args: JitoBundleTapeArgs) -> Result<()> {
+    let target_venue = args.venue.clone().unwrap_or_else(|| {
+        if args.emit_v2 {
+            venue::SOLANA_JITO.to_string()
+        } else {
+            venue::JITO.to_string()
+        }
+    });
+    // Hourly rows must never land under the v1 venue: its `v1/` root is
+    // daily, and a root holding both layouts is rejected outright by
+    // DuckDB with a hive-partition mismatch. See the "High-Volume Tape
+    // Partition Granularity — 2026-08-03" methodology entry.
+    if args.emit_v2 && target_venue == venue::JITO {
+        anyhow::bail!(
+            "--emit-v2 writes hourly partitions and must not target the `{}` venue, whose root is \
+             daily; a mixed daily/hourly root is unreadable. Use `{}` (the default under --emit-v2).",
+            venue::JITO,
+            venue::SOLANA_JITO,
+        );
+    }
+
     let now = Utc::now();
-    let meta = Meta::new(
-        jito_bundle_tape::v1::SCHEMA_VERSION,
-        now.timestamp(),
-        &args.source,
-    );
+    let schema_version = if args.emit_v2 {
+        jito_bundle_tape::v2::SCHEMA_VERSION
+    } else {
+        jito_bundle_tape::v1::SCHEMA_VERSION
+    };
+    let meta = Meta::new(schema_version, now.timestamp(), &args.source);
 
     let pf_cfg = PfCfg {
         request_timeout: Duration::from_secs(args.request_timeout_secs),
@@ -153,9 +201,14 @@ pub async fn run_jito_bundle_tape(args: JitoBundleTapeArgs) -> Result<()> {
     }
 
     let ds = Dataset::new(&args.dataset);
-    let stats = ds
-        .write::<BundleLanding>(&args.venue, None, &rows)
-        .context("Dataset::write")?;
+    let stats = if args.emit_v2 {
+        let v2_rows: Vec<jito_bundle_tape::v2::BundleLanding> =
+            rows.iter().map(lift_to_v2).collect();
+        ds.write::<jito_bundle_tape::v2::BundleLanding>(&target_venue, None, &v2_rows)
+    } else {
+        ds.write::<BundleLanding>(&target_venue, None, &rows)
+    }
+    .context("Dataset::write")?;
 
     let total_tip_lamports: i64 = rows.iter().map(|r| r.tip_lamports).sum();
     println!(

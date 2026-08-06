@@ -1,7 +1,8 @@
+use scryer_schema::jito_bundle_tape::v2 as jito_v2;
 use scryer_schema::swap::v1 as swap;
 use scryer_schema::trade::v1 as trade;
 use scryer_schema::Meta;
-use scryer_store::{venue, Dataset, UtcDay};
+use scryer_store::{venue, Dataset, UtcDay, UtcHour};
 
 const POOL: &str = "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2";
 const PAIR: &str = "XSOLZUSD";
@@ -116,6 +117,94 @@ fn write_swaps_dedup_preserves_existing_fetched_at() {
     assert_eq!(read.len(), 1);
     assert_eq!(read[0].meta.fetched_at, 1_000);
     assert_eq!(read[0].meta.source, "helius:parseTransactions");
+}
+
+// 2026-06-30T00:00:00Z and 2026-06-30T01:00:00Z — same UTC day, adjacent
+// hours. Chosen so a regression to daily granularity collapses the two
+// into one partition and fails loudly.
+const TS_HOUR_A: i64 = 1_782_777_600;
+const TS_HOUR_B: i64 = 1_782_781_200;
+
+fn jito_v2_row(slot: u64, lead_sig: &str, block_time: i64) -> jito_v2::BundleLanding {
+    jito_v2::BundleLanding {
+        slot,
+        block_time,
+        bundle_id: jito_v2::BundleLanding::synthesize_bundle_id(slot, lead_sig),
+        lead_tx_sig: lead_sig.to_string(),
+        tx_sigs: lead_sig.to_string(),
+        tip_lamports: 50_000,
+        tip_account: "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5".to_string(),
+        leader_pubkey: "LeaderPubkey1".to_string(),
+        meta: Meta::new(jito_v2::SCHEMA_VERSION, block_time, "jito:bundle-tape:runner"),
+    }
+}
+
+/// The whole point of the v2 cutover: two rows an hour apart inside one
+/// UTC day must land in two partitions, not one. Under the daily layout
+/// this returns `partitions_written == 1`, which is the ~16x write
+/// amplification the hourly granularity exists to remove.
+#[test]
+fn write_jito_v2_splits_across_utc_hours() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ds = Dataset::new(tmp.path());
+
+    let rows = vec![
+        jito_v2_row(415_581_004, "sigA", TS_HOUR_A),
+        jito_v2_row(415_590_000, "sigB", TS_HOUR_B),
+    ];
+    let stats = ds
+        .write::<jito_v2::BundleLanding>(venue::SOLANA_JITO, None, &rows)
+        .unwrap();
+    assert_eq!(stats.partitions_written, 2, "hourly rows must not share a partition");
+    assert_eq!(stats.rows_added, 2);
+
+    let hour_a = UtcHour::from_unix_seconds(TS_HOUR_A).unwrap();
+    let hour_b = UtcHour::from_unix_seconds(TS_HOUR_B).unwrap();
+    assert_eq!(hour_a.day, hour_b.day, "fixture must sit inside one UTC day");
+    assert_ne!(hour_a.hour, hour_b.hour);
+
+    let read_a = ds
+        .read::<jito_v2::BundleLanding>(venue::SOLANA_JITO, None, hour_a)
+        .unwrap();
+    let read_b = ds
+        .read::<jito_v2::BundleLanding>(venue::SOLANA_JITO, None, hour_b)
+        .unwrap();
+    assert_eq!(read_a.len(), 1);
+    assert_eq!(read_b.len(), 1);
+    assert_eq!(read_a[0].lead_tx_sig, "sigA");
+    assert_eq!(read_b[0].lead_tx_sig, "sigB");
+}
+
+/// The v2 root must be a *different directory* from the frozen v1 root.
+/// Sharing one would produce a mixed daily/hourly hive layout, which
+/// DuckDB refuses to read at all.
+#[test]
+fn jito_v2_writes_to_its_own_hourly_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ds = Dataset::new(tmp.path());
+    ds.write::<jito_v2::BundleLanding>(
+        venue::SOLANA_JITO,
+        None,
+        &[jito_v2_row(415_581_004, "sigA", TS_HOUR_A)],
+    )
+    .unwrap();
+
+    let expected = tmp
+        .path()
+        .join("solana.jito")
+        .join("bundle_tape")
+        .join("v2")
+        .join("year=2026")
+        .join("month=06")
+        .join("day=30")
+        .join("hour=00.parquet");
+    assert!(expected.exists(), "expected file at {}", expected.display());
+
+    // The frozen v1 root must be untouched by a v2 write.
+    assert!(
+        !tmp.path().join("jito").exists(),
+        "v2 write must not create anything under the v1 `jito` venue"
+    );
 }
 
 #[test]

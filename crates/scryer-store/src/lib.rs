@@ -48,7 +48,7 @@ use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
 pub use error::StoreError;
-pub use partition::UtcDay;
+pub use partition::{UtcDay, UtcHour};
 pub use schema::{DatasetSchema, PartitionGranularity, PartitionTime};
 
 /// Venue-string conventions for v0.1. Fetcher crates pass these to
@@ -161,6 +161,13 @@ pub mod venue {
     /// second cadence with Ed25519-signed payloads. Two surfaces, two
     /// venues, no co-mingling.
     pub const ORACLE_PYTH_LAZER: &str = "oracle.pyth_lazer";
+    /// v2-namespace venue for the hourly-partitioned bundle tape
+    /// (`solana.jito.bundle_tape.v2`). Distinct from the v1 [`JITO`]
+    /// venue, which keeps the frozen daily root — the two must never
+    /// share a `v{N}/` root, since a mixed daily/hourly layout is
+    /// unreadable to DuckDB. See the "High-Volume Tape Partition
+    /// Granularity — 2026-08-03" methodology entry.
+    pub const SOLANA_JITO: &str = "solana.jito";
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -298,6 +305,23 @@ fn partition_path_for<S: DatasetSchema>(
                 year,
             )
         }
+        (Some(prefix), Some(key), PartitionTime::Hourly(hour)) => {
+            // Keyed + Hourly: not yet used by any schema (the first
+            // hourly schema, solana.jito::bundle_tape, is event-stream).
+            // Kept so the dispatch stays total.
+            root.join(venue)
+                .join(S::DATA_TYPE)
+                .join(format!("v{}", S::SCHEMA_MAJOR))
+                .join(format!("{}={}", prefix, key))
+                .join(hour.relative_parquet_path())
+        }
+        (None, _, PartitionTime::Hourly(hour)) => partition::partition_path_no_key_hourly(
+            root,
+            venue,
+            S::DATA_TYPE,
+            S::SCHEMA_MAJOR,
+            hour,
+        ),
         (None, _, PartitionTime::Daily(day)) => {
             partition::partition_path_no_key(root, venue, S::DATA_TYPE, S::SCHEMA_MAJOR, day)
         }
@@ -352,6 +376,14 @@ where
     for r in rows {
         let ts = get_ts(r);
         let pt = match S::PARTITION_GRANULARITY {
+            PartitionGranularity::Hourly => {
+                let hour = UtcHour::from_unix_seconds(ts).ok_or_else(|| {
+                    StoreError::Arrow(arrow_schema::ArrowError::ComputeError(format!(
+                        "timestamp {ts} (unix seconds) out of representable range for UTC hour"
+                    )))
+                })?;
+                PartitionTime::Hourly(hour)
+            }
             PartitionGranularity::Daily => {
                 let day = UtcDay::from_unix_seconds(ts).ok_or_else(|| {
                     StoreError::Arrow(arrow_schema::ArrowError::ComputeError(format!(
